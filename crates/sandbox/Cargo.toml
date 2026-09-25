@@ -1,0 +1,19 @@
+[package]
+name = "probelab-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Seeded grid-world environment and capability sandbox for ProbeLab"
+
+[dependencies]
+probelab-core = { path = "../core" }
+rand.workspace = true
+rand_chacha.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+probelab-agent = { path = "../agent" }
+probelab-model-adapters = { path = "../model-adapters" }
+serde_json.workspace = true

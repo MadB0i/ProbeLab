@@ -1,0 +1,15 @@
+[package]
+name = "probelab-model-adapters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic model provider adapters for ProbeLab"
+
+[dependencies]
+probelab-core = { path = "../core" }
+rand.workspace = true
+rand_chacha.workspace = true
+serde.workspace = true
+serde_json.workspace = true

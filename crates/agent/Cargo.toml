@@ -1,0 +1,11 @@
+[package]
+name = "probelab-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider-backed model agent for ProbeLab"
+
+[dependencies]
+probelab-core = { path = "../core" }
