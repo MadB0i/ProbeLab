@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -39,9 +39,9 @@ impl Drop for TemporaryDatabase {
     }
 }
 
-fn remove_database_files(path: &PathBuf) {
+fn remove_database_files(path: &Path) {
     for candidate in [
-        path.clone(),
+        path.to_path_buf(),
         path.with_extension("sqlite-wal"),
         path.with_extension("sqlite-shm"),
     ] {

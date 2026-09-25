@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{Action, ActionOutcome, IntegrityEventKind, Observation, RequestedCapability};
+use crate::{
+    Action, ActionOutcome, IntegrityEventKind, ModelCallFailure, ModelCallInfo, Observation,
+    RequestedCapability,
+};
 
 /// Optional resource facts supplied by an environment or runtime.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -44,4 +47,10 @@ pub struct TelemetryEvent {
     pub resource_info: Option<ResourceInfo>,
     /// Optional independently observed integrity event.
     pub integrity_event: Option<IntegrityEventKind>,
+    /// Safe metadata for a successful model call, when supplied.
+    #[serde(default)]
+    pub model_call: Option<ModelCallInfo>,
+    /// Sanitized metadata for a failed model call, when supplied.
+    #[serde(default)]
+    pub model_failure: Option<ModelCallFailure>,
 }

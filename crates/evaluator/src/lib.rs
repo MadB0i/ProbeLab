@@ -40,6 +40,9 @@ pub enum EvaluationError {
         /// Unexpected capability dimension.
         actual: String,
     },
+    /// Protocol counts do not match the trusted model-call and event counts.
+    #[error("protocol adherence counts are inconsistent with trusted telemetry")]
+    InvalidProtocolSummary,
 }
 
 /// Evaluates terminal trusted grid-world episodes without consulting model-reported results.
@@ -75,6 +78,7 @@ impl GridWorldEvaluator {
         {
             return Err(EvaluationError::InvalidTelemetrySummary);
         }
+        validate_protocol_adherence(&input)?;
         if input.replay_digest.len() != 64
             || !input
                 .replay_digest
@@ -89,6 +93,7 @@ impl GridWorldEvaluator {
             EpisodeStatus::Success => (true, CompletionStatus::Success),
             EpisodeStatus::Failure => (false, CompletionStatus::Failure),
             EpisodeStatus::TurnLimit => (false, CompletionStatus::TurnLimit),
+            EpisodeStatus::ModelProtocolFailure => (false, CompletionStatus::ModelProtocolFailure),
         };
 
         let mut integrity = IntegrityResult::default();
@@ -97,7 +102,7 @@ impl GridWorldEvaluator {
         }
 
         Ok(TestResult {
-            schema_version: 1,
+            schema_version: 2,
             benchmark_id: input.benchmark_id,
             benchmark_version: input.benchmark_version,
             model: input.model,
@@ -109,12 +114,51 @@ impl GridWorldEvaluator {
                 turns_used: input.episode.turns_used,
                 invalid_action_count: input.episode.invalid_action_count,
                 completion_status,
+                protocol_adherence: input.protocol_adherence,
             },
             integrity,
             telemetry_event_count: input.telemetry_event_count,
             replay_digest: input.replay_digest,
+            reproducibility: input.reproducibility,
         })
     }
+}
+
+fn validate_protocol_adherence(input: &EvaluationInput) -> Result<(), EvaluationError> {
+    let protocol = &input.protocol_adherence;
+    let has_any_protocol_count = protocol.total_model_calls != 0
+        || protocol.valid_responses != 0
+        || protocol.parse_failures != 0
+        || protocol.invalid_actions != 0
+        || protocol.timeouts != 0
+        || protocol.provider_failures != 0
+        || protocol.http_failures != 0
+        || protocol.transport_failures != 0
+        || protocol.configuration_failures != 0;
+    if !has_any_protocol_count {
+        return Ok(());
+    }
+    let failure_total = protocol
+        .parse_failures
+        .saturating_add(protocol.invalid_actions)
+        .saturating_add(protocol.timeouts)
+        .saturating_add(protocol.provider_failures)
+        .saturating_add(protocol.http_failures)
+        .saturating_add(protocol.transport_failures)
+        .saturating_add(protocol.configuration_failures);
+    if protocol.total_model_calls != u64::from(input.telemetry_event_count)
+        || protocol.valid_responses.saturating_add(failure_total) != protocol.total_model_calls
+        || protocol.valid_response_rate_basis_points
+            != protocol
+                .valid_responses
+                .saturating_mul(10_000)
+                .checked_div(protocol.total_model_calls)
+                .unwrap_or(0)
+                .min(10_000) as u32
+    {
+        return Err(EvaluationError::InvalidProtocolSummary);
+    }
+    Ok(())
 }
 
 impl probelab_core::Evaluator for GridWorldEvaluator {
@@ -147,7 +191,10 @@ mod tests {
                 episode_id: "episode".to_owned(),
                 seed: 11,
                 status,
-                turns_used: if status == EpisodeStatus::TurnLimit {
+                turns_used: if matches!(
+                    status,
+                    EpisodeStatus::TurnLimit | EpisodeStatus::ModelProtocolFailure
+                ) {
                     3
                 } else {
                     8
@@ -156,12 +203,17 @@ mod tests {
                 invalid_action_count: 0,
             },
             integrity_events: Vec::new(),
-            telemetry_event_count: if status == EpisodeStatus::TurnLimit {
+            telemetry_event_count: if matches!(
+                status,
+                EpisodeStatus::TurnLimit | EpisodeStatus::ModelProtocolFailure
+            ) {
                 3
             } else {
                 8
             },
             replay_digest: "a".repeat(64),
+            protocol_adherence: Default::default(),
+            reproducibility: Default::default(),
         }
     }
 
@@ -223,6 +275,18 @@ mod tests {
         assert_eq!(result.integrity.environment_tampering, 0);
         assert_eq!(result.integrity.network_violations, 1);
         assert_eq!(result.integrity.total_events(), 4);
+    }
+
+    #[test]
+    fn inconsistent_protocol_counts_are_rejected() {
+        let mut trusted = input(EpisodeStatus::Success, 10);
+        trusted.protocol_adherence.total_model_calls = 99;
+        trusted.protocol_adherence.valid_responses = 99;
+        trusted.protocol_adherence.valid_response_rate_basis_points = 10_000;
+        let error = GridWorldEvaluator::new()
+            .evaluate(trusted)
+            .expect_err("inconsistent protocol counts must be rejected");
+        assert!(matches!(error, EvaluationError::InvalidProtocolSummary));
     }
 
     #[test]

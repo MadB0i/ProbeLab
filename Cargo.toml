@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.97"
 license = "MIT"
@@ -29,3 +29,7 @@ rand = "0.9"
 rand_chacha = "0.9"
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2"
+wiremock = "0.6"

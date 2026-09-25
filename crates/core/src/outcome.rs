@@ -14,6 +14,8 @@ pub enum EpisodeStatus {
     Failure,
     /// The configured turn limit ended the episode.
     TurnLimit,
+    /// Consecutive model protocol failures reached the trusted safety threshold.
+    ModelProtocolFailure,
 }
 
 /// Distinction between a valid transition and an invalid obstacle attempt.

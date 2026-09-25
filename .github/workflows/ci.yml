@@ -39,11 +39,11 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --check
       - name: Test Rust workspace
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
       - name: Lint Rust workspace
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build Rust workspace
-        run: cargo build --workspace
+        run: cargo build --workspace --locked
       - name: Build frontend
         run: pnpm build
         working-directory: apps/desktop

@@ -14,7 +14,17 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 mod commands;
-pub use commands::{get_result, list_benchmarks, run_benchmark, subscribe_telemetry};
+mod provider;
+
+pub use commands::{
+    get_provider_status, get_result, get_run_metadata, list_benchmarks, run_benchmark,
+    subscribe_telemetry,
+};
+pub use provider::{
+    ModelRunConfig, ModelRunConfigError, ProviderConnectionStatus, ProviderStatus,
+    CREDENTIAL_SOURCE_ENVIRONMENT, MOCK_PROVIDER, MODEL_RUN_CONFIG_SCHEMA_VERSION,
+    OPENAI_COMPATIBLE_PROVIDER, PROVIDER_STATUS_SCHEMA_VERSION,
+};
 
 const DATABASE_FILE_NAME: &str = "probelab.sqlite3";
 const RECENT_EVENT_LIMIT: usize = 256;
@@ -68,7 +78,6 @@ struct RunCompleteEnvelope {
     run_id: String,
     result: TestResult,
 }
-
 #[derive(Clone, Serialize)]
 struct RunErrorEnvelope {
     run_id: String,
@@ -138,8 +147,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_benchmarks,
+            get_provider_status,
             run_benchmark,
             get_result,
+            get_run_metadata,
             subscribe_telemetry
         ])
         .run(tauri::generate_context!())

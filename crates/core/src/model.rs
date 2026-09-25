@@ -16,6 +16,109 @@ pub struct ModelDescriptor {
     pub parameters: BTreeMap<String, serde_json::Value>,
 }
 
+/// Optional token counts reported by a model provider.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TokenUsage {
+    /// Tokens in the prompt, when reported.
+    pub prompt_tokens: Option<u64>,
+    /// Tokens in the completion, when reported.
+    pub completion_tokens: Option<u64>,
+    /// Total tokens used, when reported.
+    pub total_tokens: Option<u64>,
+}
+
+impl TokenUsage {
+    /// Adds optional call usage into this aggregate without overflowing.
+    pub fn add_assign(&mut self, other: &Self) {
+        self.prompt_tokens = add_optional(self.prompt_tokens, other.prompt_tokens);
+        self.completion_tokens = add_optional(self.completion_tokens, other.completion_tokens);
+        self.total_tokens = add_optional(self.total_tokens, other.total_tokens);
+    }
+}
+
+fn add_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+/// Safe metadata about one successful model call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ModelCallInfo {
+    /// Stable provider identifier.
+    pub provider: String,
+    /// Provider model identifier.
+    pub model: String,
+    /// Version of the prompt template used for the call.
+    pub prompt_template_version: String,
+    /// Provider request identifier, when supplied and safe to retain.
+    pub request_id: Option<String>,
+    /// Provider finish reason, when supplied.
+    pub finish_reason: Option<String>,
+    /// Provider token usage, when supplied.
+    pub usage: Option<TokenUsage>,
+    /// Configured request timeout in seconds, when supplied by the provider.
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    /// Elapsed request time in milliseconds.
+    pub elapsed_ms: u64,
+    /// Sanitized, bounded response text, when available.
+    pub response_text: Option<String>,
+}
+
+/// A typed category for a failed model call.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCallFailureKind {
+    /// The provider configuration or request setup is invalid.
+    Configuration,
+    /// The request exceeded its configured timeout.
+    Timeout,
+    /// The response could not be decoded as the expected response shape.
+    MalformedResponse,
+    /// The response did not contain usable content.
+    EmptyResponse,
+    /// The provider returned a non-success HTTP status.
+    HttpError,
+    /// The provider returned a provider-specific failure without a response body.
+    ProviderError,
+    /// The response contained an action outside the available vocabulary.
+    InvalidAction,
+    /// The transport disconnected or otherwise failed before a response.
+    TransportDisconnect,
+}
+
+/// A sanitized failure from one model call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, thiserror::Error)]
+#[error("{message}")]
+pub struct ModelCallFailure {
+    /// Stable failure category.
+    pub kind: ModelCallFailureKind,
+    /// Sanitized, human-readable failure description.
+    pub message: String,
+    /// Sanitized, bounded response text, when available.
+    pub response_text: Option<String>,
+    /// Provider token usage, when available.
+    pub usage: Option<TokenUsage>,
+    /// Elapsed request time in milliseconds, when available.
+    pub elapsed_ms: Option<u64>,
+}
+
+impl ModelCallFailure {
+    /// Creates a sanitized failure with no response metadata.
+    pub fn new(kind: ModelCallFailureKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            response_text: None,
+            usage: None,
+            elapsed_ms: None,
+        }
+    }
+}
+
 /// A capability request that is not executable in the grid-world sandbox.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "target")]
@@ -104,4 +207,13 @@ pub enum ModelDecision {
     GridAction(Action),
     /// Request a capability unavailable to the sandbox.
     Capability(RequestedCapability),
+}
+
+/// A model decision with optional safe provider-call metadata.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ModelResponse {
+    /// The model-selected decision.
+    pub decision: ModelDecision,
+    /// Metadata for the successful call, when available.
+    pub call: Option<ModelCallInfo>,
 }

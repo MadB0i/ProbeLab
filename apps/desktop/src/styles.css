@@ -38,12 +38,14 @@ body {
 }
 
 button,
-select {
+select,
+input {
   font: inherit;
 }
 
 button:focus-visible,
-select:focus-visible {
+select:focus-visible,
+input:focus-visible {
   outline: 2px solid var(--cyan);
   outline-offset: 3px;
 }
@@ -470,6 +472,94 @@ h2 {
   letter-spacing: 0.08em;
 }
 
+.connection-pill {
+  padding: 5px 8px;
+  border: 1px solid var(--line-strong);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+}
+
+.connection-pill.connected {
+  border-color: rgba(110, 231, 161, 0.4);
+  color: var(--green);
+  background: rgba(110, 231, 161, 0.07);
+}
+
+.connection-pill.not-configured {
+  border-color: rgba(243, 191, 115, 0.4);
+  color: var(--amber);
+  background: rgba(243, 191, 115, 0.07);
+}
+
+.connection-readout {
+  display: grid;
+  gap: 9px;
+  margin-bottom: 16px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  background: rgba(7, 12, 21, 0.28);
+}
+
+.connection-readout span,
+.provider-facts span,
+.exchange-facts span,
+.telemetry-summary span {
+  color: var(--faint);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 7px;
+  letter-spacing: 0.08em;
+}
+
+.connection-readout strong {
+  display: block;
+  margin-top: 6px;
+  color: var(--cyan);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+
+.connection-readout .field-description {
+  min-height: 0;
+  margin: 0;
+}
+
+.provider-facts,
+.exchange-facts,
+.telemetry-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.field-row {
+  display: grid;
+  grid-template-columns: 1fr 92px;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+input {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 0;
+  outline: 0;
+  background: #0b1220;
+  color: var(--text);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+}
+
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .model-orbit {
   display: grid;
   width: 44px;
@@ -574,6 +664,78 @@ select:disabled {
   background: #1a2637;
   color: var(--faint);
   cursor: not-allowed;
+}
+
+.run-button-secondary {
+  margin-top: 10px;
+  border-color: var(--violet);
+  background: transparent;
+  color: var(--violet);
+}
+
+.run-button-secondary:hover:not(:disabled) {
+  background: rgba(168, 140, 255, 0.12);
+  box-shadow: 0 0 24px rgba(168, 140, 255, 0.16);
+}
+
+.run-button-secondary:disabled {
+  border-color: var(--line-strong);
+  background: transparent;
+  color: var(--faint);
+}
+
+.run-hint {
+  min-height: 0;
+  margin: 11px 0 0;
+  color: var(--amber);
+  font-size: 10px;
+}
+
+.model-exchange {
+  display: grid;
+  gap: 9px;
+  margin-bottom: 14px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  background: rgba(7, 12, 21, 0.28);
+}
+
+.model-exchange-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--cyan-dim);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  letter-spacing: 0.1em;
+}
+
+.model-response {
+  max-height: 96px;
+  margin: 0;
+  overflow: auto;
+  color: var(--text);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.model-response.failure {
+  color: var(--red);
+}
+
+.model-failure-kind {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--amber);
+  font-size: 8px;
+  letter-spacing: 0.1em;
+}
+
+.telemetry-summary {
+  margin-top: 13px;
 }
 
 .button-arrow {
@@ -1002,6 +1164,41 @@ select:disabled {
   color: var(--faint);
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 7px;
+}
+
+.trace-panel {
+  display: grid;
+  gap: 1px;
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+
+.trace-heading,
+.trace-row {
+  display: grid;
+  grid-template-columns: 34px 1fr 1fr 52px;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 9px;
+  background: rgba(7, 12, 21, 0.72);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  letter-spacing: 0.06em;
+}
+
+.trace-heading {
+  color: var(--cyan-dim);
+  background: rgba(84, 229, 225, 0.06);
+}
+
+.trace-row {
+  color: var(--muted);
+}
+
+.trace-row span:last-child {
+  color: var(--text);
+  text-align: right;
 }
 
 .app-footer {

@@ -1,7 +1,10 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use crate::{
-    Action, BenchmarkSummary, Episode, EvaluationInput, IntegrityEventKind, ModelDecision,
-    ModelDescriptor, ModelRequest, Observation, PolicyDecision, RuntimeAuthorization, StepOutcome,
-    TelemetryEvent, TestResult,
+    Action, BenchmarkSummary, Episode, EvaluationInput, IntegrityEventKind, ModelCallFailure,
+    ModelCallFailureKind, ModelDecision, ModelDescriptor, ModelRequest, ModelResponse, Observation,
+    PolicyDecision, RuntimeAuthorization, StepOutcome, TelemetryEvent, TestResult,
 };
 
 /// Produces model decisions from observations without access to trusted infrastructure.
@@ -13,6 +16,19 @@ pub trait ModelProvider: Send {
     fn predict(&mut self, request: ModelRequest) -> Result<ModelDecision, String>;
 }
 
+/// A boxed future returned by an asynchronous model provider.
+pub type ModelProviderFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ModelResponse, ModelCallFailure>> + Send + 'a>>;
+
+/// An object-safe asynchronous model provider boundary.
+pub trait AsyncModelProvider: Send + Sync {
+    /// Returns the stable configuration used in final results.
+    fn descriptor(&self) -> ModelDescriptor;
+
+    /// Produces one response using only model-facing context.
+    fn predict(&self, request: ModelRequest) -> ModelProviderFuture<'_>;
+}
+
 /// Acts as the model-facing body and delegates decisions to its provider.
 pub trait Agent: Send {
     /// Returns the configured model description.
@@ -20,6 +36,21 @@ pub trait Agent: Send {
 
     /// Produces one model decision from the current observation.
     fn decide(&mut self, request: ModelRequest) -> Result<ModelDecision, String>;
+
+    /// Produces one model decision and any safe provider metadata available.
+    fn decide_with_metadata(
+        &mut self,
+        request: ModelRequest,
+    ) -> Result<ModelResponse, ModelCallFailure> {
+        self.decide(request)
+            .map(|decision| ModelResponse {
+                decision,
+                call: None,
+            })
+            .map_err(|_| {
+                ModelCallFailure::new(ModelCallFailureKind::ProviderError, "agent decision failed")
+            })
+    }
 }
 
 /// A controlled test world exposing observations and transitions only.
@@ -65,6 +96,9 @@ pub trait Sandbox: Send {
 
     /// Consumes one turn after policy denial without executing the requested capability.
     fn consume_denied_turn(&mut self, event: IntegrityEventKind) -> Result<StepOutcome, String>;
+
+    /// Consumes one turn for a model protocol failure without changing grid state.
+    fn consume_protocol_failure_turn(&mut self, terminate: bool) -> Result<StepOutcome, String>;
 
     /// Returns a trusted snapshot for evaluation and telemetry.
     fn episode(&self) -> Episode;

@@ -106,6 +106,26 @@ impl GridWorld {
         })
     }
 
+    fn consume_protocol_failure_turn(&mut self, terminate: bool) -> Result<StepOutcome, String> {
+        if self.status != EpisodeStatus::Running {
+            return Err(
+                "cannot consume a protocol-failure turn in a terminal grid world".to_owned(),
+            );
+        }
+        self.turns_used = self.turns_used.saturating_add(1);
+        self.status = if terminate {
+            EpisodeStatus::ModelProtocolFailure
+        } else if self.turns_used >= self.max_turns {
+            EpisodeStatus::TurnLimit
+        } else {
+            EpisodeStatus::Running
+        };
+        Ok(StepOutcome {
+            status: self.status,
+            action_outcome: None,
+        })
+    }
+
     fn step_kind(&self, action: Action) -> Option<Coordinate> {
         match action {
             Action::Up if self.position.y > 0 => Some(Coordinate {
@@ -288,6 +308,10 @@ impl probelab_core::Sandbox for GridWorldSandbox {
         _event: probelab_core::IntegrityEventKind,
     ) -> Result<StepOutcome, String> {
         self.world.consume_denied_turn()
+    }
+
+    fn consume_protocol_failure_turn(&mut self, terminate: bool) -> Result<StepOutcome, String> {
+        self.world.consume_protocol_failure_turn(terminate)
     }
 
     fn episode(&self) -> Episode {
@@ -562,6 +586,55 @@ mod tests {
         assert_eq!(after.total_reward, before.total_reward);
         assert_eq!(after.invalid_action_count, before.invalid_action_count);
         assert_eq!(after.status, EpisodeStatus::Running);
+    }
+
+    #[test]
+    fn protocol_failure_turn_consumes_budget_without_mutating_grid_or_counting_invalid() {
+        let mut sandbox = GridWorldSandbox::with_max_turns(123, 3).expect("valid sandbox");
+        let before = sandbox.episode();
+        let before_observation = sandbox.observation();
+        let step = sandbox
+            .consume_protocol_failure_turn(false)
+            .expect("consume protocol failure turn");
+        let after = sandbox.episode();
+        let after_observation = sandbox.observation();
+
+        assert!(step.action_outcome.is_none());
+        assert_eq!(step.status, EpisodeStatus::Running);
+        assert_eq!(after.turns_used, before.turns_used + 1);
+        assert_eq!(after.total_reward, before.total_reward);
+        assert_eq!(after.invalid_action_count, before.invalid_action_count);
+        assert_eq!(after_observation.position, before_observation.position);
+        assert_eq!(
+            after_observation.current_tile,
+            before_observation.current_tile
+        );
+        assert_eq!(after_observation.turn, before_observation.turn + 1);
+    }
+
+    #[test]
+    fn protocol_failure_termination_is_distinct_and_terminal() {
+        let mut sandbox = GridWorldSandbox::with_max_turns(123, 30).expect("valid sandbox");
+        let step = sandbox
+            .consume_protocol_failure_turn(true)
+            .expect("terminate for protocol failure");
+        assert!(step.action_outcome.is_none());
+        assert_eq!(step.status, EpisodeStatus::ModelProtocolFailure);
+        assert_eq!(
+            sandbox.episode().status,
+            EpisodeStatus::ModelProtocolFailure
+        );
+        assert!(sandbox.consume_protocol_failure_turn(false).is_err());
+    }
+
+    #[test]
+    fn nonterminating_protocol_failure_uses_turn_limit_at_normal_cap() {
+        let mut sandbox = GridWorldSandbox::with_max_turns(123, 1).expect("valid sandbox");
+        let step = sandbox
+            .consume_protocol_failure_turn(false)
+            .expect("consume final protocol failure turn");
+        assert_eq!(step.status, EpisodeStatus::TurnLimit);
+        assert!(step.action_outcome.is_none());
     }
 
     #[test]

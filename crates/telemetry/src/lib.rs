@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use probelab_core::{
-    Action, ActionOutcome, ActionResultKind, IntegrityEventKind, ModelRequest, Observation,
-    RequestedCapability, ResourceInfo, TelemetryEvent, TelemetryRecorder, TestResult,
+    Action, ActionOutcome, ActionResultKind, CompletedRun, IntegrityEventKind, ModelCallFailure,
+    ModelCallFailureKind, ModelCallInfo, ModelRequest, Observation, RequestedCapability,
+    ResourceInfo, RunMetadata, TelemetryEvent, TelemetryRecorder, TestResult,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,12 @@ pub struct NewTelemetryEvent {
     pub resource_info: Option<ResourceInfo>,
     /// Optional independently observed integrity event.
     pub integrity_event: Option<IntegrityEventKind>,
+    /// Safe metadata for a successful model call, when supplied.
+    #[serde(default)]
+    pub model_call: Option<ModelCallInfo>,
+    /// Sanitized metadata for a failed model call, when supplied.
+    #[serde(default)]
+    pub model_failure: Option<ModelCallFailure>,
 }
 
 /// A typed telemetry persistence or observation failure.
@@ -80,46 +87,69 @@ impl NewTelemetryEvent {
         }
         .validate()
         .map_err(TelemetryError::InvalidEvent)?;
+        if self.model_call.is_some() && self.model_failure.is_some() {
+            return Err(TelemetryError::InvalidEvent(
+                "a model call and model failure are mutually exclusive".to_owned(),
+            ));
+        }
         match (self.selected_action, &self.requested_capability) {
             (Some(action), None) => {
-                let outcome = self.action_outcome.as_ref().ok_or_else(|| {
-                    TelemetryError::InvalidEvent(
-                        "an executed action requires a trusted action outcome".to_owned(),
-                    )
-                })?;
-                if outcome.action != Some(action) || outcome.reward != self.reward {
-                    return Err(TelemetryError::InvalidEvent(
-                        "telemetry action and reward do not match the transition".to_owned(),
-                    ));
-                }
-                if self.invalid_action != (outcome.kind == ActionResultKind::Invalid) {
-                    return Err(TelemetryError::InvalidEvent(
-                        "invalid-action flag does not match the transition".to_owned(),
-                    ));
-                }
-                let transition_valid = match outcome.kind {
-                    ActionResultKind::Moved => {
-                        action != Action::Wait && outcome.position != self.observation.position
+                if self.model_failure.is_some() {
+                    if self.action_outcome.is_some()
+                        || self.reward != 0
+                        || self.invalid_action
+                        || self.integrity_event.is_some()
+                    {
+                        return Err(TelemetryError::InvalidEvent(
+                            "a rejected action cannot contain an environment or integrity outcome"
+                                .to_owned(),
+                        ));
                     }
-                    ActionResultKind::Waited => {
-                        action == Action::Wait && outcome.position == self.observation.position
+                } else {
+                    let outcome = self.action_outcome.as_ref().ok_or_else(|| {
+                        TelemetryError::InvalidEvent(
+                            "an executed action requires a trusted action outcome".to_owned(),
+                        )
+                    })?;
+                    if outcome.action != Some(action) || outcome.reward != self.reward {
+                        return Err(TelemetryError::InvalidEvent(
+                            "telemetry action and reward do not match the transition".to_owned(),
+                        ));
                     }
-                    ActionResultKind::Invalid => {
-                        action != Action::Wait && outcome.position == self.observation.position
+                    if self.invalid_action != (outcome.kind == ActionResultKind::Invalid) {
+                        return Err(TelemetryError::InvalidEvent(
+                            "invalid-action flag does not match the transition".to_owned(),
+                        ));
                     }
-                };
-                if !transition_valid {
-                    return Err(TelemetryError::InvalidEvent(
-                        "action kind and resulting position are inconsistent".to_owned(),
-                    ));
-                }
-                if self.integrity_event.is_some() {
-                    return Err(TelemetryError::InvalidEvent(
-                        "an authorized grid action cannot carry an integrity event".to_owned(),
-                    ));
+                    let transition_valid = match outcome.kind {
+                        ActionResultKind::Moved => {
+                            action != Action::Wait && outcome.position != self.observation.position
+                        }
+                        ActionResultKind::Waited => {
+                            action == Action::Wait && outcome.position == self.observation.position
+                        }
+                        ActionResultKind::Invalid => {
+                            action != Action::Wait && outcome.position == self.observation.position
+                        }
+                    };
+                    if !transition_valid {
+                        return Err(TelemetryError::InvalidEvent(
+                            "action kind and resulting position are inconsistent".to_owned(),
+                        ));
+                    }
+                    if self.integrity_event.is_some() {
+                        return Err(TelemetryError::InvalidEvent(
+                            "an authorized grid action cannot carry an integrity event".to_owned(),
+                        ));
+                    }
                 }
             }
             (None, Some(request)) => {
+                if self.model_failure.is_some() {
+                    return Err(TelemetryError::InvalidEvent(
+                        "a denied capability cannot carry a model failure".to_owned(),
+                    ));
+                }
                 if self.action_outcome.is_some()
                     || self.reward != 0
                     || self.invalid_action
@@ -138,9 +168,22 @@ impl NewTelemetryEvent {
                 ));
             }
             (None, None) => {
-                return Err(TelemetryError::InvalidEvent(
-                    "an event must contain exactly one decision kind".to_owned(),
-                ));
+                if self.model_failure.is_none() {
+                    return Err(TelemetryError::InvalidEvent(
+                        "an event must contain an executable decision or a model failure"
+                            .to_owned(),
+                    ));
+                }
+                if self.action_outcome.is_some()
+                    || self.reward != 0
+                    || self.invalid_action
+                    || self.integrity_event.is_some()
+                {
+                    return Err(TelemetryError::InvalidEvent(
+                        "a model-failure event cannot contain an action or integrity outcome"
+                            .to_owned(),
+                    ));
+                }
             }
         }
         if let Some(resource) = &self.resource_info {
@@ -149,7 +192,9 @@ impl NewTelemetryEvent {
                     "resource turn or timeout data does not match the event".to_owned(),
                 ));
             }
-            if (self.invalid_action || self.integrity_event.is_some())
+            if (self.invalid_action
+                || self.integrity_event.is_some()
+                || self.model_failure.is_some())
                 && resource.rejected_actions == 0
             {
                 return Err(TelemetryError::InvalidEvent(
@@ -182,6 +227,8 @@ impl NewTelemetryEvent {
             timeout: self.timeout,
             resource_info: self.resource_info,
             integrity_event: self.integrity_event,
+            model_call: self.model_call,
+            model_failure: self.model_failure,
         }
     }
 }
@@ -201,7 +248,45 @@ struct ReplayPayload<'a> {
     version: u8,
     episode_id: &'a str,
     sequence: u32,
-    event: &'a NewTelemetryEvent,
+    event: ReplayEvent<'a>,
+}
+
+#[derive(Serialize)]
+struct ReplayEvent<'a> {
+    turn: u32,
+    observation: &'a Observation,
+    selected_action: Option<Action>,
+    requested_capability: Option<&'a RequestedCapability>,
+    action_outcome: Option<&'a ActionOutcome>,
+    reward: i64,
+    invalid_action: bool,
+    timeout: bool,
+    resource_info: Option<&'a ResourceInfo>,
+    integrity_event: Option<IntegrityEventKind>,
+    model_failure_kind: Option<ModelCallFailureKind>,
+}
+
+impl<'a> ReplayPayload<'a> {
+    fn new(episode_id: &'a str, sequence: u32, input: &'a NewTelemetryEvent) -> Self {
+        Self {
+            version: 2,
+            episode_id,
+            sequence,
+            event: ReplayEvent {
+                turn: input.turn,
+                observation: &input.observation,
+                selected_action: input.selected_action,
+                requested_capability: input.requested_capability.as_ref(),
+                action_outcome: input.action_outcome.as_ref(),
+                reward: input.reward,
+                invalid_action: input.invalid_action,
+                timeout: input.timeout,
+                resource_info: input.resource_info.as_ref(),
+                integrity_event: input.integrity_event,
+                model_failure_kind: input.model_failure.as_ref().map(|failure| failure.kind),
+            },
+        }
+    }
 }
 
 /// A model-independent observer that assigns durable event metadata and replay state.
@@ -255,12 +340,8 @@ impl TelemetryObserver {
             .checked_add(1)
             .ok_or(TelemetryError::SequenceExhausted)?;
         let recorded_at_unix_ms = unix_milliseconds()?;
-        let replay_bytes = serde_json::to_vec(&ReplayPayload {
-            version: 1,
-            episode_id: &self.episode_id,
-            sequence,
-            event: &input,
-        })?;
+        let replay_bytes =
+            serde_json::to_vec(&ReplayPayload::new(&self.episode_id, sequence, &input))?;
         let event = input.into_event(
             &self.run_id,
             &self.episode_id,
@@ -469,6 +550,37 @@ impl SqliteResultRepository {
         Ok(())
     }
 
+    /// Stores one completed result and its durable execution metadata atomically.
+    pub fn store_completed(
+        &self,
+        run_id: impl AsRef<str>,
+        run: &CompletedRun,
+    ) -> Result<(), ResultRepositoryError> {
+        let run_id = run_id.as_ref();
+        let result_json = serde_json::to_string(&run.result)?;
+        let metadata_json = serde_json::to_string(&run.metadata)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| ResultRepositoryError::LockPoisoned)?;
+        let transaction = connection.transaction()?;
+        let inserted = transaction
+            .query_row(
+                "INSERT INTO results (run_id, result_json, metadata_json) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(run_id) DO NOTHING RETURNING run_id",
+                params![run_id, result_json, metadata_json],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if inserted.is_none() {
+            return Err(ResultRepositoryError::DuplicateRunId {
+                run_id: run_id.to_owned(),
+            });
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Gets the result stored for a run identifier, if one exists.
     pub fn get(
         &self,
@@ -486,6 +598,29 @@ impl SqliteResultRepository {
             )
             .optional()?;
         result_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    /// Gets immutable execution metadata stored for a run identifier, if present.
+    pub fn get_metadata(
+        &self,
+        run_id: impl AsRef<str>,
+    ) -> Result<Option<RunMetadata>, ResultRepositoryError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| ResultRepositoryError::LockPoisoned)?;
+        let metadata_json = connection
+            .query_row(
+                "SELECT metadata_json FROM results WHERE run_id = ?1",
+                params![run_id.as_ref()],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        metadata_json
             .map(|json| serde_json::from_str(&json))
             .transpose()
             .map_err(Into::into)
@@ -518,8 +653,10 @@ fn initialize_result_schema(connection: &Connection) -> Result<(), rusqlite::Err
         CREATE TABLE IF NOT EXISTS results (
             run_id TEXT PRIMARY KEY,
             result_json TEXT NOT NULL,
+            metadata_json TEXT,
             CHECK (length(run_id) > 0),
-            CHECK (json_valid(result_json))
+            CHECK (json_valid(result_json)),
+            CHECK (metadata_json IS NULL OR json_valid(metadata_json))
         );
         CREATE TRIGGER IF NOT EXISTS results_reject_update
         BEFORE UPDATE ON results
@@ -532,7 +669,21 @@ fn initialize_result_schema(connection: &Connection) -> Result<(), rusqlite::Err
             SELECT RAISE(ABORT, 'stored results are immutable');
         END;
         "#,
-    )
+    )?;
+    add_result_metadata_column(connection)
+}
+
+fn add_result_metadata_column(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let mut statement = connection.prepare("PRAGMA table_info(results)")?;
+    let has_metadata_column = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|column| column == "metadata_json");
+    if !has_metadata_column {
+        connection.execute_batch("ALTER TABLE results ADD COLUMN metadata_json TEXT")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -544,7 +695,8 @@ mod tests {
 
     use probelab_core::{
         Action, ActionOutcome, ActionResultKind, Coordinate, GridSize, IntegrityEventKind,
-        Observation, RequestedCapability, TileKind,
+        ModelCallFailure, ModelCallFailureKind, ModelCallInfo, Observation, RequestedCapability,
+        TileKind,
     };
     use rusqlite::Connection;
 
@@ -601,6 +753,8 @@ mod tests {
             timeout: false,
             resource_info: None,
             integrity_event: None,
+            model_call: None,
+            model_failure: None,
         }
     }
 
@@ -635,10 +789,12 @@ mod tests {
                 turns_used: 1,
                 invalid_action_count: 0,
                 completion_status: probelab_core::CompletionStatus::Success,
+                protocol_adherence: Default::default(),
             },
             integrity: Default::default(),
             telemetry_event_count: 1,
             replay_digest: "digest".to_owned(),
+            reproducibility: Default::default(),
         }
     }
 
@@ -733,6 +889,112 @@ mod tests {
         assert_eq!(first.replay_digest(), second.replay_digest());
     }
 
+    #[test]
+    fn replay_digest_excludes_volatile_model_call_metadata() {
+        let first_path = temporary_path("model-digest-first");
+        let second_path = temporary_path("model-digest-second");
+        let first = TelemetryObserver::from_recorder(
+            SqliteTelemetryRecorder::new(&first_path).expect("create first recorder"),
+            "run-one",
+            "episode",
+        );
+        let mut second = TelemetryObserver::from_recorder(
+            SqliteTelemetryRecorder::new(&second_path).expect("create second recorder"),
+            "run-two",
+            "episode",
+        );
+        let first_event = NewTelemetryEvent {
+            model_call: Some(ModelCallInfo {
+                provider: "provider".to_owned(),
+                model: "model".to_owned(),
+                prompt_template_version: "prompt-v1".to_owned(),
+                request_id: Some("request-one".to_owned()),
+                finish_reason: Some("stop".to_owned()),
+                usage: None,
+                timeout_seconds: Some(1),
+                elapsed_ms: 1,
+                response_text: Some("first response".to_owned()),
+            }),
+            ..new_event(1)
+        };
+        let second_event = NewTelemetryEvent {
+            model_call: Some(ModelCallInfo {
+                provider: "provider".to_owned(),
+                model: "model".to_owned(),
+                prompt_template_version: "prompt-v1".to_owned(),
+                request_id: Some("request-two".to_owned()),
+                finish_reason: Some("length".to_owned()),
+                usage: None,
+                timeout_seconds: Some(9),
+                elapsed_ms: 99,
+                response_text: Some("second response".to_owned()),
+            }),
+            ..new_event(1)
+        };
+        let first = {
+            let mut first = first;
+            first.record(first_event).expect("record first event");
+            first
+        };
+        second.record(second_event).expect("record second event");
+        assert_eq!(first.replay_digest(), second.replay_digest());
+    }
+
+    #[test]
+    fn model_failure_event_requires_no_decision_content() {
+        let valid = NewTelemetryEvent {
+            selected_action: None,
+            requested_capability: None,
+            action_outcome: None,
+            reward: 0,
+            invalid_action: false,
+            timeout: false,
+            resource_info: None,
+            integrity_event: None,
+            model_call: None,
+            model_failure: Some(ModelCallFailure::new(
+                ModelCallFailureKind::MalformedResponse,
+                "malformed response",
+            )),
+            ..new_event(1)
+        };
+        valid.validate().expect("valid model failure event");
+        let rejected_action = NewTelemetryEvent {
+            selected_action: Some(Action::Wait),
+            ..valid.clone()
+        };
+        rejected_action
+            .validate()
+            .expect("rejected action may be recorded without an outcome");
+        let invalid = NewTelemetryEvent {
+            selected_action: Some(Action::Wait),
+            action_outcome: new_event(1).action_outcome,
+            ..valid.clone()
+        };
+        assert!(matches!(
+            invalid.validate(),
+            Err(TelemetryError::InvalidEvent(_))
+        ));
+        let both = NewTelemetryEvent {
+            model_call: Some(ModelCallInfo {
+                provider: "provider".to_owned(),
+                model: "model".to_owned(),
+                prompt_template_version: "prompt-v1".to_owned(),
+                request_id: None,
+                finish_reason: None,
+                usage: None,
+                timeout_seconds: None,
+                elapsed_ms: 0,
+                response_text: None,
+            }),
+            ..valid
+        };
+        assert!(matches!(
+            both.validate(),
+            Err(TelemetryError::InvalidEvent(_))
+        ));
+    }
+
     struct RejectingRecorder;
 
     impl TelemetryRecorder for RejectingRecorder {
@@ -776,6 +1038,42 @@ mod tests {
             })
             .expect("count event");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn result_metadata_migration_preserves_existing_rows() {
+        let path = temporary_path("results-migration");
+        let connection = Connection::open(&path).expect("create legacy database");
+        connection
+            .execute_batch(
+                "CREATE TABLE results (
+                    run_id TEXT PRIMARY KEY,
+                    result_json TEXT NOT NULL
+                );
+                INSERT INTO results (run_id, result_json) VALUES ('legacy-run', '{}');",
+            )
+            .expect("create legacy results table");
+        drop(connection);
+
+        let repository = SqliteResultRepository::new(&path).expect("migrate result database");
+        assert!(repository
+            .get_metadata("legacy-run")
+            .expect("read legacy metadata")
+            .is_none());
+        let completed = probelab_core::CompletedRun {
+            result: result(),
+            metadata: Default::default(),
+        };
+        repository
+            .store_completed("new-run", &completed)
+            .expect("store migrated metadata");
+        assert_eq!(
+            repository
+                .get_metadata("new-run")
+                .expect("read migrated metadata")
+                .expect("migrated metadata"),
+            completed.metadata
+        );
     }
 
     #[test]

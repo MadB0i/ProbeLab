@@ -9,3 +9,4 @@ description = "Provider-backed model agent for ProbeLab"
 
 [dependencies]
 probelab-core = { path = "../core" }
+tokio = { workspace = true }

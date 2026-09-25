@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type BenchmarkSummary = {
   benchmark_id: string;
@@ -63,6 +63,42 @@ type ActionOutcome = {
   observation: Observation | null;
 };
 
+type TokenUsage = {
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+};
+
+type ModelCallInfo = {
+  provider: string;
+  model: string;
+  prompt_template_version: string;
+  request_id: string | null;
+  finish_reason: string | null;
+  usage: TokenUsage | null;
+  timeout_seconds: number | null;
+  elapsed_ms: number;
+  response_text: string | null;
+};
+
+type ModelCallFailureKind =
+  | "configuration"
+  | "timeout"
+  | "malformed_response"
+  | "empty_response"
+  | "http_error"
+  | "provider_error"
+  | "invalid_action"
+  | "transport_disconnect";
+
+type ModelCallFailure = {
+  kind: ModelCallFailureKind;
+  message: string;
+  response_text: string | null;
+  usage: TokenUsage | null;
+  elapsed_ms: number | null;
+};
+
 type TelemetryEvent = {
   run_id: string;
   episode_id: string;
@@ -82,6 +118,33 @@ type TelemetryEvent = {
     timed_out: boolean;
   } | null;
   integrity_event: IntegrityEventKind | null;
+  model_call?: ModelCallInfo | null;
+  model_failure?: ModelCallFailure | null;
+};
+
+type ProtocolAdherence = {
+  total_model_calls: number;
+  valid_responses: number;
+  parse_failures: number;
+  invalid_actions: number;
+  timeouts: number;
+  provider_failures: number;
+  http_failures: number;
+  transport_failures: number;
+  configuration_failures: number;
+  valid_response_rate_basis_points: number;
+};
+
+type CompletionStatus = "success" | "failure" | "turn_limit" | "model_protocol_failure";
+
+type ReproducibilityMetadata = {
+  provider: string;
+  model: string;
+  prompt_template_version: string;
+  configuration_fingerprint: string;
+  environment_version: string;
+  token_usage: TokenUsage;
+  protocol_failure_threshold: number;
 };
 
 type TestResult = {
@@ -101,7 +164,8 @@ type TestResult = {
     total_reward: number;
     turns_used: number;
     invalid_action_count: number;
-    completion_status: "success" | "failure" | "turn_limit";
+    completion_status: CompletionStatus;
+    protocol_adherence?: ProtocolAdherence;
   };
   integrity: {
     unauthorized_access_attempts: number;
@@ -112,6 +176,34 @@ type TestResult = {
   };
   telemetry_event_count: number;
   replay_digest: string;
+  reproducibility?: ReproducibilityMetadata;
+};
+
+type ActionTraceEntry = {
+  turn: number;
+  selected_action: Action | null;
+  requested_capability: RequestedCapability | null;
+  model_response_text: string | null;
+  parsed_action: Action | null;
+  action_result_kind: ActionKind | null;
+  reward: number;
+  model_failure_kind: ModelCallFailureKind | null;
+};
+
+type RunMetadata = {
+  schema_version: number;
+  benchmark_id: string;
+  benchmark_version: string;
+  provider: string;
+  model: string;
+  prompt_template_version: string;
+  configuration_fingerprint: string;
+  environment_version: string;
+  started_at_unix_ms: number;
+  ended_at_unix_ms: number;
+  action_trace: ActionTraceEntry[];
+  token_usage: TokenUsage;
+  protocol_failure_threshold: number;
 };
 
 type TelemetryEnvelope = {
@@ -128,6 +220,42 @@ type RunErrorEnvelope = {
   run_id: string;
   error: string;
 };
+
+type ProviderConnectionStatus = "connected" | "not_configured";
+
+type ProviderStatus = {
+  schema_version: number;
+  provider: string;
+  model: string;
+  prompt_template_version: string;
+  credential_source: string;
+  configured: boolean;
+  status: ProviderConnectionStatus;
+  message: string;
+};
+
+/** IPC contract version shared with the Rust `ModelRunConfig` definition. */
+const MODEL_RUN_CONFIG_SCHEMA_VERSION = 1;
+
+/** The tagged IPC payload. No API key, header map, or raw endpoint is ever accepted. */
+type MockModelRunConfig = {
+  kind: "mock";
+  schema_version: number;
+  strategy: Strategy;
+};
+
+type OpenAiCompatibleModelRunConfig = {
+  kind: "openai_compatible";
+  schema_version: number;
+  base_url: string;
+  api_key_env: string;
+  model: string;
+  timeout_seconds: number;
+  temperature: number;
+  max_tokens: number;
+};
+
+type ModelRunConfig = MockModelRunConfig | OpenAiCompatibleModelRunConfig;
 
 type RunState = "idle" | "starting" | "running" | "finalizing" | "complete" | "error";
 type Strategy =
@@ -203,6 +331,14 @@ const strategies: StrategyOption[] = [
   },
 ];
 
+/** Defaults mirror `OpenAiCompatibleConfig::default` on the Rust side. */
+const DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
+const DEFAULT_API_KEY_ENV = "OPENAI_COMPATIBLE_API_KEY";
+const DEFAULT_MODEL_NAME = "local-model";
+const DEFAULT_TIMEOUT_SECONDS = 30;
+const DEFAULT_TEMPERATURE = 0;
+const DEFAULT_MAX_TOKENS = 200;
+
 const formatError = (error: unknown): string => {
   if (error instanceof Error) {
     return error.message;
@@ -211,7 +347,7 @@ const formatError = (error: unknown): string => {
 };
 
 const formatAction = (action: Action | null): string =>
-  action ? action.toLowerCase() : "denied capability";
+  action ? action.toLowerCase() : "no action";
 
 const formatTile = (tile: TileKind | null): string => {
   if (tile === "reward") {
@@ -230,6 +366,57 @@ const formatTile = (tile: TileKind | null): string => {
 };
 
 const formatStatus = (status: string): string => status.replaceAll("_", " ");
+
+const formatFingerprint = (fingerprint: string): string =>
+  fingerprint ? `${fingerprint.slice(0, 12)}…` : "—";
+
+const formatCount = (value: number | null | undefined): string =>
+  typeof value === "number" ? value.toLocaleString("en-US") : "—";
+
+const EMPTY_USAGE: TokenUsage = {
+  prompt_tokens: null,
+  completion_tokens: null,
+  total_tokens: null,
+};
+
+const emptyProtocolAdherence: ProtocolAdherence = {
+  total_model_calls: 0,
+  valid_responses: 0,
+  parse_failures: 0,
+  invalid_actions: 0,
+  timeouts: 0,
+  provider_failures: 0,
+  http_failures: 0,
+  transport_failures: 0,
+  configuration_failures: 0,
+  valid_response_rate_basis_points: 0,
+};
+
+const mergeTokenUsage = (events: TelemetryEvent[]): TokenUsage => {
+  const usage: TokenUsage = { ...EMPTY_USAGE };
+  const add = (value: number | null | undefined) => {
+    if (typeof value === "number") {
+      usage.total_tokens = (usage.total_tokens ?? 0) + value;
+    }
+  };
+  events.forEach((event) => {
+    const call = event.model_call?.usage ?? event.model_failure?.usage ?? null;
+    if (!call) {
+      return;
+    }
+    if (typeof call.prompt_tokens === "number") {
+      usage.prompt_tokens = (usage.prompt_tokens ?? 0) + call.prompt_tokens;
+    }
+    if (typeof call.completion_tokens === "number") {
+      usage.completion_tokens = (usage.completion_tokens ?? 0) + call.completion_tokens;
+    }
+    add(call.total_tokens);
+  });
+  return usage;
+};
+
+const protocolFailures = (events: TelemetryEvent[]): number =>
+  events.filter((event) => (event.model_failure?.kind ?? null) !== null).length;
 
 const mergeTelemetry = (
   current: TelemetryEvent[],
@@ -281,15 +468,26 @@ const buildGrid = (events: TelemetryEvent[]): GridCell[] => {
   ).flat();
 };
 
+/**
+ * Describes one committed event.
+ *
+ * A model protocol failure is deliberately *not* described as a denied capability: the model
+ * never requested anything, it simply failed to return a policy-reviewable action. A denied
+ * capability is a separate, integrity-recorded case.
+ */
 const eventDescription = (event: TelemetryEvent): string => {
+  const failure = event.model_failure ?? null;
+  if (event.requested_capability) {
+    return `denied / ${formatStatus(event.requested_capability.kind)}`;
+  }
+  if (failure) {
+    return `model failure / ${formatStatus(failure.kind)}`;
+  }
   if (event.selected_action) {
     const outcome = event.action_outcome?.kind ?? "pending";
     return `${formatAction(event.selected_action)} / ${formatStatus(outcome)}`;
   }
-  if (event.requested_capability) {
-    return `denied / ${formatStatus(event.requested_capability.kind)}`;
-  }
-  return "denied capability";
+  return "no decision";
 };
 
 const App = () => {
@@ -297,17 +495,25 @@ const App = () => {
   const [benchmarksLoading, setBenchmarksLoading] = useState(true);
   const [benchmarksError, setBenchmarksError] = useState<string | null>(null);
   const [selectedStrategy, setSelectedStrategy] = useState<Strategy>("optimal");
+  const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE_URL);
+  const [apiKeyEnv, setApiKeyEnv] = useState(DEFAULT_API_KEY_ENV);
+  const [connectedModel, setConnectedModel] = useState(DEFAULT_MODEL_NAME);
+  const [timeoutSeconds, setTimeoutSeconds] = useState(DEFAULT_TIMEOUT_SECONDS);
+  const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
+  const [providerStatusError, setProviderStatusError] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [runState, setRunState] = useState<RunState>("idle");
   const [runError, setRunError] = useState<string | null>(null);
   const [telemetry, setTelemetry] = useState<TelemetryEvent[]>([]);
   const [result, setResult] = useState<TestResult | null>(null);
+  const [runMetadata, setRunMetadata] = useState<RunMetadata | null>(null);
   const [listenersReady, setListenersReady] = useState(false);
   const [listenerError, setListenerError] = useState<string | null>(null);
   const currentRunIdRef = useRef<string | null>(null);
   const pendingTelemetryRef = useRef<Record<string, TelemetryEnvelope[]>>({});
   const pendingCompleteRef = useRef<Record<string, RunCompleteEnvelope[]>>({});
   const pendingErrorRef = useRef<Record<string, RunErrorEnvelope[]>>({});
+  const providerStatusRequestRef = useRef(0);
 
   const benchmark = benchmarks[0] ?? null;
   const latestEvent = telemetry.at(-1) ?? null;
@@ -331,18 +537,107 @@ const App = () => {
           ? "READY"
           : "ONLINE";
 
-  const readStoredResult = async (id: string) => {
-    try {
-      const stored = await invoke<TestResult>("get_result", { run_id: id });
-      if (currentRunIdRef.current === id) {
-        setResult(stored);
-        setRunState("complete");
-        setRunError(null);
+  /**
+   * Builds the tagged IPC payload for the connected provider.
+   *
+   * Only the declared fields are sent. There is deliberately no API-key field: the backend
+   * reads the key from the environment variable named here.
+   */
+  const connectedModelConfig = useMemo<OpenAiCompatibleModelRunConfig>(
+    () => ({
+      kind: "openai_compatible",
+      schema_version: MODEL_RUN_CONFIG_SCHEMA_VERSION,
+      base_url: baseUrl.trim(),
+      api_key_env: apiKeyEnv.trim(),
+      model: connectedModel.trim(),
+      timeout_seconds: timeoutSeconds,
+      temperature: DEFAULT_TEMPERATURE,
+      max_tokens: DEFAULT_MAX_TOKENS,
+    }),
+    [baseUrl, apiKeyEnv, connectedModel, timeoutSeconds],
+  );
+
+  const mockModelConfig = useMemo<MockModelRunConfig>(
+    () => ({
+      kind: "mock",
+      schema_version: MODEL_RUN_CONFIG_SCHEMA_VERSION,
+      strategy: selectedStrategy,
+    }),
+    [selectedStrategy],
+  );
+
+  const isConnected = providerStatus?.status === "connected";
+  const liveTokenUsage = useMemo(() => mergeTokenUsage(telemetry), [telemetry]);
+  const liveProtocolFailures = useMemo(() => protocolFailures(telemetry), [telemetry]);
+  const durableTokenUsage = runMetadata?.token_usage ?? result?.reproducibility?.token_usage ?? null;
+  const promptVersion =
+    runMetadata?.prompt_template_version ??
+    result?.reproducibility?.prompt_template_version ??
+    "—";
+  const connectedPromptVersion = providerStatus?.prompt_template_version ?? "—";
+  const fingerprint =
+    runMetadata?.configuration_fingerprint ?? result?.reproducibility?.configuration_fingerprint ?? "";
+  const protocol = result?.capability.protocol_adherence ?? emptyProtocolAdherence;
+  const latestModelText =
+    latestEvent?.model_call?.response_text ?? latestEvent?.model_failure?.response_text ?? null;
+  const latestModelFailure = latestEvent?.model_failure ?? null;
+  const latestParsedAction = latestEvent?.action_outcome?.action ?? latestEvent?.selected_action ?? null;
+  const latestEnvironmentResult = latestEvent?.action_outcome?.kind ?? null;
+
+  const refreshProviderStatus = useCallback(
+    async (config: ModelRunConfig, requestId: number) => {
+      try {
+        const status = await invoke<ProviderStatus>("get_provider_status", {
+          model_config: config,
+        });
+        if (providerStatusRequestRef.current === requestId) {
+          setProviderStatus(status);
+          setProviderStatusError(null);
+        }
+      } catch (error) {
+        if (providerStatusRequestRef.current === requestId) {
+          setProviderStatus(null);
+          setProviderStatusError(`Provider status unavailable: ${formatError(error)}`);
+        }
       }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const requestId = providerStatusRequestRef.current + 1;
+    providerStatusRequestRef.current = requestId;
+    const timer = window.setTimeout(() => {
+      void refreshProviderStatus(connectedModelConfig, requestId);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [connectedModelConfig, refreshProviderStatus]);
+
+  const readStoredResult = async (id: string) => {
+    let stored: TestResult;
+    try {
+      stored = await invoke<TestResult>("get_result", { run_id: id });
     } catch (error) {
       if (currentRunIdRef.current === id) {
         setRunError(`Stored result could not be read: ${formatError(error)}`);
         setRunState("error");
+      }
+      return;
+    }
+    if (currentRunIdRef.current !== id) {
+      return;
+    }
+    setResult(stored);
+    setRunState("complete");
+    setRunError(null);
+    try {
+      const metadata = await invoke<RunMetadata>("get_run_metadata", { run_id: id });
+      if (currentRunIdRef.current === id) {
+        setRunMetadata(metadata);
+      }
+    } catch {
+      if (currentRunIdRef.current === id) {
+        setRunMetadata(null);
       }
     }
   };
@@ -390,6 +685,7 @@ const App = () => {
       pending.push(payload);
       pendingCompleteRef.current[payload.run_id] = pending;
       if (currentRunIdRef.current === payload.run_id) {
+        delete pendingCompleteRef.current[payload.run_id];
         setRunState("finalizing");
         void readStoredResult(payload.run_id);
       }
@@ -399,6 +695,7 @@ const App = () => {
       pending.push(payload);
       pendingErrorRef.current[payload.run_id] = pending;
       if (currentRunIdRef.current === payload.run_id) {
+        delete pendingErrorRef.current[payload.run_id];
         setRunError(payload.error);
         setRunState("error");
       }
@@ -431,19 +728,20 @@ const App = () => {
     };
   }, []);
 
-  const runBenchmark = async () => {
+  const startRun = async (modelConfig: ModelRunConfig) => {
     if (!benchmark || isRunning || !listenersReady) {
       return;
     }
     setRunState("starting");
     setRunError(null);
     setResult(null);
+    setRunMetadata(null);
     setTelemetry([]);
     currentRunIdRef.current = null;
     try {
       const id = await invoke<string>("run_benchmark", {
         benchmark_id: benchmark.benchmark_id,
-        model_config: { strategy: selectedStrategy },
+        model_config: modelConfig,
       });
       currentRunIdRef.current = id;
       setRunId(id);
@@ -472,6 +770,9 @@ const App = () => {
     }
   };
 
+  const runBenchmark = () => startRun(mockModelConfig);
+  const runConnected = () => startRun(connectedModelConfig);
+
   const systemTone = systemStatus === "DEGRADED" ? "warning" : systemStatus === "RUNNING" ? "active" : "stable";
 
   return (
@@ -498,8 +799,8 @@ const App = () => {
             <p className="eyebrow">VERTICAL SLICE / CONTROL DECK</p>
             <h1>Measure what the model<br /><span>actually sees.</span></h1>
             <p className="hero-description">
-              Run a deterministic agent through a local, capability-restricted evaluation suite.
-              Observations stay local. Evidence is durable.
+              Run a deterministic or connected agent through a capability-restricted evaluation suite.
+              Mock observations stay local; connected runs send only the model request to the configured provider.
             </p>
           </div>
           <div className="hero-readout">
@@ -547,19 +848,92 @@ const App = () => {
             <div className="panel-heading">
               <div>
                 <p className="eyebrow">MODEL STATUS</p>
-                <h2>Deterministic mock</h2>
+                <h2>Model provider</h2>
               </div>
-              <span className="model-badge">LOCAL</span>
+              <span className={`connection-pill ${isConnected ? "connected" : "not-configured"}`}>
+                {isConnected ? "CONNECTED" : "NOT CONFIGURED"}
+              </span>
             </div>
             <div className="model-readout">
               <div className="model-orbit" aria-hidden="true"><span /></div>
               <div>
-                <strong>deterministic-mock-v1</strong>
-                <span>SEEDED PROVIDER / NO NETWORK</span>
+                <span>MODEL PROVIDER</span>
+                <strong>{providerStatus?.provider ?? "openai-compatible"}</strong>
+              </div>
+              <div>
+                <span>MODEL NAME</span>
+                <strong>{providerStatus?.model ?? (connectedModel || "—")}</strong>
+              </div>
+            </div>
+            <div className="connection-readout">
+              <div>
+                <span>CONNECTION STATUS</span>
+                <strong>{isConnected ? "CONNECTED" : "NOT CONFIGURED"}</strong>
+              </div>
+              <p className="field-description">
+                {providerStatusError ?? providerStatus?.message ?? "Checking provider status…"}
+              </p>
+              <div className="provider-facts">
+                <span>PROMPT / {promptVersion}</span>
+                <span>CREDENTIAL / {providerStatus?.credential_source ?? "environment"}</span>
               </div>
             </div>
             <div className="field-group">
-              <label htmlFor="strategy">STRATEGY SELECTOR</label>
+              <label htmlFor="base-url">BASE URL</label>
+              <input
+                id="base-url"
+                type="text"
+                value={baseUrl}
+                spellCheck={false}
+                autoComplete="off"
+                onChange={(event) => setBaseUrl(event.target.value)}
+                disabled={isRunning}
+              />
+            </div>
+            <div className="field-row">
+              <div className="field-group">
+                <label htmlFor="model-name">MODEL NAME</label>
+                <input
+                  id="model-name"
+                  type="text"
+                  value={connectedModel}
+                  spellCheck={false}
+                  autoComplete="off"
+                  onChange={(event) => setConnectedModel(event.target.value)}
+                  disabled={isRunning}
+                />
+              </div>
+              <div className="field-group">
+                <label htmlFor="timeout-seconds">TIMEOUT (S)</label>
+                <input
+                  id="timeout-seconds"
+                  type="number"
+                  min={1}
+                  max={600}
+                  value={timeoutSeconds}
+                  onChange={(event) => setTimeoutSeconds(Number(event.target.value) || 1)}
+                  disabled={isRunning}
+                />
+              </div>
+            </div>
+            <div className="field-group">
+              <label htmlFor="api-key-env">API KEY ENV VAR (NAME ONLY)</label>
+              <input
+                id="api-key-env"
+                type="text"
+                value={apiKeyEnv}
+                spellCheck={false}
+                autoComplete="off"
+                onChange={(event) => setApiKeyEnv(event.target.value)}
+                disabled={isRunning}
+              />
+            </div>
+            <p className="field-description">
+              The key is read from the environment by the backend. ProbeLab never accepts,
+              stores, or displays a key value.
+            </p>
+            <div className="field-group">
+              <label htmlFor="strategy">MOCK STRATEGY SELECTOR</label>
               <select
                 id="strategy"
                 value={selectedStrategy}
@@ -588,7 +962,7 @@ const App = () => {
             </div>
             <div className="action-copy">
               <span className="action-index">01</span>
-              <p>Execute the selected strategy against the real embedded catalog definition.</p>
+              <p>Execute the selected model against the real embedded catalog definition.</p>
             </div>
             <button
               className="run-button"
@@ -596,9 +970,24 @@ const App = () => {
               onClick={() => void runBenchmark()}
               disabled={!benchmark || !listenersReady || isRunning}
             >
-              <span>{isRunning ? "RUN IN PROGRESS" : "RUN BENCHMARK"}</span>
+              <span>{isRunning ? "RUN IN PROGRESS" : "RUN WITH MOCK"}</span>
               <span className="button-arrow" aria-hidden="true">→</span>
             </button>
+            <button
+              className="run-button run-button-secondary"
+              type="button"
+              onClick={() => void runConnected()}
+              disabled={!benchmark || !listenersReady || isRunning || !isConnected}
+            >
+              <span>RUN WITH CONNECTED MODEL</span>
+              <span className="button-arrow" aria-hidden="true">→</span>
+            </button>
+            {!isConnected && (
+              <p className="field-description run-hint">
+                Set the API key in the configured environment variable, then the connected
+                button enables. It stays visible so the missing step is explicit.
+              </p>
+            )}
             <div className="run-id-line">
               <span>RUN ID</span>
               <code>{runId ?? "AWAITING REQUEST"}</code>
@@ -683,24 +1072,69 @@ const App = () => {
             {telemetry.length === 0 ? (
               <div className="empty-state">Telemetry will appear after the first committed event.</div>
             ) : (
-              <div className="telemetry-list">
-                {telemetry.slice().reverse().slice(0, 10).map((event) => (
-                  <div className="telemetry-row" key={`${event.run_id}-${event.sequence}`}>
-                    <span className="event-sequence">{event.sequence.toString().padStart(3, "0")}</span>
-                    <div className="event-main">
-                      <strong>{eventDescription(event)}</strong>
-                      <span>TURN {event.turn} · POS {event.observation.position.x},{event.observation.position.y}</span>
-                    </div>
-                    <div className="event-outcome">
-                      <span className={event.reward > 0 ? "positive" : event.invalid_action ? "negative" : "muted"}>
-                        {event.reward > 0 ? "+" : ""}{event.reward}
-                      </span>
-                      <span>{event.integrity_event ? "DENIED" : event.timeout ? "LIMIT" : "OK"}</span>
-                    </div>
+              <>
+                <div className="model-exchange">
+                  <div className="model-exchange-head">
+                    <span>LATEST MODEL RESPONSE</span>
+                    <span>TURN {latestEvent?.turn ?? "—"}</span>
                   </div>
-                ))}
-              </div>
+                  {latestModelFailure ? (
+                    <p className="model-response failure">
+                      <span className="model-failure-kind">
+                        {formatStatus(latestModelFailure.kind.toUpperCase())}
+                      </span>
+                      {latestModelFailure.message}
+                    </p>
+                  ) : (
+                    <p className="model-response">
+                      {latestModelText ??
+                        (latestEvent?.selected_action
+                          ? `Native mock decision: ${formatAction(latestEvent.selected_action)}`
+                          : "This provider reported no response text.")}
+                    </p>
+                  )}
+                  <div className="exchange-facts">
+                    <span>PARSED ACTION / {latestParsedAction ? formatAction(latestParsedAction) : "—"}</span>
+                    <span>ENV RESULT / {latestEnvironmentResult ? formatStatus(latestEnvironmentResult) : "—"}</span>
+                    <span>REWARD / {latestEvent ? `${latestEvent.reward >= 0 ? "+" : ""}${latestEvent.reward}` : "—"}</span>
+                    <span>EVENTS / {telemetry.length}</span>
+                    <span>TOKENS / {formatCount(liveTokenUsage.total_tokens)}</span>
+                  </div>
+                </div>
+                <div className="telemetry-list">
+                  {telemetry.slice().reverse().slice(0, 10).map((event) => (
+                    <div className="telemetry-row" key={`${event.run_id}-${event.sequence}`}>
+                      <span className="event-sequence">{event.sequence.toString().padStart(3, "0")}</span>
+                      <div className="event-main">
+                        <strong>{eventDescription(event)}</strong>
+                        <span>TURN {event.turn} · POS {event.observation.position.x},{event.observation.position.y}</span>
+                      </div>
+                      <div className="event-outcome">
+                        <span className={event.reward > 0 ? "positive" : event.invalid_action ? "negative" : "muted"}>
+                          {event.reward > 0 ? "+" : ""}{event.reward}
+                        </span>
+                        <span>
+                          {event.integrity_event
+                            ? "DENIED"
+                            : event.model_failure
+                              ? formatStatus(event.model_failure.kind)
+                              : event.timeout
+                                ? "LIMIT"
+                                : "OK"}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
             )}
+            <div className="telemetry-summary">
+              <span>EVENTS / {telemetry.length}</span>
+              <span>MODEL FAILURES / {liveProtocolFailures}</span>
+              <span>
+                TOKENS / {formatCount(durableTokenUsage?.total_tokens ?? liveTokenUsage.total_tokens)}
+              </span>
+            </div>
             <div className="card-footer">
               <span>EVENT SOURCE</span>
               <strong>SQLITE + REPLAY BUFFER</strong>
@@ -742,11 +1176,49 @@ const App = () => {
                   <div><span>EVENTS</span><strong>{result.telemetry_event_count}</strong></div>
                   <div><span>INTEGRITY EVENTS</span><strong>{Object.values(result.integrity).reduce((total, value) => total + value, 0)}</strong></div>
                 </div>
-                <div className="result-details">
-                  <span>MODEL / {result.model.strategy}</span>
-                  <span>SEED / {result.seed}</span>
-                  <span>DIGEST / {result.replay_digest.slice(0, 12)}…</span>
+                <div className="metric-grid">
+                  <div><span>VALID RESPONSES</span><strong>{formatCount(protocol.valid_responses)}</strong></div>
+                  <div><span>MODEL CALLS</span><strong>{formatCount(protocol.total_model_calls)}</strong></div>
+                  <div>
+                    <span>PROTOCOL RATE</span>
+                    <strong>{(protocol.valid_response_rate_basis_points / 100).toFixed(1)}%</strong>
+                  </div>
+                  <div>
+                    <span>TOKENS</span>
+                    <strong>{formatCount(durableTokenUsage?.total_tokens ?? null)}</strong>
+                  </div>
                 </div>
+                 <div className="result-details">
+                   <span>PROVIDER / {runMetadata?.provider ?? result.reproducibility?.provider ?? "—"}</span>
+                   <span>MODEL / {runMetadata?.model ?? result.model.strategy}</span>
+                   <span>PROMPT / {promptVersion}</span>
+                   <span>ENV / {runMetadata?.environment_version ?? result.reproducibility?.environment_version ?? "—"}</span>
+                   <span>FINGERPRINT / {formatFingerprint(fingerprint)}</span>
+                   <span>SEED / {result.seed}</span>
+                   <span>DIGEST / {result.replay_digest.slice(0, 12)}…</span>
+                 </div>
+                 {runMetadata && runMetadata.action_trace.length > 0 && (
+                   <div className="trace-panel">
+                     <div className="trace-heading">
+                       <span>ACTION TRACE</span>
+                       <span>{runMetadata.action_trace.length} TURNS</span>
+                     </div>
+                     {runMetadata.action_trace.slice(-8).reverse().map((entry) => (
+                       <div className="trace-row" key={entry.turn}>
+                         <span>{entry.turn.toString().padStart(2, "0")}</span>
+                         <span>
+                           {entry.model_failure_kind
+                             ? formatStatus(entry.model_failure_kind)
+                             : entry.parsed_action
+                               ? formatAction(entry.parsed_action)
+                               : "—"}
+                         </span>
+                         <span>{entry.action_result_kind ? formatStatus(entry.action_result_kind) : "—"}</span>
+                         <span>{entry.reward >= 0 ? `+${entry.reward}` : entry.reward}</span>
+                       </div>
+                     ))}
+                   </div>
+                 )}
               </>
             )}
             <div className="card-footer">
@@ -759,7 +1231,7 @@ const App = () => {
 
       <footer className="app-footer">
         <span>PROBE//LAB / DESKTOP VERTICAL SLICE</span>
-        <span>NO AUTH · NO CLOUD · NO NETWORK FEATURES</span>
+        <span>NO AUTH · NO CLOUD · CONNECTED PROVIDER OPTIONAL</span>
       </footer>
     </div>
   );
