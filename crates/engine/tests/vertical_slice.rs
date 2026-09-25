@@ -12,7 +12,7 @@ use probelab_core::{
 use probelab_engine::BenchmarkRunner;
 use probelab_evaluator::GridWorldEvaluator;
 use probelab_model_adapters::{MockModelConfig, MockModelProvider};
-use probelab_telemetry::SqliteTelemetryRecorder;
+use probelab_telemetry::{SqliteResultRepository, SqliteTelemetryRecorder};
 use rusqlite::Connection;
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
@@ -90,6 +90,15 @@ fn run_case(label: &str, config: MockModelConfig, run_id: &str) -> RunOutput {
         .expect("count committed telemetry events");
     drop(connection);
     drop(recorder);
+
+    let results = SqliteResultRepository::new(&database.path).expect("create result repository");
+    results
+        .store(run_id, &result)
+        .expect("persist final result for retrieval");
+    assert_eq!(
+        results.get(run_id).expect("retrieve stored result"),
+        Some(result.clone())
+    );
 
     let events = observed
         .lock()
