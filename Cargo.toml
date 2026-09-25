@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/agent",
+    "crates/model-adapters",
+    "crates/sandbox",
+    "crates/telemetry",
+    "crates/evaluator",
+    "crates/benchmarks",
+    "crates/engine",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "MIT"
+repository = "https://github.com/MadB0i/ProbeLab"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+rand = "0.9"
+rand_chacha = "0.9"
+rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
