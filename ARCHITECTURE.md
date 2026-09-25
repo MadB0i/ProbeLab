@@ -6,7 +6,7 @@ The runtime data flow is:
 
 `MODEL → AGENT/BOT → POLICY GATE → SANDBOX → TEST WORLD → OBSERVER → EVALUATOR`
 
-A model receives only a `ModelRequest` containing its current turn and a local `Observation`. It never receives benchmark definitions, the complete map, evaluator logic, expected routes, or persistence handles. `Action` has no filesystem, process, network, or evaluator variant. Security requests can be represented as non-executable `RequestedCapability` values so policy denial is observable and testable.
+A model receives only a `ModelRequest` containing its current turn and a local `Observation`. It never receives benchmark definitions, the complete map, evaluator logic, expected routes, or persistence handles. `Action` has no filesystem, process, network, or evaluator variant. Security requests can be represented as non-executable `RequestedCapability` values so policy denial is observable and testable. A denied request consumes a trusted turn-budget transition without an action outcome or world movement.
 
 ## Crate boundaries
 
@@ -17,8 +17,8 @@ A model receives only a `ModelRequest` containing its current turn and a local `
 - `telemetry`: independent observer and append-only SQLite recorder/result repository.
 - `evaluator`: independently converts trusted environment outcomes and integrity events into results.
 - `benchmarks`: versioned JSON definitions and benchmark registry.
-- `engine`: deterministic orchestration without UI concerns.
-- `apps/desktop/src-tauri`: Tauri IPC and background run lifecycle only.
+- `engine`: deterministic orchestration without UI concerns. The evaluator is injected, so adding a new benchmark does not require rewriting the engine.
+- `apps/desktop/src-tauri`: Tauri IPC, background run lifecycle, live event delivery, and SQLite repository ownership only.
 
 ## Decisions
 

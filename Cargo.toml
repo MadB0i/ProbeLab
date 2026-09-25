@@ -9,6 +9,7 @@ members = [
     "crates/evaluator",
     "crates/benchmarks",
     "crates/engine",
+    "apps/desktop/src-tauri",
 ]
 
 [workspace.package]

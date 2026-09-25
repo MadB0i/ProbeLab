@@ -2,26 +2,38 @@
 
 ## Done
 
-- Empty-repository inspection and architecture decisions recorded.
-- Rust 2021 Cargo workspace, pinned toolchain, licensing, and ignore rules established.
-- Core trust-boundary domain model and public extension traits introduced.
+- Rust 2021 workspace, pinned 1.97.0 toolchain, MIT license, and ignore/line-ending rules.
+- Documented core domain contracts for model providers, agents, observations, actions, environments, episodes, benchmarks, evaluators, sandbox, policy, runtime guardian, telemetry, capability results, and integrity results.
+- Seeded 5×5 grid world with a guaranteed shortest safe corridor, danger, obstacles, wait, reward, invalid transitions, and distinct turn-limit termination.
+- Deterministic mock strategies: optimal, random, greedy mistake, invalid-action spam, and five independent security probes.
+- Fail-closed policy/runtime authorization and non-executable denied-turn transitions.
+- Per-event append-only SQLite telemetry, result repository, replay digest, live callback, and trigger hardening.
+- Versioned JSON grid-world definition and static benchmark catalog.
+- Adapter-neutral engine and independent grid-world evaluator.
+- Tauri v2 IPC, background run lifecycle, SQLite result retrieval, live event delivery, and React command center.
+- CI workflow for Rust format/test/clippy/build and frontend build.
 
-## In progress
+## Verified
 
-- Grid-world sandbox, mock providers, evaluator, append-only SQLite telemetry, and engine orchestration.
-- Tauri/React command center and live event presentation.
-- End-to-end security and deterministic replay tests.
-
-## Next
-
-1. Complete and verify the first model → agent → game → telemetry → evaluator vertical slice.
-2. Run Rust formatting, tests, build, and Clippy checks.
-3. Install frontend dependencies and verify frontend/Tauri development startup.
-4. Commit each completed architectural layer separately.
+- `cargo build --workspace`
+- `cargo test --workspace` — 50 tests passing
+- `cargo clippy --workspace -- -D warnings`
+- `cargo fmt --check`
+- `pnpm install` in `apps/desktop`
+- `pnpm build` in `apps/desktop`
 
 ## Known limitations
 
-- No real OS/container sandbox exists; v0 capability requests fail closed and grid actions are restricted by interface design.
+- No real OS/container/process/filesystem/network sandbox exists. v0 capability requests fail closed and grid actions are restricted by interface design.
 - Only deterministic mock providers exist. Online and local LLM adapters are intentionally deferred.
 - Capability reporting contains only `grid-world planning`.
-- Desktop packaging and platform-specific installers have not yet been verified beyond development build and CI compilation.
+- Background runs are not recovered after a desktop process restart; SQLite retains partial telemetry and stored results.
+- The replay digest commits to semantic event content but is not a cryptographic signature or persisted trace replay verifier.
+- Desktop packaging and platform-specific installers have not been fully verified beyond development compilation.
+
+## Next
+
+1. Add an OS-isolated sandbox and capability broker before any provider can request host resources.
+2. Add persisted trace read/replay verification if replay must work across process restarts.
+3. Add benchmark and environment extension tests before adding a second capability dimension.
+4. Add platform packaging smoke tests for Windows, macOS, and Linux.
