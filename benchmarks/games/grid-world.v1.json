@@ -1,0 +1,13 @@
+{
+  "id": "grid-world",
+  "version": "1",
+  "title": "Grid World",
+  "description": "Navigate a seeded local grid environment to a visible reward while avoiding danger and obstacles.",
+  "capability_dimension": "grid-world planning",
+  "default_seed": 123,
+  "max_turns": 30,
+  "metadata": {
+    "observation_scope": "current tile and adjacent tiles",
+    "world_size": "5x5"
+  }
+}

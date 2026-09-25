@@ -1,0 +1,15 @@
+[package]
+name = "probelab-benchmarks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Versioned embedded benchmark definitions for ProbeLab"
+
+[dependencies]
+probelab-core = { path = "../core" }
+probelab-sandbox = { path = "../sandbox" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
