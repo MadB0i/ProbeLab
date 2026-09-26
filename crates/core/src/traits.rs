@@ -1,10 +1,12 @@
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 
 use crate::{
-    Action, BenchmarkSummary, Episode, EvaluationInput, IntegrityEventKind, ModelCallFailure,
-    ModelCallFailureKind, ModelDecision, ModelDescriptor, ModelRequest, ModelResponse, Observation,
-    PolicyDecision, RuntimeAuthorization, StepOutcome, TelemetryEvent, TestResult,
+    Action, BenchmarkSummary, CapabilityPolicy, Episode, EvaluationInput, IntegrityEventKind,
+    ModelCallFailure, ModelCallFailureKind, ModelDecision, ModelDescriptor, ModelRequest,
+    ModelResponse, Observation, PolicyDecision, ProcessSpawnPlan, RuntimeAuthorization,
+    StepOutcome, TelemetryEvent, TestResult,
 };
 
 /// Produces model decisions from observations without access to trusted infrastructure.
@@ -73,6 +75,35 @@ pub trait Benchmark: Send + Sync {
     /// Returns UI-safe benchmark metadata.
     fn summary(&self) -> BenchmarkSummary;
 
+    /// Returns the capabilities this benchmark grants for one run.
+    ///
+    /// The default grants nothing, so an existing benchmark stays source-compatible and a new
+    /// benchmark is deny-by-default until it declares a grant explicitly.
+    fn capability_policy(&self) -> CapabilityPolicy {
+        CapabilityPolicy::deny_all()
+    }
+
+    /// Returns the process this benchmark is willing to have spawned on a model's behalf, if any.
+    ///
+    /// A model can ask for the `process.spawn` *permission*; it can never name a program, an
+    /// argument, or an environment variable. The plan below is compiled-in trusted configuration, and
+    /// even then the broker still has to find the program on its explicit allowlist before anything
+    /// runs. `None` means the benchmark exposes no process capability at all, and a spawn request is
+    /// then refused.
+    fn process_spawn_plan(&self) -> Option<ProcessSpawnPlan> {
+        None
+    }
+
+    /// Returns the trusted paths a contained child must not be able to read.
+    ///
+    /// These are the evaluation-critical locations: the benchmark definitions, the evaluator, and
+    /// anything else whose contents would tell a child the answer. They are declared here, by trusted
+    /// code, and are never influenced by a model response. They are only meaningful once a benchmark
+    /// also grants a process capability.
+    fn protected_paths(&self) -> &[PathBuf] {
+        &[]
+    }
+
     /// Creates an isolated, capability-restricted sandbox from the explicit seed.
     fn create_sandbox(&self, seed: u64) -> Result<Box<dyn Sandbox>, String>;
 }
@@ -96,6 +127,13 @@ pub trait Sandbox: Send {
 
     /// Consumes one turn after policy denial without executing the requested capability.
     fn consume_denied_turn(&mut self, event: IntegrityEventKind) -> Result<StepOutcome, String>;
+
+    /// Consumes one turn after an authorized capability actually ran.
+    ///
+    /// A child process is not a grid action, so the world does not move and no reward is produced,
+    /// but the turn is still spent: the model used its budget to ask for something. Unlike a denied
+    /// turn this records no integrity event, because the broker did its job.
+    fn consume_capability_turn(&mut self) -> Result<StepOutcome, String>;
 
     /// Consumes one turn for a model protocol failure without changing grid state.
     fn consume_protocol_failure_turn(&mut self, terminate: bool) -> Result<StepOutcome, String>;

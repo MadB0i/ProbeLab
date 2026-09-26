@@ -1,8 +1,17 @@
 # ProbeLab
 
-ProbeLab is a local-first AI capability and agent evaluation environment. The current vertical slice measures one honest capability dimension: **grid-world planning**, including model protocol adherence.
+ProbeLab is a local-first AI capability and agent evaluation environment. The current vertical slice measures two honest dimensions: **grid-world planning** and **protocol adherence**.
 
-The trusted engine owns the environment, policy boundary, sandbox, observer, persistence, and evaluator. A connected OpenAI-compatible provider receives only the model-facing observation request; it never receives the hidden map, benchmark implementation, evaluator, filesystem paths, or persistence handles.
+The trusted engine owns the environment, capability broker, policy boundary, sandbox, observer, persistence, and evaluator. A connected OpenAI-compatible provider receives only the model-facing observation request; it never receives the hidden map, benchmark implementation, evaluator, filesystem paths, or persistence handles.
+
+## Security model
+
+Two independent layers refuse capabilities, and they are not the same thing:
+
+- **Capability broker (primary boundary).** `crates/broker` is deny-by-default. It authorizes `filesystem.read`, `filesystem.write`, `process.spawn`, `network.connect`, and `environment.inspect` only when a benchmark's own policy grants them, with canonicalized path checks, independent read and write roots, and explicit program and endpoint allowlists. `environment.inspect` is denied unconditionally and has no grant path.
+- **Capability executor (`process.spawn` only).** An authorization is not an execution. Exactly one permission has an implementation: an authorized `process.spawn` starts a child contained — suspended, inside a job object with CPU/memory/process limits, at the low mandatory integrity label `S-1-16-4096`, in a designated low-labeled directory it alone may write to, with an **empty** environment so it never inherits your API keys, and with the benchmark's declared paths made unreadable to it. On non-Windows platforms a spawn fails closed with `UnsupportedPlatform` rather than running unconfined. The other four permissions stop the run with an explicit unsupported error; none of them has a pretend implementation.
+
+`docs/SECURITY-STATUS.md` records exactly what is enforced, what is partial, and what is deferred.
 
 ## Prerequisites
 
@@ -33,7 +42,7 @@ PowerShell example:
 $env:OPENAI_COMPATIBLE_API_KEY = "your-key"
 ```
 
-The provider performs one HTTP attempt per model call. There are no automatic retries in v0.2. Temperature defaults to `0`, timeout to `30s`, and `max_tokens` to `200`. The exact prompt is versioned in `prompts/grid_world_v1.md`; changing its wording requires a prompt-version bump.
+The provider performs one HTTP attempt per model call. There are no automatic retries. Temperature defaults to `0`, timeout to `30s`, and `max_tokens` to `200`. The exact prompt is versioned in `prompts/grid_world_v1.md`; changing its wording requires a prompt-version bump.
 
 A connected run sends the versioned system prompt and the serialized model-facing request to the configured endpoint. Remote providers are not generally deterministic; mock runs remain replayable from their seed and action trace.
 
@@ -41,13 +50,13 @@ A connected run sends the versioned system prompt and the serialized model-facin
 
 ```text
 cargo fmt --check
-cargo build --workspace
-cargo test --workspace
+cargo build --workspace --locked
+cargo test --workspace --locked
 cargo clippy --workspace --all-targets -- -D warnings
 pnpm --dir apps/desktop build
 ```
 
-The CI workflow runs the Rust checks and the frontend production build on every push. A local desktop smoke test can be run with:
+The CI workflow runs the Rust checks and the frontend production build on every push, plus the containment suite on both `ubuntu-latest` and `windows-latest`. A local desktop smoke test can be run with:
 
 ```text
 pnpm --dir apps/desktop tauri dev
@@ -58,10 +67,10 @@ pnpm --dir apps/desktop tauri dev
 The runtime pipeline is:
 
 ```text
-MODEL → AGENT/ADAPTER → POLICY GATE → SANDBOX → TEST WORLD → OBSERVER → EVALUATOR
+MODEL → AGENT/ADAPTER → CAPABILITY BROKER → CAPABILITY EXECUTOR → CONTAINMENT → TEST WORLD → OBSERVER → EVALUATOR
 ```
 
-The provider boundary is asynchronous. The trusted engine remains synchronous and calls the async adapter through a dedicated blocking bridge. A malformed, empty, invalid, timed-out, or otherwise failed model response is a capability/protocol signal. It is not an integrity violation. `IntegrityResult` is reserved for a policy-gate event that actually stopped a disallowed capability.
+The provider boundary is asynchronous. The trusted engine remains synchronous and calls the async adapter through a dedicated blocking bridge. A malformed, empty, invalid, timed-out, or otherwise failed model response is a capability/protocol signal. It is not an integrity violation. `IntegrityResult` is reserved for a real refusal: a policy-gate denial or a capability-broker denial. Those two record in disjoint category sets, so a broker refusal can never inflate a policy-violation count.
 
 Three consecutive model-call/protocol failures terminate with `model_protocol_failure`. The threshold is a documented constant, not a benchmark implementation detail.
 
@@ -73,6 +82,8 @@ See `ARCHITECTURE.md` for decisions and `docs/SECURITY-STATUS.md` for enforced v
 
 - Seeded 5×5 grid world with safe corridor, danger, obstacles, wait, and turn limit
 - Deterministic mock strategies plus OpenAI-compatible async provider with strict `MOVE_*` JSON protocol
+- Deny-by-default capability broker as the primary capability boundary, with no grant path for `environment.inspect`
+- `process.spawn` as the first genuinely executable capability: broker-authorized, contained on Windows, empty child environment, declared protected paths refused to the child, full process lifecycle telemetry
 - Versioned prompt asset, parser fence/prose tolerance, case-insensitive action names, and unknown-field rejection
 - Typed model-call failures, usage aggregation, no-retry transport, and credential redaction
 - Append-only SQLite telemetry, per-event commits, replay digest, and immutable result/run-metadata storage
@@ -81,13 +92,17 @@ See `ARCHITECTURE.md` for decisions and `docs/SECURITY-STATUS.md` for enforced v
 
 ### Partial
 
+- The broker decides authorization, but only `process.spawn` is performed. Authorized filesystem and network capabilities still stop the run.
+- A contained child keeps its parent's user and privileges. It is refused writes outside its designated directory and reads of the benchmark's declared protected paths, but it can still open network connections, load native code, and read anything else its user can read.
+- There is no Linux or macOS containment, so a spawn on those platforms fails closed.
 - Connected runs are local-first but disclose the model-facing observation to the configured provider.
 - Run metadata and action traces are durable, but there is no cross-process trace verifier or remote-provider replay guarantee.
 - The desktop application has no run cancellation or API-spend/rate-limit control.
 
 ### Deferred
 
-- Real OS/container/process/filesystem/network sandboxing
+- Executing authorized `filesystem.read`, `filesystem.write`, and `network.connect`
+- Syscall-level and platform-wide OS sandboxing (seccomp/namespaces on Linux, AppContainer/restricted tokens, filesystem virtualization, network isolation)
 - Ollama-specific or other provider-specific adapters beyond the OpenAI-compatible adapter
 - Auth, multi-user support, cloud sync, and additional capability dimensions
 

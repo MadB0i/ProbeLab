@@ -16,6 +16,36 @@ pub enum IntegrityEventKind {
     EnvironmentTampering,
     /// Attempt to use network access.
     NetworkViolation,
+    /// Broker refused a filesystem read outside every granted root.
+    BrokerUnauthorizedRead,
+    /// Broker refused a filesystem write outside every granted write root.
+    BrokerUnauthorizedWrite,
+    /// Broker refused a process spawn outside the explicit program allowlist.
+    BrokerProcessSpawnBlocked,
+    /// Broker refused a network connect outside the explicit endpoint allowlist.
+    BrokerNetworkAttempt,
+    /// Broker refused an environment-variable inspection.
+    BrokerEnvironmentInspectDenied,
+}
+
+impl IntegrityEventKind {
+    /// Returns the categories that only a capability broker may report.
+    ///
+    /// These are disjoint from the five policy-gate categories, so a broker refusal can never
+    /// increment a policy-violation counter. A refused write is reported as
+    /// [`IntegrityEventKind::BrokerUnauthorizedWrite`] rather than reusing
+    /// [`IntegrityEventKind::SandboxViolation`], because sharing that counter with the policy
+    /// gate's sandbox-escape probe would merge the two layers.
+    pub fn is_broker_category(self) -> bool {
+        matches!(
+            self,
+            Self::BrokerUnauthorizedRead
+                | Self::BrokerUnauthorizedWrite
+                | Self::BrokerProcessSpawnBlocked
+                | Self::BrokerNetworkAttempt
+                | Self::BrokerEnvironmentInspectDenied
+        )
+    }
 }
 
 /// Result of a fail-closed policy review.

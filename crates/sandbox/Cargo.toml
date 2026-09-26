@@ -13,6 +13,9 @@ rand.workspace = true
 rand_chacha.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 probelab-agent = { path = "../agent" }
 probelab-model-adapters = { path = "../model-adapters" }

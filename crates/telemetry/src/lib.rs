@@ -1,4 +1,4 @@
-//! Independent telemetry observation and append-only persistence for ProbeLab.
+﻿//! Independent telemetry observation and append-only persistence for ProbeLab.
 
 #![deny(missing_docs)]
 
@@ -8,9 +8,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use probelab_core::{
-    Action, ActionOutcome, ActionResultKind, CompletedRun, IntegrityEventKind, ModelCallFailure,
-    ModelCallFailureKind, ModelCallInfo, ModelRequest, Observation, RequestedCapability,
-    ResourceInfo, RunMetadata, TelemetryEvent, TelemetryRecorder, TestResult,
+    Action, ActionOutcome, ActionResultKind, CapabilityDenial, CapabilityPermission, CompletedRun,
+    ContainmentStatus, IntegrityEventKind, IntegrityLevel, ModelCallFailure, ModelCallFailureKind,
+    ModelCallInfo, ModelRequest, Observation, ProcessAuthorization, ProcessExecution,
+    ProcessLifecycle, RequestedCapability, ResourceInfo, RunMetadata, TelemetryEvent,
+    TelemetryRecorder, TerminationReason, TestResult,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -45,6 +47,22 @@ pub struct NewTelemetryEvent {
     /// Sanitized metadata for a failed model call, when supplied.
     #[serde(default)]
     pub model_failure: Option<ModelCallFailure>,
+    /// Capability-broker refusal, when the trusted broker denied a named capability.
+    ///
+    /// A broker denial is non-executable: it has no selected action, no requested capability, no
+    /// action outcome, no reward, and no invalid-action flag, and it never carries a model
+    /// failure. Safe model-call metadata may still be attached.
+    #[serde(default)]
+    pub broker_denial: Option<CapabilityDenial>,
+    /// The full lifecycle of a requested process spawn, when one was requested this turn.
+    ///
+    /// Like a broker denial this is non-executable: it carries no action, no outcome, no reward, and
+    /// no model failure, because a child process is not a grid action. The difference is that an
+    /// authorized spawn really did start a process, so the record carries the operating system
+    /// outcome: whether a child was created, its process identifier, its exit code, the containment
+    /// state that was in force, and why it stopped.
+    #[serde(default)]
+    pub process_lifecycle: Option<ProcessLifecycle>,
 }
 
 /// A typed telemetry persistence or observation failure.
@@ -92,6 +110,34 @@ impl NewTelemetryEvent {
                 "a model call and model failure are mutually exclusive".to_owned(),
             ));
         }
+        if let Some(lifecycle) = &self.process_lifecycle {
+            validate_process_lifecycle(self, lifecycle)?;
+        } else if let Some(denial) = &self.broker_denial {
+            validate_broker_denial(self, denial)?;
+        } else {
+            self.validate_decision()?;
+        }
+        if let Some(resource) = &self.resource_info {
+            if resource.turns_used != self.turn || resource.timed_out != self.timeout {
+                return Err(TelemetryError::InvalidEvent(
+                    "resource turn or timeout data does not match the event".to_owned(),
+                ));
+            }
+            if (self.invalid_action
+                || self.integrity_event.is_some()
+                || self.model_failure.is_some())
+                && resource.rejected_actions == 0
+            {
+                return Err(TelemetryError::InvalidEvent(
+                    "a rejected event must report at least one rejected action".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates the executable decision content of an event that carries no broker denial.
+    fn validate_decision(&self) -> Result<(), TelemetryError> {
         match (self.selected_action, &self.requested_capability) {
             (Some(action), None) => {
                 if self.model_failure.is_some() {
@@ -186,22 +232,6 @@ impl NewTelemetryEvent {
                 }
             }
         }
-        if let Some(resource) = &self.resource_info {
-            if resource.turns_used != self.turn || resource.timed_out != self.timeout {
-                return Err(TelemetryError::InvalidEvent(
-                    "resource turn or timeout data does not match the event".to_owned(),
-                ));
-            }
-            if (self.invalid_action
-                || self.integrity_event.is_some()
-                || self.model_failure.is_some())
-                && resource.rejected_actions == 0
-            {
-                return Err(TelemetryError::InvalidEvent(
-                    "a rejected event must report at least one rejected action".to_owned(),
-                ));
-            }
-        }
         Ok(())
     }
 
@@ -229,6 +259,8 @@ impl NewTelemetryEvent {
             integrity_event: self.integrity_event,
             model_call: self.model_call,
             model_failure: self.model_failure,
+            broker_denial: self.broker_denial,
+            process_lifecycle: self.process_lifecycle,
         }
     }
 }
@@ -241,6 +273,186 @@ fn expected_integrity_event(request: &RequestedCapability) -> IntegrityEventKind
         RequestedCapability::EnvironmentMutation(_) => IntegrityEventKind::EnvironmentTampering,
         RequestedCapability::NetworkAccess(_) => IntegrityEventKind::NetworkViolation,
     }
+}
+
+/// Validates that a broker-denial event is non-executable and self-consistent.
+///
+/// The event must carry no decision, no environment outcome, and no model failure, and it must
+/// repeat exactly the integrity category the broker assigned, so a published integrity count can
+/// always be traced back to a broker decision rather than to an observer-side assumption.
+/// Validates the lifecycle record of one requested process spawn.
+///
+/// The rules encode the whole ordering guarantee. A denied request must carry the broker's typed
+/// denial, must record the matching integrity category, and must have no execution at all. An
+/// authorized request must carry an execution, must record no integrity event, and must never be
+/// described as denied. In both cases the turn stays non-executable: a child process is not a grid
+/// action, so there is no selected action, no requested capability, no outcome, no reward, and no
+/// model failure.
+fn validate_process_lifecycle(
+    event: &NewTelemetryEvent,
+    lifecycle: &ProcessLifecycle,
+) -> Result<(), TelemetryError> {
+    if event.selected_action.is_some()
+        || event.requested_capability.is_some()
+        || event.action_outcome.is_some()
+        || event.reward != 0
+        || event.invalid_action
+        || event.model_failure.is_some()
+    {
+        return Err(TelemetryError::InvalidEvent(
+            "a process request must not contain a decision, an outcome, a reward, or a model failure"
+                .to_owned(),
+        ));
+    }
+    if !lifecycle.requested {
+        return Err(TelemetryError::InvalidEvent(
+            "a process lifecycle record must be marked as requested".to_owned(),
+        ));
+    }
+    match (&lifecycle.decision, &lifecycle.execution) {
+        (ProcessAuthorization::Denied(denial), None) => {
+            if event.broker_denial.as_ref() != Some(denial) {
+                return Err(TelemetryError::InvalidEvent(
+                    "a denied process request must carry the broker's exact denial".to_owned(),
+                ));
+            }
+            if event.integrity_event != Some(denial.integrity_event) {
+                return Err(TelemetryError::InvalidEvent(
+                    "a denied process request must record the denial's integrity category"
+                        .to_owned(),
+                ));
+            }
+        }
+        (ProcessAuthorization::Authorized, Some(execution)) => {
+            if event.broker_denial.is_some() || event.integrity_event.is_some() {
+                return Err(TelemetryError::InvalidEvent(
+                    "an authorized process request must not record a denial or an integrity event"
+                        .to_owned(),
+                ));
+            }
+            validate_process_execution(execution)?;
+        }
+        (ProcessAuthorization::Authorized, None) => {
+            return Err(TelemetryError::InvalidEvent(
+                "an authorized process request must record what the operating system did"
+                    .to_owned(),
+            ));
+        }
+        (ProcessAuthorization::Denied(_), Some(_)) => {
+            return Err(TelemetryError::InvalidEvent(
+                "a denied process request must not record an execution".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Checks that an execution record is internally consistent.
+///
+/// A record that says a child ran must carry a process identifier, enforced containment verified at
+/// the low integrity level, and a reason that is not "never started". A record that says nothing ran
+/// must carry no identifier and no exit code, and must name the containment failure that prevented it.
+fn validate_process_execution(execution: &ProcessExecution) -> Result<(), TelemetryError> {
+    if execution.spawned {
+        if execution.pid.is_none() {
+            return Err(TelemetryError::InvalidEvent(
+                "a spawned process must report its process identifier".to_owned(),
+            ));
+        }
+        if !execution.containment.is_enforced() {
+            return Err(TelemetryError::InvalidEvent(
+                "a spawned process must report enforced containment".to_owned(),
+            ));
+        }
+        if execution.verified_integrity() != Some(IntegrityLevel::Low) {
+            return Err(TelemetryError::InvalidEvent(
+                "a spawned process must have been verified at the low integrity level".to_owned(),
+            ));
+        }
+        if execution.termination.started_nothing() {
+            return Err(TelemetryError::InvalidEvent(
+                "a spawned process must not claim it never started".to_owned(),
+            ));
+        }
+        if execution.termination == TerminationReason::Exited && execution.exit_code.is_none() {
+            return Err(TelemetryError::InvalidEvent(
+                "a process that exited must report its exit code".to_owned(),
+            ));
+        }
+    } else {
+        if execution.pid.is_some() || execution.exit_code.is_some() {
+            return Err(TelemetryError::InvalidEvent(
+                "a process that never started must not report an identity or an exit code"
+                    .to_owned(),
+            ));
+        }
+        if execution.containment.is_enforced() {
+            return Err(TelemetryError::InvalidEvent(
+                "a process that never started must not report enforced containment".to_owned(),
+            ));
+        }
+        if !execution.termination.started_nothing() {
+            return Err(TelemetryError::InvalidEvent(
+                "a process that never started must say so".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+fn validate_broker_denial(
+    event: &NewTelemetryEvent,
+    denial: &CapabilityDenial,
+) -> Result<(), TelemetryError> {
+    if event.selected_action.is_some()
+        || event.requested_capability.is_some()
+        || event.action_outcome.is_some()
+        || event.reward != 0
+        || event.invalid_action
+        || event.model_failure.is_some()
+    {
+        return Err(TelemetryError::InvalidEvent(
+            "a broker denial must not contain a decision, an outcome, a reward, or a model failure"
+                .to_owned(),
+        ));
+    }
+    if event.integrity_event != Some(denial.integrity_event) {
+        return Err(TelemetryError::InvalidEvent(
+            "a broker denial must carry the exact integrity event of the denial".to_owned(),
+        ));
+    }
+    if !denial.integrity_event.is_broker_category() {
+        return Err(TelemetryError::InvalidEvent(
+            "a broker denial must use an independent broker integrity category".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// The deterministic replay projection of one broker denial.
+///
+/// Only the permission and the independent integrity category are projected. The reason, the
+/// requested path, program, endpoint, arguments, and environment variable are all excluded, so
+/// the semantic replay digest can never carry a requested value.
+#[derive(Serialize)]
+struct ReplayBrokerDenial {
+    permission: CapabilityPermission,
+    integrity_event: IntegrityEventKind,
+}
+
+/// The deterministic replay projection of one process spawn lifecycle.
+///
+/// Only the shape of the lifecycle is projected: whether it was requested, whether the broker
+/// authorized it, whether a child was created, the containment state, and why it stopped. The process
+/// identifier, the exit code, the CPU time, and the program are all excluded, because a PID and an
+/// exit code differ between two otherwise identical runs and would make a mock run's digest
+/// unreproducible. A denial projects only its permission and category, exactly like a broker denial.
+#[derive(Serialize)]
+struct ReplayProcessLifecycle {
+    requested: bool,
+    authorized: bool,
+    spawned: bool,
+    containment: Option<ContainmentStatus>,
+    termination: Option<TerminationReason>,
 }
 
 #[derive(Serialize)]
@@ -264,6 +476,10 @@ struct ReplayEvent<'a> {
     resource_info: Option<&'a ResourceInfo>,
     integrity_event: Option<IntegrityEventKind>,
     model_failure_kind: Option<ModelCallFailureKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    broker_denial: Option<ReplayBrokerDenial>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    process_lifecycle: Option<ReplayProcessLifecycle>,
 }
 
 impl<'a> ReplayPayload<'a> {
@@ -284,6 +500,23 @@ impl<'a> ReplayPayload<'a> {
                 resource_info: input.resource_info.as_ref(),
                 integrity_event: input.integrity_event,
                 model_failure_kind: input.model_failure.as_ref().map(|failure| failure.kind),
+                broker_denial: input
+                    .broker_denial
+                    .as_ref()
+                    .map(|denial| ReplayBrokerDenial {
+                        permission: denial.permission,
+                        integrity_event: denial.integrity_event,
+                    }),
+                process_lifecycle: input.process_lifecycle.as_ref().map(|lifecycle| {
+                    let execution = lifecycle.execution();
+                    ReplayProcessLifecycle {
+                        requested: lifecycle.requested,
+                        authorized: !lifecycle.is_denied(),
+                        spawned: execution.is_some_and(|record| record.spawned),
+                        containment: execution.map(|record| record.containment),
+                        termination: execution.map(|record| record.termination),
+                    }
+                }),
             },
         }
     }
@@ -694,9 +927,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use probelab_core::{
-        Action, ActionOutcome, ActionResultKind, Coordinate, GridSize, IntegrityEventKind,
-        ModelCallFailure, ModelCallFailureKind, ModelCallInfo, Observation, RequestedCapability,
-        TileKind,
+        Action, ActionOutcome, ActionResultKind, CapabilityDenial, CapabilityPermission,
+        Coordinate, GridSize, IntegrityEventKind, ModelCallFailure, ModelCallFailureKind,
+        ModelCallInfo, Observation, RequestedCapability, TileKind,
     };
     use rusqlite::Connection;
 
@@ -755,6 +988,42 @@ mod tests {
             integrity_event: None,
             model_call: None,
             model_failure: None,
+            broker_denial: None,
+            process_lifecycle: None,
+        }
+    }
+
+    fn denial(
+        permission: CapabilityPermission,
+        integrity_event: IntegrityEventKind,
+    ) -> CapabilityDenial {
+        CapabilityDenial::new(permission, integrity_event, "unit-test broker refusal")
+    }
+
+    fn broker_denial_event(
+        turn: u32,
+        permission: CapabilityPermission,
+        integrity_event: IntegrityEventKind,
+    ) -> NewTelemetryEvent {
+        NewTelemetryEvent {
+            turn,
+            observation: observation(turn),
+            selected_action: None,
+            requested_capability: None,
+            action_outcome: None,
+            reward: 0,
+            invalid_action: false,
+            timeout: false,
+            resource_info: Some(probelab_core::ResourceInfo {
+                turns_used: turn,
+                rejected_actions: 1,
+                timed_out: false,
+            }),
+            integrity_event: Some(integrity_event),
+            model_call: None,
+            model_failure: None,
+            broker_denial: Some(denial(permission, integrity_event)),
+            process_lifecycle: None,
         }
     }
 
@@ -995,8 +1264,250 @@ mod tests {
         ));
     }
 
-    struct RejectingRecorder;
+    #[test]
+    fn broker_denial_events_are_non_executable_and_carry_the_exact_integrity_event() {
+        let valid = broker_denial_event(
+            1,
+            CapabilityPermission::FilesystemRead,
+            IntegrityEventKind::BrokerUnauthorizedRead,
+        );
+        valid.validate().expect("valid broker denial event");
+        assert!(valid.model_call.is_none());
 
+        let with_model_call = NewTelemetryEvent {
+            model_call: Some(ModelCallInfo {
+                provider: "provider".to_owned(),
+                model: "model".to_owned(),
+                prompt_template_version: "prompt-v1".to_owned(),
+                request_id: Some("request-1".to_owned()),
+                finish_reason: Some("stop".to_owned()),
+                usage: None,
+                timeout_seconds: Some(1),
+                elapsed_ms: 1,
+                response_text: Some("WAIT".to_owned()),
+            }),
+            ..valid.clone()
+        };
+        with_model_call
+            .validate()
+            .expect("safe model-call metadata is allowed");
+
+        // Resource facts are still cross-checked for a broker denial.
+        for resource in [
+            probelab_core::ResourceInfo {
+                turns_used: 9,
+                rejected_actions: 1,
+                timed_out: false,
+            },
+            probelab_core::ResourceInfo {
+                turns_used: 1,
+                rejected_actions: 0,
+                timed_out: false,
+            },
+            probelab_core::ResourceInfo {
+                turns_used: 1,
+                rejected_actions: 1,
+                timed_out: true,
+            },
+        ] {
+            let event = NewTelemetryEvent {
+                resource_info: Some(resource),
+                ..valid.clone()
+            };
+            assert!(
+                matches!(event.validate(), Err(TelemetryError::InvalidEvent(_))),
+                "inconsistent resource facts were accepted: {event:?}"
+            );
+        }
+
+        let rejected = [
+            NewTelemetryEvent {
+                selected_action: Some(Action::Wait),
+                ..valid.clone()
+            },
+            NewTelemetryEvent {
+                requested_capability: Some(RequestedCapability::EvaluatorAccess),
+                ..valid.clone()
+            },
+            NewTelemetryEvent {
+                action_outcome: new_event(1).action_outcome,
+                ..valid.clone()
+            },
+            NewTelemetryEvent {
+                reward: 1,
+                ..valid.clone()
+            },
+            NewTelemetryEvent {
+                invalid_action: true,
+                ..valid.clone()
+            },
+            NewTelemetryEvent {
+                model_failure: Some(ModelCallFailure::new(
+                    ModelCallFailureKind::MalformedResponse,
+                    "malformed",
+                )),
+                model_call: None,
+                ..valid.clone()
+            },
+            NewTelemetryEvent {
+                integrity_event: Some(IntegrityEventKind::PolicyViolation),
+                ..valid.clone()
+            },
+            NewTelemetryEvent {
+                integrity_event: None,
+                ..valid.clone()
+            },
+            NewTelemetryEvent {
+                broker_denial: Some(denial(
+                    CapabilityPermission::FilesystemRead,
+                    IntegrityEventKind::NetworkViolation,
+                )),
+                ..valid
+            },
+        ];
+        for event in rejected {
+            assert!(
+                matches!(event.validate(), Err(TelemetryError::InvalidEvent(_))),
+                "invalid broker denial event was accepted: {event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_broker_category_is_recordable_and_rejected_for_policy_only_categories() {
+        let cases = [
+            (
+                CapabilityPermission::FilesystemRead,
+                IntegrityEventKind::BrokerUnauthorizedRead,
+            ),
+            (
+                CapabilityPermission::FilesystemWrite,
+                IntegrityEventKind::BrokerUnauthorizedWrite,
+            ),
+            (
+                CapabilityPermission::ProcessSpawn,
+                IntegrityEventKind::BrokerProcessSpawnBlocked,
+            ),
+            (
+                CapabilityPermission::NetworkConnect,
+                IntegrityEventKind::BrokerNetworkAttempt,
+            ),
+            (
+                CapabilityPermission::EnvironmentInspect,
+                IntegrityEventKind::BrokerEnvironmentInspectDenied,
+            ),
+        ];
+        for (permission, integrity_event) in cases {
+            broker_denial_event(1, permission, integrity_event)
+                .validate()
+                .expect("broker category must be recordable");
+        }
+        for integrity_event in [
+            IntegrityEventKind::PolicyViolation,
+            IntegrityEventKind::UnauthorizedAccessAttempt,
+            IntegrityEventKind::EnvironmentTampering,
+            IntegrityEventKind::NetworkViolation,
+            IntegrityEventKind::SandboxViolation,
+        ] {
+            let event = NewTelemetryEvent {
+                broker_denial: Some(denial(CapabilityPermission::ProcessSpawn, integrity_event)),
+                ..broker_denial_event(
+                    1,
+                    CapabilityPermission::ProcessSpawn,
+                    IntegrityEventKind::BrokerProcessSpawnBlocked,
+                )
+            };
+            assert!(
+                matches!(event.validate(), Err(TelemetryError::InvalidEvent(_))),
+                "{integrity_event:?} must not be reusable as a broker category"
+            );
+        }
+    }
+
+    #[test]
+    fn the_replay_projection_keeps_only_the_broker_permission_and_category() {
+        let first_path = temporary_path("broker-digest-first");
+        let second_path = temporary_path("broker-digest-second");
+        let first = TelemetryObserver::from_recorder(
+            SqliteTelemetryRecorder::new(&first_path).expect("create first recorder"),
+            "run-one",
+            "episode",
+        );
+        let second = TelemetryObserver::from_recorder(
+            SqliteTelemetryRecorder::new(&second_path).expect("create second recorder"),
+            "run-two",
+            "episode",
+        );
+        let secret_path = "/etc/probe-secret-value";
+        let first_event = broker_denial_event(
+            1,
+            CapabilityPermission::FilesystemRead,
+            IntegrityEventKind::BrokerUnauthorizedRead,
+        );
+        // A different requested value, same permission and category: the semantic replay is equal.
+        let second_event = NewTelemetryEvent {
+            broker_denial: Some(CapabilityDenial::new(
+                CapabilityPermission::FilesystemRead,
+                IntegrityEventKind::BrokerUnauthorizedRead,
+                format!("a different but still value-free reason {secret_path}"),
+            )),
+            ..first_event.clone()
+        };
+        let first = {
+            let mut first = first;
+            first.record(first_event).expect("record first event");
+            first
+        };
+        let second = {
+            let mut second = second;
+            second.record(second_event).expect("record second event");
+            second
+        };
+        assert_eq!(first.replay_digest(), second.replay_digest());
+
+        // A different permission is a different semantic event.
+        let mut third = TelemetryObserver::from_recorder(
+            SqliteTelemetryRecorder::new(temporary_path("broker-digest-third"))
+                .expect("create third recorder"),
+            "run-one",
+            "episode",
+        );
+        third
+            .record(broker_denial_event(
+                1,
+                CapabilityPermission::NetworkConnect,
+                IntegrityEventKind::BrokerNetworkAttempt,
+            ))
+            .expect("record third event");
+        assert_ne!(first.replay_digest(), third.replay_digest());
+    }
+
+    #[test]
+    fn a_non_broker_event_replay_projection_is_unchanged() {
+        // The v0.1 replay payload must stay byte-identical when no broker denial is present, so
+        // a run without capability probes keeps the digest it had before the broker existed.
+        let serialized =
+            serde_json::to_string(&super::ReplayPayload::new("episode", 1, &new_event(1)))
+                .expect("replay payload JSON");
+        assert!(!serialized.contains("broker_denial"));
+        let denied = serde_json::to_string(&super::ReplayPayload::new(
+            "episode",
+            1,
+            &broker_denial_event(
+                1,
+                CapabilityPermission::EnvironmentInspect,
+                IntegrityEventKind::BrokerEnvironmentInspectDenied,
+            ),
+        ))
+        .expect("replay payload JSON");
+        assert!(denied.contains("\"broker_denial\""));
+        assert!(denied.contains("\"permission\":\"environment.inspect\""));
+        assert!(denied.contains("\"integrity_event\":\"broker_environment_inspect_denied\""));
+        assert!(!denied.contains("reason"));
+        assert!(!denied.contains("variable"));
+    }
+
+    struct RejectingRecorder;
     impl TelemetryRecorder for RejectingRecorder {
         fn record(&self, _event: &probelab_core::TelemetryEvent) -> Result<(), String> {
             Err("rejected".to_owned())

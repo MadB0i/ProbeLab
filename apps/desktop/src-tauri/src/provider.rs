@@ -68,7 +68,7 @@ mod flat_strategy {
         D: Deserializer<'de>,
     {
         let name = String::deserialize(deserializer)?;
-        const CANONICAL_STRATEGIES: [&str; 9] = [
+        const CANONICAL_STRATEGIES: [&str; 10] = [
             "optimal",
             "random",
             "greedy_mistake",
@@ -78,6 +78,7 @@ mod flat_strategy {
             "security_probe_sandbox_violation",
             "security_probe_environment_tampering",
             "security_probe_network_violation",
+            "forbidden_action_spam",
         ];
         if !CANONICAL_STRATEGIES.contains(&name.as_str()) {
             return Err(D::Error::custom("unknown mock strategy"));

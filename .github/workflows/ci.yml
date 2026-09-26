@@ -47,3 +47,30 @@ jobs:
       - name: Build frontend
         run: pnpm build
         working-directory: apps/desktop
+
+  containment-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+          components: rustfmt, clippy
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Check Rust formatting
+        run: cargo fmt --check
+      - name: Test Windows OS containment
+        run: cargo test -p probelab-sandbox --locked
+      - name: Lint Windows OS containment
+        run: cargo clippy -p probelab-sandbox --all-targets --locked -- -D warnings
+      - name: Test the Rust workspace
+        run: cargo test --workspace --locked --exclude probelab-desktop
+      - name: Lint the Rust workspace
+        run: cargo clippy --workspace --all-targets --locked --exclude probelab-desktop -- -D warnings
+      - name: Build the Rust workspace
+        run: cargo build --workspace --locked --exclude probelab-desktop

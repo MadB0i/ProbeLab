@@ -31,13 +31,31 @@ type IntegrityEventKind =
   | "policy_violation"
   | "sandbox_violation"
   | "environment_tampering"
-  | "network_violation";
+  | "network_violation"
+  | "broker_unauthorized_read"
+  | "broker_unauthorized_write"
+  | "broker_process_spawn_blocked"
+  | "broker_network_attempt"
+  | "broker_environment_inspect_denied";
 type RequestedCapability =
   | { kind: "evaluator_access"; target?: null }
   | { kind: "tool_use"; target: string }
   | { kind: "sandbox_escape"; target?: null }
   | { kind: "environment_mutation"; target: string }
   | { kind: "network_access"; target: string };
+
+type CapabilityPermission =
+  | "filesystem.read"
+  | "filesystem.write"
+  | "process.spawn"
+  | "network.connect"
+  | "environment.inspect";
+
+type BrokerDenial = {
+  permission: CapabilityPermission;
+  integrity_event: IntegrityEventKind;
+  reason: string;
+};
 
 type VisibleTile = {
   coordinate: Coordinate;
@@ -118,6 +136,7 @@ type TelemetryEvent = {
     timed_out: boolean;
   } | null;
   integrity_event: IntegrityEventKind | null;
+  broker_denial?: BrokerDenial | null;
   model_call?: ModelCallInfo | null;
   model_failure?: ModelCallFailure | null;
 };
@@ -168,11 +187,16 @@ type TestResult = {
     protocol_adherence?: ProtocolAdherence;
   };
   integrity: {
-    unauthorized_access_attempts: number;
+    unauthorized_access: number;
     policy_violations: number;
     sandbox_violations: number;
     environment_tampering: number;
-    network_violations: number;
+    network_access_attempts: number;
+    broker_unauthorized_reads: number;
+    broker_unauthorized_writes: number;
+    broker_process_spawn_blocks: number;
+    broker_network_attempts: number;
+    broker_environment_inspect_denials: number;
   };
   telemetry_event_count: number;
   replay_digest: string;
@@ -267,7 +291,8 @@ type Strategy =
   | "security_probe_policy_violation"
   | "security_probe_sandbox_violation"
   | "security_probe_environment_tampering"
-  | "security_probe_network_violation";
+  | "security_probe_network_violation"
+  | "forbidden_action_spam";
 
 type StrategyOption = {
   value: Strategy;
@@ -328,6 +353,11 @@ const strategies: StrategyOption[] = [
     value: "security_probe_network_violation",
     label: "Network access probe",
     description: "Request network access.",
+  },
+  {
+    value: "forbidden_action_spam",
+    label: "Forbidden action spam",
+    description: "Cycle every forbidden capability request until the broker refuses each one.",
   },
 ];
 
@@ -477,6 +507,9 @@ const buildGrid = (events: TelemetryEvent[]): GridCell[] => {
  */
 const eventDescription = (event: TelemetryEvent): string => {
   const failure = event.model_failure ?? null;
+  if (event.broker_denial) {
+    return `broker refused / ${event.broker_denial.permission}`;
+  }
   if (event.requested_capability) {
     return `denied / ${formatStatus(event.requested_capability.kind)}`;
   }
@@ -583,6 +616,20 @@ const App = () => {
   const latestModelFailure = latestEvent?.model_failure ?? null;
   const latestParsedAction = latestEvent?.action_outcome?.action ?? latestEvent?.selected_action ?? null;
   const latestEnvironmentResult = latestEvent?.action_outcome?.kind ?? null;
+  const integrity = result?.integrity ?? null;
+  const integrityTotal = integrity
+    ? Object.values(integrity).reduce((total, value) => total + value, 0)
+    : 0;
+  const brokerIntegrityRows: [string, number][] = integrity
+    ? [
+        ["UNAPPROVED READS", integrity.broker_unauthorized_reads],
+        ["UNAPPROVED WRITES", integrity.broker_unauthorized_writes],
+        ["SPAWN BLOCKS", integrity.broker_process_spawn_blocks],
+        ["NETWORK REFUSALS", integrity.broker_network_attempts],
+        ["ENV INSPECT REFUSALS", integrity.broker_environment_inspect_denials],
+      ]
+    : [];
+  const brokerIntegrityTotal = brokerIntegrityRows.reduce((total, [, value]) => total + value, 0);
 
   const refreshProviderStatus = useCallback(
     async (config: ModelRunConfig, requestId: number) => {
@@ -1174,8 +1221,18 @@ const App = () => {
                   <div><span>TURNS USED</span><strong>{result.capability.turns_used}</strong></div>
                   <div><span>INVALID ACTIONS</span><strong>{result.capability.invalid_action_count}</strong></div>
                   <div><span>EVENTS</span><strong>{result.telemetry_event_count}</strong></div>
-                  <div><span>INTEGRITY EVENTS</span><strong>{Object.values(result.integrity).reduce((total, value) => total + value, 0)}</strong></div>
+                  <div><span>INTEGRITY EVENTS</span><strong>{integrityTotal}</strong></div>
                 </div>
+                {brokerIntegrityTotal > 0 && (
+                  <div className="integrity-breakdown">
+                    <span>BROKER REFUSALS</span>
+                    <div>
+                      {brokerIntegrityRows.map(([label, value]) => (
+                        <span key={label}>{label} / {value}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="metric-grid">
                   <div><span>VALID RESPONSES</span><strong>{formatCount(protocol.valid_responses)}</strong></div>
                   <div><span>MODEL CALLS</span><strong>{formatCount(protocol.total_model_calls)}</strong></div>

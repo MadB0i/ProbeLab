@@ -184,6 +184,35 @@ impl Benchmark for GridWorldBenchmark {
         self.definition.summary()
     }
 
+    /// Grants nothing at all: the grid-world benchmark has no filesystem, process, network, or
+    /// environment capability to declare, so its policy stays deny-all.
+    fn capability_policy(&self) -> probelab_core::CapabilityPolicy {
+        probelab_core::CapabilityPolicy::deny_all()
+    }
+
+    /// Declares the evaluation-critical source tree as unreadable to any contained child.
+    ///
+    /// These paths hold the benchmark definitions and the evaluator, which together are the answer
+    /// key. They are named here, by trusted compiled-in code, and are never influenced by a model
+    /// response. The grid-world benchmark grants no process capability, so today no child exists to
+    /// protect them from; declaring them anyway means a future grant cannot forget to.
+    fn protected_paths(&self) -> &[std::path::PathBuf] {
+        use std::sync::OnceLock;
+        static PATHS: OnceLock<Vec<std::path::PathBuf>> = OnceLock::new();
+        PATHS.get_or_init(|| {
+            let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(std::path::Path::parent)
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default();
+            vec![
+                workspace.join("crates").join("evaluator"),
+                workspace.join("crates").join("benchmarks"),
+                workspace.join("benchmarks"),
+            ]
+        })
+    }
+
     fn create_sandbox(&self, seed: u64) -> Result<Box<dyn Sandbox>, String> {
         Self::create_sandbox(self, seed).map_err(|error| error.to_string())
     }
@@ -277,5 +306,16 @@ mod tests {
             GridWorldBenchmark::from_definition(definition),
             Err(BenchmarkDefinitionError::ZeroMaxTurns)
         ));
+    }
+
+    #[test]
+    fn grid_world_grants_no_capability() {
+        let benchmark = GridWorldBenchmark::built_in().expect("built-in benchmark");
+        let policy = benchmark.capability_policy();
+        assert!(policy.is_deny_all());
+        assert!(policy.filesystem_read_roots().is_empty());
+        assert!(policy.filesystem_write_roots().is_empty());
+        assert!(policy.allowed_programs().is_empty());
+        assert!(policy.allowed_endpoints().is_empty());
     }
 }

@@ -1201,6 +1201,29 @@ select:disabled {
   text-align: right;
 }
 
+.integrity-breakdown {
+  display: grid;
+  gap: 7px;
+  margin-top: 15px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  background: rgba(255, 107, 107, 0.05);
+  color: var(--faint);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 7px;
+  letter-spacing: 0.06em;
+}
+
+.integrity-breakdown > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.integrity-breakdown > div span {
+  color: var(--text);
+}
+
 .app-footer {
   justify-content: space-between;
   gap: 20px;

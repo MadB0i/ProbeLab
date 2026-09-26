@@ -1,0 +1,15 @@
+[package]
+name = "probelab-broker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deny-by-default capability authorization broker for ProbeLab"
+
+[dependencies]
+probelab-core = { path = "../core" }
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

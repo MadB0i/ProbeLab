@@ -3,7 +3,9 @@
 #![deny(missing_docs)]
 
 mod action;
+mod capability;
 mod error;
+mod execution;
 mod model;
 mod observation;
 mod outcome;
@@ -13,7 +15,16 @@ mod telemetry;
 mod traits;
 
 pub use action::Action;
+pub use capability::{
+    CapabilityDecision, CapabilityDenial, CapabilityPermission, CapabilityPolicy,
+    CapabilityPolicyError, CapabilityRequest,
+};
 pub use error::DomainError;
+pub use execution::{
+    ContainmentFailure, ContainmentFailureKind, ContainmentStatus, IntegrityLevel,
+    ProcessAuthorization, ProcessBudget, ProcessExecution, ProcessLifecycle, ProcessSpawnPlan,
+    ProcessSpawner, TerminationReason,
+};
 pub use model::{
     ModelCallFailure, ModelCallFailureKind, ModelCallInfo, ModelDecision, ModelDescriptor,
     ModelRequest, ModelResponse, RequestedCapability, TokenUsage,

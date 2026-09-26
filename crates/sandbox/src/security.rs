@@ -1,7 +1,7 @@
 //! Fail-closed policy and runtime authorization boundaries for the grid sandbox.
 
 use probelab_core::{
-    IntegrityEventKind, ModelDecision, PolicyDecision, RuntimeAuthorization,
+    IntegrityEventKind, ModelDecision, PolicyDecision, RequestedCapability, RuntimeAuthorization,
     RuntimeGuardian as RuntimeGuardianContract,
 };
 
@@ -36,6 +36,13 @@ impl probelab_core::PolicyGate for DenyAllPolicyGate {
                     integrity_event,
                 }
             }
+            // A capability probe belongs to the capability broker, which reviews it before any
+            // policy review. Reaching the gate at all means the trusted path was bypassed, so the
+            // gate fails closed with a policy violation and never learns the requested target.
+            ModelDecision::CapabilityProbe(_) => PolicyDecision::Deny {
+                request: RequestedCapability::ToolUse("capability_probe".to_owned()),
+                integrity_event: IntegrityEventKind::PolicyViolation,
+            },
         }
     }
 }
@@ -100,6 +107,30 @@ mod tests {
                 PolicyDecision::Allow(_) => panic!("capability was allowed"),
             }
         }
+    }
+
+    #[test]
+    fn a_capability_probe_that_reaches_the_gate_fails_closed() {
+        use probelab_core::{CapabilityRequest, ModelDecision};
+        use std::path::PathBuf;
+
+        let gate = DenyAllPolicyGate;
+        let denied = gate.review(ModelDecision::CapabilityProbe(
+            CapabilityRequest::FilesystemRead {
+                path: PathBuf::from("notes.txt"),
+            },
+        ));
+        assert_eq!(
+            denied,
+            PolicyDecision::Deny {
+                request: RequestedCapability::ToolUse("capability_probe".to_owned()),
+                integrity_event: IntegrityEventKind::PolicyViolation,
+            }
+        );
+        assert_eq!(
+            RuntimeGuardian.authorize(&denied),
+            RuntimeAuthorization::Reject(IntegrityEventKind::PolicyViolation)
+        );
     }
 
     #[test]

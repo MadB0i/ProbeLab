@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+﻿use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use probelab_agent::AsyncProviderAgent;
@@ -293,6 +293,10 @@ impl Sandbox for RestrictedSandbox {
         }
     }
 
+    fn consume_capability_turn(&mut self) -> Result<StepOutcome, String> {
+        self.consume_denied_turn(probelab_core::IntegrityEventKind::PolicyViolation)
+    }
+
     fn consume_denied_turn(
         &mut self,
         event: probelab_core::IntegrityEventKind,
@@ -582,6 +586,8 @@ fn evaluator_keeps_protocol_failures_outside_integrity() {
             invalid_action_count: 0,
         },
         integrity_events: Vec::new(),
+        broker_denials: Vec::new(),
+        process_lifecycles: Vec::new(),
         telemetry_event_count: 3,
         replay_digest: "a".repeat(64),
         protocol_adherence: ProtocolAdherence::default(),

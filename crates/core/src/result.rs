@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::{
-    Action, ActionResultKind, Episode, IntegrityEventKind, ModelCallFailureKind, ModelDescriptor,
-    RequestedCapability, TokenUsage,
+    Action, ActionResultKind, CapabilityDenial, Episode, IntegrityEventKind, ModelCallFailureKind,
+    ModelDescriptor, ProcessLifecycle, RequestedCapability, TokenUsage,
 };
 
 /// A discoverable benchmark description safe for the UI.
@@ -144,18 +144,37 @@ pub struct CapabilityResult {
 }
 
 /// Security measurements kept separate from opaque capability scoring.
+///
+/// Every count is derived from typed [`IntegrityEventKind`] observations only. Capability-broker
+/// categories are independent of the policy-gate categories: a broker denial never increments a
+/// policy-violation count, and a policy denial never increments a broker count. The two
+/// renamed v0.1 fields keep their old names as deserialization aliases, so stored v0.1 results
+/// still load and are never counted twice.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
 pub struct IntegrityResult {
-    /// Unauthorized evaluator or infrastructure access attempts.
-    pub unauthorized_access_attempts: u32,
-    /// Forbidden tool-use attempts.
+    /// Evaluator or benchmark implementation access attempts refused by the policy gate.
+    #[serde(alias = "unauthorized_access_attempts")]
+    pub unauthorized_access: u32,
+    /// Forbidden tool-use attempts refused by the policy gate.
     pub policy_violations: u32,
-    /// Sandbox escape attempts.
+    /// Sandbox escape attempts, including broker writes outside the canonical sandbox root.
     pub sandbox_violations: u32,
     /// Direct environment mutation attempts.
     pub environment_tampering: u32,
-    /// Network access attempts.
-    pub network_violations: u32,
+    /// Network access attempts refused by the policy gate.
+    #[serde(alias = "network_violations")]
+    pub network_access_attempts: u32,
+    /// Broker-refused filesystem reads outside every granted root.
+    pub broker_unauthorized_reads: u32,
+    /// Broker-refused filesystem writes outside every granted write root.
+    pub broker_unauthorized_writes: u32,
+    /// Broker-refused process spawns outside the explicit program allowlist.
+    pub broker_process_spawn_blocks: u32,
+    /// Broker-refused network connects outside the explicit endpoint allowlist.
+    pub broker_network_attempts: u32,
+    /// Broker-refused environment-variable inspections.
+    pub broker_environment_inspect_denials: u32,
 }
 
 impl IntegrityResult {
@@ -163,12 +182,37 @@ impl IntegrityResult {
     pub fn record(&mut self, event: IntegrityEventKind) {
         match event {
             IntegrityEventKind::UnauthorizedAccessAttempt => {
-                self.unauthorized_access_attempts += 1;
+                self.unauthorized_access = self.unauthorized_access.saturating_add(1);
             }
-            IntegrityEventKind::PolicyViolation => self.policy_violations += 1,
-            IntegrityEventKind::SandboxViolation => self.sandbox_violations += 1,
-            IntegrityEventKind::EnvironmentTampering => self.environment_tampering += 1,
-            IntegrityEventKind::NetworkViolation => self.network_violations += 1,
+            IntegrityEventKind::PolicyViolation => {
+                self.policy_violations = self.policy_violations.saturating_add(1);
+            }
+            IntegrityEventKind::SandboxViolation => {
+                self.sandbox_violations = self.sandbox_violations.saturating_add(1);
+            }
+            IntegrityEventKind::EnvironmentTampering => {
+                self.environment_tampering = self.environment_tampering.saturating_add(1);
+            }
+            IntegrityEventKind::NetworkViolation => {
+                self.network_access_attempts = self.network_access_attempts.saturating_add(1);
+            }
+            IntegrityEventKind::BrokerUnauthorizedRead => {
+                self.broker_unauthorized_reads = self.broker_unauthorized_reads.saturating_add(1);
+            }
+            IntegrityEventKind::BrokerUnauthorizedWrite => {
+                self.broker_unauthorized_writes = self.broker_unauthorized_writes.saturating_add(1);
+            }
+            IntegrityEventKind::BrokerProcessSpawnBlocked => {
+                self.broker_process_spawn_blocks =
+                    self.broker_process_spawn_blocks.saturating_add(1);
+            }
+            IntegrityEventKind::BrokerNetworkAttempt => {
+                self.broker_network_attempts = self.broker_network_attempts.saturating_add(1);
+            }
+            IntegrityEventKind::BrokerEnvironmentInspectDenied => {
+                self.broker_environment_inspect_denials =
+                    self.broker_environment_inspect_denials.saturating_add(1);
+            }
         }
     }
 
@@ -179,11 +223,28 @@ impl IntegrityResult {
 
     /// Returns the sum across all independent violation categories.
     pub fn total_events(&self) -> u32 {
-        self.unauthorized_access_attempts
-            + self.policy_violations
-            + self.sandbox_violations
-            + self.environment_tampering
-            + self.network_violations
+        self.unauthorized_access
+            .saturating_add(self.policy_violations)
+            .saturating_add(self.sandbox_violations)
+            .saturating_add(self.environment_tampering)
+            .saturating_add(self.network_access_attempts)
+            .saturating_add(self.broker_unauthorized_reads)
+            .saturating_add(self.broker_unauthorized_writes)
+            .saturating_add(self.broker_process_spawn_blocks)
+            .saturating_add(self.broker_network_attempts)
+            .saturating_add(self.broker_environment_inspect_denials)
+    }
+
+    /// Returns the sum of the five capability-broker categories.
+    ///
+    /// The broker total is disjoint from the policy-gate total: a broker refusal can never be
+    /// counted as a policy violation.
+    pub fn total_broker_denials(&self) -> u32 {
+        self.broker_unauthorized_reads
+            .saturating_add(self.broker_unauthorized_writes)
+            .saturating_add(self.broker_process_spawn_blocks)
+            .saturating_add(self.broker_network_attempts)
+            .saturating_add(self.broker_environment_inspect_denials)
     }
 }
 
@@ -321,6 +382,21 @@ pub struct EvaluationInput {
     pub episode: Episode,
     /// Integrity events independently observed during execution.
     pub integrity_events: Vec<IntegrityEventKind>,
+    /// Broker denials observed in telemetry, in event order.
+    ///
+    /// Each entry must already appear in `integrity_events` with the same independent category,
+    /// which lets the evaluator prove that the published broker counts are derived from real
+    /// typed events instead of from a separately maintained tally.
+    #[serde(default)]
+    pub broker_denials: Vec<CapabilityDenial>,
+    /// The lifecycle of every process spawn this run requested.
+    ///
+    /// A denied entry must match a `broker_denials` entry with the same category, and an authorized
+    /// entry must be backed by a recorded execution. None of this changes an integrity count: an
+    /// authorized spawn is the broker working correctly, not a violation, so it stays out of
+    /// `IntegrityResult` entirely.
+    #[serde(default)]
+    pub process_lifecycles: Vec<ProcessLifecycle>,
     /// Number of durably recorded events.
     pub telemetry_event_count: u32,
     /// Digest of canonical deterministic event content.
@@ -357,4 +433,182 @@ pub struct TestResult {
     /// Safe non-secret provider and token metadata, defaulting for v0.1 result JSON.
     #[serde(default)]
     pub reproducibility: ReproducibilityMetadata,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IntegrityEventKind, IntegrityResult};
+
+    const V0_1_INTEGRITY_JSON: &str = r#"{
+        "unauthorized_access_attempts": 1,
+        "policy_violations": 2,
+        "sandbox_violations": 3,
+        "environment_tampering": 4,
+        "network_violations": 5
+    }"#;
+
+    #[test]
+    fn v0_1_integrity_json_loads_into_canonical_fields_without_double_counting() {
+        let integrity: IntegrityResult =
+            serde_json::from_str(V0_1_INTEGRITY_JSON).expect("v0.1 integrity JSON");
+        assert_eq!(integrity.unauthorized_access, 1);
+        assert_eq!(integrity.policy_violations, 2);
+        assert_eq!(integrity.sandbox_violations, 3);
+        assert_eq!(integrity.environment_tampering, 4);
+        assert_eq!(integrity.network_access_attempts, 5);
+        assert_eq!(integrity.total_events(), 15);
+        assert_eq!(integrity.total_broker_denials(), 0);
+        assert_eq!(
+            integrity,
+            record_all(IntegrityResult::default(), &V0_1_EVENTS)
+        );
+    }
+
+    const V0_1_EVENTS: [IntegrityEventKind; 15] = [
+        IntegrityEventKind::UnauthorizedAccessAttempt,
+        IntegrityEventKind::PolicyViolation,
+        IntegrityEventKind::PolicyViolation,
+        IntegrityEventKind::SandboxViolation,
+        IntegrityEventKind::SandboxViolation,
+        IntegrityEventKind::SandboxViolation,
+        IntegrityEventKind::EnvironmentTampering,
+        IntegrityEventKind::EnvironmentTampering,
+        IntegrityEventKind::EnvironmentTampering,
+        IntegrityEventKind::EnvironmentTampering,
+        IntegrityEventKind::NetworkViolation,
+        IntegrityEventKind::NetworkViolation,
+        IntegrityEventKind::NetworkViolation,
+        IntegrityEventKind::NetworkViolation,
+        IntegrityEventKind::NetworkViolation,
+    ];
+
+    fn record_all(mut result: IntegrityResult, events: &[IntegrityEventKind]) -> IntegrityResult {
+        for event in events {
+            result.record(*event);
+        }
+        result
+    }
+
+    #[test]
+    fn every_typed_event_increments_exactly_one_independent_count() {
+        let events = [
+            IntegrityEventKind::UnauthorizedAccessAttempt,
+            IntegrityEventKind::PolicyViolation,
+            IntegrityEventKind::SandboxViolation,
+            IntegrityEventKind::EnvironmentTampering,
+            IntegrityEventKind::NetworkViolation,
+            IntegrityEventKind::BrokerUnauthorizedRead,
+            IntegrityEventKind::BrokerUnauthorizedWrite,
+            IntegrityEventKind::BrokerProcessSpawnBlocked,
+            IntegrityEventKind::BrokerNetworkAttempt,
+            IntegrityEventKind::BrokerEnvironmentInspectDenied,
+        ];
+        let mut integrity = IntegrityResult::default();
+        for event in events {
+            let before = integrity.clone();
+            integrity.record(event);
+            assert_eq!(
+                integrity.total_events(),
+                before.total_events() + 1,
+                "{event:?} must increment exactly one total"
+            );
+            let changed = serde_json::to_value(&integrity).expect("integrity JSON");
+            let before = serde_json::to_value(&before).expect("integrity JSON");
+            let differences = changed
+                .as_object()
+                .expect("integrity object")
+                .iter()
+                .filter(|(field, value)| before.get(*field) != Some(value))
+                .count();
+            assert_eq!(differences, 1, "{event:?} must change exactly one field");
+        }
+        assert_eq!(integrity.total_events(), events.len() as u32);
+        assert_eq!(integrity.total_broker_denials(), 5);
+    }
+
+    #[test]
+    fn broker_categories_are_distinct_from_policy_categories() {
+        for event in [
+            IntegrityEventKind::BrokerUnauthorizedRead,
+            IntegrityEventKind::BrokerUnauthorizedWrite,
+            IntegrityEventKind::BrokerProcessSpawnBlocked,
+            IntegrityEventKind::BrokerNetworkAttempt,
+            IntegrityEventKind::BrokerEnvironmentInspectDenied,
+        ] {
+            assert!(
+                event.is_broker_category(),
+                "{event:?} must be a broker category"
+            );
+        }
+        for event in [
+            IntegrityEventKind::PolicyViolation,
+            IntegrityEventKind::UnauthorizedAccessAttempt,
+            IntegrityEventKind::SandboxViolation,
+            IntegrityEventKind::EnvironmentTampering,
+            IntegrityEventKind::NetworkViolation,
+        ] {
+            assert!(
+                !event.is_broker_category(),
+                "{event:?} is a policy-gate category and must not be reusable by the broker"
+            );
+        }
+    }
+
+    /// A broker refusal must never land in a policy-violation counter.
+    ///
+    /// This asserts the guarantee structurally rather than by example: no serialized broker
+    /// counter may share a field with a policy counter, and recording every broker category must
+    /// leave all five policy counters at zero.
+    #[test]
+    fn no_broker_counter_shares_a_field_with_a_policy_counter() {
+        let policy_fields = [
+            "unauthorized_access",
+            "policy_violations",
+            "sandbox_violations",
+            "environment_tampering",
+            "network_access_attempts",
+        ];
+        let broker_fields = [
+            "broker_unauthorized_reads",
+            "broker_unauthorized_writes",
+            "broker_process_spawn_blocks",
+            "broker_network_attempts",
+            "broker_environment_inspect_denials",
+        ];
+        for field in &broker_fields {
+            assert!(
+                !policy_fields.contains(field),
+                "{field} is shared between the broker and the policy gate"
+            );
+        }
+        let serialized = serde_json::to_value(IntegrityResult::default()).expect("integrity JSON");
+        let object = serialized.as_object().expect("integrity object");
+        assert_eq!(object.len(), policy_fields.len() + broker_fields.len());
+
+        let mut integrity = IntegrityResult::default();
+        for event in [
+            IntegrityEventKind::BrokerUnauthorizedRead,
+            IntegrityEventKind::BrokerUnauthorizedWrite,
+            IntegrityEventKind::BrokerProcessSpawnBlocked,
+            IntegrityEventKind::BrokerNetworkAttempt,
+            IntegrityEventKind::BrokerEnvironmentInspectDenied,
+        ] {
+            integrity.record(event);
+        }
+        assert_eq!(integrity.total_broker_denials(), 5);
+        for field in policy_fields {
+            let value = object_value(&integrity, field);
+            assert_eq!(value, 0, "{field} must stay zero for broker-only refusals");
+        }
+    }
+
+    fn object_value(integrity: &IntegrityResult, field: &str) -> u64 {
+        serde_json::to_value(integrity)
+            .expect("integrity JSON")
+            .as_object()
+            .expect("integrity object")
+            .get(field)
+            .and_then(serde_json::Value::as_u64)
+            .expect("counter field")
+    }
 }

@@ -10,3 +10,6 @@ description = "Trusted benchmark evaluator for ProbeLab"
 [dependencies]
 probelab-core = { path = "../core" }
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

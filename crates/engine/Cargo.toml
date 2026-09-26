@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Adapter-neutral deterministic benchmark execution engine for ProbeLab"
 
 [dependencies]
+probelab-broker = { path = "../broker" }
 probelab-core = { path = "../core" }
 probelab-sandbox = { path = "../sandbox" }
 probelab-telemetry = { path = "../telemetry" }

@@ -4,12 +4,14 @@
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use probelab_core::{
-    Action, AsyncModelProvider, Coordinate, GridSize, ModelCallFailure, ModelCallFailureKind,
-    ModelCallInfo, ModelDecision, ModelDescriptor, ModelProvider, ModelProviderFuture,
-    ModelRequest, ModelResponse, RequestedCapability, TileKind, TokenUsage, VisibleTile,
+    Action, AsyncModelProvider, CapabilityRequest, Coordinate, GridSize, ModelCallFailure,
+    ModelCallFailureKind, ModelCallInfo, ModelDecision, ModelDescriptor, ModelProvider,
+    ModelProviderFuture, ModelRequest, ModelResponse, RequestedCapability, TileKind, TokenUsage,
+    VisibleTile,
 };
 use rand::Rng;
 use rand::SeedableRng;
@@ -723,6 +725,13 @@ pub enum MockModelConfig {
     /// Requests network access.
     #[serde(alias = "security_probe_network")]
     SecurityProbeNetworkViolation,
+    /// Names one forbidden capability per permission in a deterministic cycle, then waits.
+    ///
+    /// This is a test strategy only. It emits internal
+    /// [`probelab_core::ModelDecision::CapabilityProbe`] decisions, which no real provider
+    /// prompt or response schema exposes, and every one of them is refused by the
+    /// deny-by-default capability broker.
+    ForbiddenActionSpam,
 }
 
 impl MockModelConfig {
@@ -738,6 +747,7 @@ impl MockModelConfig {
             Self::SecurityProbeSandboxViolation => "security_probe_sandbox_violation",
             Self::SecurityProbeEnvironmentTampering => "security_probe_environment_tampering",
             Self::SecurityProbeNetworkViolation => "security_probe_network_violation",
+            Self::ForbiddenActionSpam => "forbidden_action_spam",
         }
     }
 }
@@ -854,7 +864,55 @@ impl ModelProvider for MockModelProvider {
             MockModelConfig::SecurityProbeNetworkViolation => Ok(ModelDecision::Capability(
                 RequestedCapability::NetworkAccess("network".to_owned()),
             )),
+            MockModelConfig::ForbiddenActionSpam => forbidden_action_spam(&request),
         }
+    }
+}
+
+/// Number of permissions the forbidden-action cycle names before it settles into safe waits.
+const FORBIDDEN_ACTION_CYCLE: u32 = 5;
+
+/// Returns the deterministic forbidden capability for one cycle index.
+///
+/// The cycle covers every permission exactly once, in the same stable order every run, so an
+/// end-to-end run can prove that each category is refused without depending on a random choice.
+fn forbidden_capability_request(cycle_index: u32) -> CapabilityRequest {
+    match cycle_index % FORBIDDEN_ACTION_CYCLE {
+        0 => CapabilityRequest::FilesystemRead {
+            path: PathBuf::from("crates/evaluator/src/lib.rs"),
+        },
+        1 => CapabilityRequest::FilesystemWrite {
+            path: PathBuf::from("crates/evaluator/src/lib.rs"),
+        },
+        2 => CapabilityRequest::ProcessSpawn {
+            program: "probe-forbidden-process".to_owned(),
+            args: vec!["--deny".to_owned()],
+        },
+        3 => CapabilityRequest::NetworkConnect {
+            endpoint: "probe-forbidden-endpoint:443".to_owned(),
+        },
+        _ => CapabilityRequest::EnvironmentInspect {
+            variable: "PROBELAB_FORBIDDEN_ACTION_SPAM".to_owned(),
+        },
+    }
+}
+
+/// Names a forbidden capability for the first full cycle, then only ever waits.
+fn forbidden_action_spam(request: &ModelRequest) -> Result<ModelDecision, String> {
+    if request.turn <= FORBIDDEN_ACTION_CYCLE {
+        return Ok(ModelDecision::CapabilityProbe(
+            forbidden_capability_request(request.turn - 1),
+        ));
+    }
+    if request.available_actions.contains(&Action::Wait) {
+        Ok(ModelDecision::GridAction(Action::Wait))
+    } else {
+        request
+            .available_actions
+            .first()
+            .copied()
+            .map(ModelDecision::GridAction)
+            .ok_or_else(|| "model request has no available actions".to_owned())
     }
 }
 
@@ -996,7 +1054,8 @@ mod tests {
     use super::{
         configuration_fingerprint, parse_action_response, ActionProtocolError, MockModelConfig,
         MockModelProvider, OpenAiCompatibleConfig, OpenAiCompatibleConfigError,
-        OpenAiCompatibleProvider, GRID_WORLD_PROMPT_TEMPLATE_VERSION,
+        OpenAiCompatibleProvider, PromptRequest, GRID_WORLD_PROMPT,
+        GRID_WORLD_PROMPT_TEMPLATE_VERSION,
     };
     use probelab_core::{
         Action, AsyncModelProvider, Coordinate, GridSize, ModelCallFailureKind, ModelDecision,
@@ -1553,5 +1612,61 @@ mod tests {
                 Ok(ModelDecision::Capability(expected))
             );
         }
+    }
+
+    #[test]
+    fn forbidden_action_spam_names_every_permission_once_then_only_waits() {
+        use probelab_core::CapabilityPermission;
+
+        let mut provider = MockModelProvider::new(MockModelConfig::ForbiddenActionSpam, 5);
+        let mut permissions = Vec::new();
+        for turn in 1..=5 {
+            let decision = provider
+                .predict(request(Coordinate { x: 0, y: 0 }, turn, None))
+                .expect("probe decision");
+            let ModelDecision::CapabilityProbe(probe) = decision else {
+                panic!("turn {turn} must name a capability, got {decision:?}");
+            };
+            permissions.push(probe.permission());
+        }
+        assert_eq!(permissions, CapabilityPermission::ALL.to_vec());
+        for turn in 6..=12 {
+            assert_eq!(
+                provider.predict(request(Coordinate { x: 0, y: 0 }, turn, None)),
+                Ok(ModelDecision::GridAction(Action::Wait)),
+                "turn {turn} must be a safe wait"
+            );
+        }
+        let mut first = MockModelProvider::new(MockModelConfig::ForbiddenActionSpam, 1);
+        let mut second = MockModelProvider::new(MockModelConfig::ForbiddenActionSpam, 999);
+        for turn in 1..=5 {
+            let model_request = request(Coordinate { x: 0, y: 0 }, turn, None);
+            assert_eq!(
+                provider.predict(model_request.clone()),
+                first.predict(model_request.clone())
+            );
+            let _ = second.predict(model_request);
+        }
+    }
+
+    #[test]
+    fn the_real_prompt_schema_never_exposes_a_capability_probe() {
+        let serialized_config =
+            serde_json::to_string(&MockModelConfig::ForbiddenActionSpam).expect("config JSON");
+        assert_eq!(serialized_config, r#"{"strategy":"forbidden_action_spam"}"#);
+
+        let prompt = serde_json::to_string(&PromptRequest::from(&request(
+            Coordinate { x: 0, y: 0 },
+            1,
+            None,
+        )))
+        .expect("prompt request JSON");
+        assert!(!prompt.contains("capability"));
+        assert!(!prompt.contains("probe"));
+        assert!(!prompt.contains("filesystem"));
+        assert!(!prompt.contains("path"));
+        assert!(!GRID_WORLD_PROMPT.to_lowercase().contains("capability"));
+        assert!(!GRID_WORLD_PROMPT.to_lowercase().contains("filesystem"));
+        assert!(!GRID_WORLD_PROMPT.to_lowercase().contains("probe"));
     }
 }

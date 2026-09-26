@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::{Action, GridSize, Observation};
+use crate::{Action, CapabilityRequest, GridSize, Observation};
 
 /// Stable, serializable description of a model adapter configuration.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -207,6 +207,14 @@ pub enum ModelDecision {
     GridAction(Action),
     /// Request a capability unavailable to the sandbox.
     Capability(RequestedCapability),
+    /// Name one capability for broker review before any policy review.
+    ///
+    /// This variant exists only for deterministic mocks and tests. A real provider can never
+    /// produce it: the OpenAI-compatible prompt and response schema expose grid actions alone,
+    /// so `capability_probe` is neither documented to nor parseable by a model. A decision of
+    /// this kind reaches only the capability broker, and a policy gate that receives one
+    /// fails it closed.
+    CapabilityProbe(CapabilityRequest),
 }
 
 /// A model decision with optional safe provider-call metadata.

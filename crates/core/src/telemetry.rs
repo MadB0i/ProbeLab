@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
+﻿use serde::{Deserialize, Serialize};
 
 use crate::{
-    Action, ActionOutcome, IntegrityEventKind, ModelCallFailure, ModelCallInfo, Observation,
-    RequestedCapability,
+    Action, ActionOutcome, CapabilityDenial, IntegrityEventKind, ModelCallFailure, ModelCallInfo,
+    Observation, ProcessLifecycle, RequestedCapability,
 };
 
 /// Optional resource facts supplied by an environment or runtime.
@@ -53,4 +53,16 @@ pub struct TelemetryEvent {
     /// Sanitized metadata for a failed model call, when supplied.
     #[serde(default)]
     pub model_failure: Option<ModelCallFailure>,
+    /// Capability-broker refusal, when the trusted broker denied a named capability.
+    ///
+    /// A broker denial is non-executable: such an event carries no selected action, no
+    /// requested capability, no action outcome, no reward, and no invalid-action flag.
+    #[serde(default)]
+    pub broker_denial: Option<CapabilityDenial>,
+    /// The lifecycle of a requested process spawn, when one was requested on this turn.
+    ///
+    /// Present only for a spawn that reached the containment layer. A refusal that never got that
+    /// far is recorded as a `broker_denial` instead, so the two cases stay distinguishable.
+    #[serde(default)]
+    pub process_lifecycle: Option<ProcessLifecycle>,
 }

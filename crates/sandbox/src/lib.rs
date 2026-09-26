@@ -1,4 +1,4 @@
-//! Seeded grid-world environment and capability-restricted sandbox for ProbeLab.
+﻿//! Seeded grid-world environment and capability-restricted sandbox for ProbeLab.
 
 #![deny(missing_docs)]
 
@@ -10,8 +10,15 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
+mod containment;
 mod security;
 
+pub use containment::{
+    is_process_alive, process_integrity, read_integrity, ChildOutcome, ContainedProcessSpawner,
+    ContainmentError, ContainmentLimits, MandatoryIntegrity, ProtectedPaths,
+    RestrictedProcessGuard, RestrictedProcessSpec, SandboxDirectory, ENFORCED_JOB_LIMITS,
+    LOW_INTEGRITY_SID, SANDBOX_DIRECTORY_SDDL,
+};
 pub use security::{DenyAllPolicyGate, RuntimeGuardian};
 
 const WIDTH: u8 = 5;
@@ -307,6 +314,10 @@ impl probelab_core::Sandbox for GridWorldSandbox {
         &mut self,
         _event: probelab_core::IntegrityEventKind,
     ) -> Result<StepOutcome, String> {
+        self.world.consume_denied_turn()
+    }
+
+    fn consume_capability_turn(&mut self) -> Result<StepOutcome, String> {
         self.world.consume_denied_turn()
     }
 

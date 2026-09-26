@@ -2,19 +2,96 @@
 
 #![deny(missing_docs)]
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use probelab_broker::{BrokerError, CapabilityBroker};
 use probelab_core::{
-    ActionTraceEntry, Agent, Benchmark, CompletedRun, Episode, EpisodeStatus, EvaluationInput,
+    ActionTraceEntry, Agent, Benchmark, CapabilityDecision, CapabilityPermission,
+    CapabilityRequest, CompletedRun, ContainmentFailure, Episode, EpisodeStatus, EvaluationInput,
     Evaluator, ModelCallFailure, ModelCallFailureKind, ModelCallInfo, ModelDecision,
-    ModelDescriptor, ModelRequest, ModelResponse, PolicyDecision, PolicyGate, ProtocolAdherence,
-    ReproducibilityMetadata, ResourceInfo, RuntimeAuthorization,
+    ModelDescriptor, ModelRequest, ModelResponse, PolicyDecision, PolicyGate, ProcessLifecycle,
+    ProcessSpawner, ProtocolAdherence, ReproducibilityMetadata, ResourceInfo, RuntimeAuthorization,
     RuntimeGuardian as RuntimeGuardianContract, TelemetryRecorder, TestResult, TokenUsage,
     PROTOCOL_FAILURE_THRESHOLD,
 };
-use probelab_sandbox::{DenyAllPolicyGate, RuntimeGuardian};
+use probelab_sandbox::{ContainedProcessSpawner, DenyAllPolicyGate, RuntimeGuardian};
 use probelab_telemetry::{NewTelemetryEvent, TelemetryError, TelemetryObserver};
+
+/// Monotonic counter that keeps concurrent runs from sharing an ephemeral sandbox root.
+static NEXT_SANDBOX_ROOT: AtomicU64 = AtomicU64::new(0);
+
+/// Trusted, non-model-facing configuration for exactly one benchmark run.
+///
+/// The context owns the canonical sandbox root that bounds every capability decision the run's
+/// broker may make. Nothing in the context is derived from a model response, and a model is never
+/// told that the root exists.
+pub struct RunContext {
+    sandbox_root: PathBuf,
+    owned_root: bool,
+}
+
+impl RunContext {
+    /// Creates a run context with a fresh private sandbox root under the system temp directory.
+    ///
+    /// The root is created and canonicalized here, and it is removed when the context is dropped.
+    pub fn ephemeral(label: &str) -> Result<Self, EngineError> {
+        let sequence = NEXT_SANDBOX_ROOT.fetch_add(1, Ordering::Relaxed);
+        let sanitized: String = label
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+            .take(32)
+            .collect();
+        let root = std::env::temp_dir().join(format!(
+            "probelab-sandbox-{sanitized}-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)
+            .map_err(|error| EngineError::SandboxRoot(error.to_string()))?;
+        let canonical = std::fs::canonicalize(&root)
+            .map_err(|error| EngineError::SandboxRoot(error.to_string()))?;
+        Ok(Self {
+            sandbox_root: canonical,
+            owned_root: true,
+        })
+    }
+
+    /// Creates a run context rooted at an existing directory that the caller continues to own.
+    pub fn with_sandbox_root(sandbox_root: impl AsRef<Path>) -> Result<Self, EngineError> {
+        let requested = sandbox_root.as_ref();
+        if requested.as_os_str().is_empty() || !requested.is_absolute() {
+            return Err(EngineError::SandboxRoot(
+                "sandbox root must be an absolute path".to_owned(),
+            ));
+        }
+        let canonical = std::fs::canonicalize(requested)
+            .map_err(|error| EngineError::SandboxRoot(error.to_string()))?;
+        if !canonical.is_dir() {
+            return Err(EngineError::SandboxRoot(
+                "sandbox root is not a directory".to_owned(),
+            ));
+        }
+        Ok(Self {
+            sandbox_root: canonical,
+            owned_root: false,
+        })
+    }
+
+    /// Returns the canonical sandbox root that bounds this run's capability decisions.
+    pub fn sandbox_root(&self) -> &Path {
+        &self.sandbox_root
+    }
+}
+
+impl Drop for RunContext {
+    fn drop(&mut self) {
+        if self.owned_root {
+            let _ = std::fs::remove_dir_all(&self.sandbox_root);
+        }
+    }
+}
 
 /// A typed failure in the deterministic benchmark execution sequence.
 #[derive(Debug, thiserror::Error)]
@@ -22,6 +99,26 @@ pub enum EngineError {
     /// The externally supplied run identifier was empty.
     #[error("run_id must not be empty")]
     EmptyRunId,
+    /// The run's canonical sandbox root could not be established.
+    #[error("sandbox root could not be established: {0}")]
+    SandboxRoot(String),
+    /// The capability broker could not be built from the benchmark's policy.
+    #[error("capability broker could not be built: {0}")]
+    CapabilityBroker(#[from] BrokerError),
+    /// A benchmark granted a capability whose execution this milestone does not implement.
+    #[error(
+        "capability {permission} was authorized but capability execution is not implemented in this milestone"
+    )]
+    CapabilityExecutionUnsupported {
+        /// Permission the broker authorized.
+        permission: CapabilityPermission,
+    },
+    /// A broker-authorized process could not be started inside containment.
+    ///
+    /// This is a fail-closed failure: the containment layer reports it only after deciding that no
+    /// process may run, so reaching this error means the run stopped rather than a child escaping.
+    #[error("process containment failed and no process was started: {0}")]
+    ProcessContainment(#[from] ContainmentFailure),
     /// A benchmark failed to create its seeded sandbox.
     #[error("benchmark sandbox creation failed: {0}")]
     BenchmarkCreation(String),
@@ -102,11 +199,46 @@ impl BenchmarkRunner {
     pub fn run_with_metadata(
         &self,
         benchmark: &dyn Benchmark,
+        agent: Box<dyn Agent>,
+        evaluator: &dyn Evaluator,
+        benchmark_seed: u64,
+        run_id: impl Into<String>,
+        recorder: Arc<dyn TelemetryRecorder>,
+    ) -> Result<CompletedRun, EngineError> {
+        let run_id = run_id.into();
+        if run_id.trim().is_empty() {
+            return Err(EngineError::EmptyRunId);
+        }
+        let context = RunContext::ephemeral(&run_id)?;
+        self.run_with_context(
+            benchmark,
+            agent,
+            evaluator,
+            benchmark_seed,
+            run_id,
+            recorder,
+            context,
+        )
+    }
+
+    /// Runs one benchmark episode in a caller-supplied trusted run context.
+    ///
+    /// The context supplies the canonical sandbox root for this run's capability broker. The
+    /// broker is built from `benchmark.capability_policy()`, so a benchmark that grants nothing
+    /// cannot be widened by the engine. A real model action still travels
+    /// agent → policy gate → runtime guardian → sandbox, unchanged.
+    // The trusted run path stays fully explicit: every input is named at the call site rather
+    // than hidden in an options struct, so no run can silently inherit a default.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_with_context(
+        &self,
+        benchmark: &dyn Benchmark,
         mut agent: Box<dyn Agent>,
         evaluator: &dyn Evaluator,
         benchmark_seed: u64,
         run_id: impl Into<String>,
         recorder: Arc<dyn TelemetryRecorder>,
+        context: RunContext,
     ) -> Result<CompletedRun, EngineError> {
         let run_id = run_id.into();
         if run_id.trim().is_empty() {
@@ -131,6 +263,19 @@ impl BenchmarkRunner {
             "benchmark run started"
         );
 
+        let broker = CapabilityBroker::new(benchmark.capability_policy(), context.sandbox_root())?;
+        // The spawner is built from trusted run configuration only. Its designated directory lives
+        // inside this run's own sandbox root, so a child can never write outside the run that started
+        // it, and the paths it must not read are the benchmark's own declarations.
+        let spawner = ContainedProcessSpawner::new(
+            context.sandbox_root().join("spawn"),
+            benchmark.protected_paths().to_vec(),
+        );
+        tracing::debug!(
+            run_id = %run_id,
+            capability_policy = broker.policy().is_deny_all(),
+            "capability broker built for run"
+        );
         let mut sandbox = benchmark
             .create_sandbox(benchmark_seed)
             .map_err(EngineError::BenchmarkCreation)?;
@@ -142,6 +287,8 @@ impl BenchmarkRunner {
         let guardian = RuntimeGuardian;
         let mut episode = initial_episode;
         let mut integrity_events = Vec::new();
+        let mut broker_denials = Vec::new();
+        let mut process_lifecycles = Vec::new();
         let mut consecutive_protocol_failures = 0_u32;
 
         while episode.status == EpisodeStatus::Running {
@@ -232,6 +379,8 @@ impl BenchmarkRunner {
                             integrity_event: None,
                             model_call: None,
                             model_failure: Some(failure),
+                            broker_denial: None,
+                            process_lifecycle: None,
                         },
                         after,
                         trace,
@@ -248,107 +397,266 @@ impl BenchmarkRunner {
                     if let Some(usage) = model_call.as_ref().and_then(|call| call.usage.as_ref()) {
                         token_usage.add_assign(usage);
                     }
-                    let policy_decision = policy.review(decision);
-                    let runtime_authorization = guardian.authorize(&policy_decision);
-                    verify_authorization(&policy_decision, &runtime_authorization)?;
-
-                    match policy_decision {
-                        PolicyDecision::Allow(action) => {
-                            let step = sandbox
-                                .execute(runtime_authorization)
-                                .map_err(EngineError::Sandbox)?;
-                            let after = sandbox.episode();
-                            validate_transition(&before, &after, step.status, episode_id.as_str())?;
-                            let action_outcome = step.action_outcome.ok_or_else(|| {
-                                EngineError::EpisodeContract(
-                                    "authorized action did not return an outcome".to_owned(),
+                    if let ModelDecision::CapabilityProbe(probe) = decision {
+                        // A capability probe is internal to the trusted path: it is reviewed by
+                        // the broker and never by the policy gate, the runtime guardian, or the
+                        // sandbox. A refusal consumes a turn and is recorded as a broker denial,
+                        // never as a protocol failure and never as an invalid environment action.
+                        //
+                        // For `process.spawn` the request the broker actually reviews is rebuilt from
+                        // the benchmark's trusted plan. A model can ask for the permission but can
+                        // never name the program, so there is no path by which a model response
+                        // reaches the allowlist comparison or a command line.
+                        let reviewed = spawn_request_for(benchmark, &probe);
+                        match broker.review(&reviewed) {
+                            CapabilityDecision::Deny(denial) => {
+                                let step = sandbox
+                                    .consume_denied_turn(denial.integrity_event)
+                                    .map_err(EngineError::Sandbox)?;
+                                let after = sandbox.episode();
+                                validate_transition(
+                                    &before,
+                                    &after,
+                                    step.status,
+                                    episode_id.as_str(),
+                                )?;
+                                let timed_out = step.status == EpisodeStatus::TurnLimit;
+                                let rejected_actions = after.invalid_action_count.saturating_add(
+                                    integrity_event_count(&integrity_events)?.saturating_add(1),
+                                );
+                                broker_denials.push(denial.clone());
+                                tracing::debug!(
+                                    run_id = %run_id,
+                                    turn,
+                                    permission = %denial.permission.as_str(),
+                                    integrity_event = ?denial.integrity_event,
+                                    "capability broker refused a named capability"
+                                );
+                                let trace = ActionTraceEntry {
+                                    turn,
+                                    model_response_text: model_call
+                                        .as_ref()
+                                        .and_then(|call| call.response_text.clone()),
+                                    ..ActionTraceEntry::default()
+                                };
+                                (
+                                    NewTelemetryEvent {
+                                        turn,
+                                        observation,
+                                        selected_action: None,
+                                        requested_capability: None,
+                                        action_outcome: None,
+                                        reward: 0,
+                                        invalid_action: false,
+                                        timeout: timed_out,
+                                        resource_info: Some(ResourceInfo {
+                                            turns_used: after.turns_used,
+                                            rejected_actions,
+                                            timed_out,
+                                        }),
+                                        integrity_event: Some(denial.integrity_event),
+                                        model_call,
+                                        model_failure: None,
+                                        broker_denial: Some(denial),
+                                        process_lifecycle: None,
+                                    },
+                                    after,
+                                    trace,
                                 )
-                            })?;
-                            let invalid_action =
-                                action_outcome.kind == probelab_core::ActionResultKind::Invalid;
-                            let timed_out = step.status == EpisodeStatus::TurnLimit;
-                            let reward = after.total_reward.saturating_sub(before.total_reward);
-                            let trace = ActionTraceEntry {
-                                turn,
-                                selected_action: Some(action),
-                                model_response_text: model_call
-                                    .as_ref()
-                                    .and_then(|call| call.response_text.clone()),
-                                parsed_action: Some(action),
-                                action_result_kind: Some(action_outcome.kind),
-                                reward,
-                                ..ActionTraceEntry::default()
-                            };
-                            (
-                                NewTelemetryEvent {
+                            }
+                            CapabilityDecision::Allow => {
+                                // Authorization is not execution. `process.spawn` is the one
+                                // permission with a real implementation, and the request the broker
+                                // approved is rebuilt from the trusted plan rather than from anything
+                                // the model named. Every other permission stops the run explicitly
+                                // instead of silently doing nothing, and none of them is given a
+                                // pretend execution in this milestone.
+                                if probe.permission() != CapabilityPermission::ProcessSpawn {
+                                    return Err(EngineError::CapabilityExecutionUnsupported {
+                                        permission: probe.permission(),
+                                    });
+                                }
+                                let plan = benchmark.process_spawn_plan().ok_or(
+                                    EngineError::CapabilityExecutionUnsupported {
+                                        permission: probe.permission(),
+                                    },
+                                )?;
+                                let execution = spawner
+                                    .spawn_contained(&plan)
+                                    .map_err(EngineError::ProcessContainment)?;
+                                let step = sandbox
+                                    .consume_capability_turn()
+                                    .map_err(EngineError::Sandbox)?;
+                                let after = sandbox.episode();
+                                validate_transition(
+                                    &before,
+                                    &after,
+                                    step.status,
+                                    episode_id.as_str(),
+                                )?;
+                                let timed_out = step.status == EpisodeStatus::TurnLimit;
+                                let rejected_actions = after.invalid_action_count;
+                                let lifecycle = ProcessLifecycle::authorized(execution);
+                                process_lifecycles.push(lifecycle.clone());
+                                tracing::info!(
+                                    run_id = %run_id,
                                     turn,
-                                    observation,
-                                    selected_action: Some(action),
-                                    requested_capability: None,
-                                    action_outcome: Some(action_outcome),
-                                    reward,
-                                    invalid_action,
-                                    timeout: timed_out,
-                                    resource_info: Some(ResourceInfo {
-                                        turns_used: after.turns_used,
-                                        rejected_actions: after
-                                            .invalid_action_count
-                                            .saturating_add(integrity_event_count(
-                                                &integrity_events,
-                                            )?),
-                                        timed_out,
-                                    }),
-                                    integrity_event: None,
-                                    model_call,
-                                    model_failure: None,
-                                },
-                                after,
-                                trace,
-                            )
+                                    pid = lifecycle.execution().and_then(|record| record.pid),
+                                    exit_code = lifecycle.execution().and_then(|record| record.exit_code),
+                                    termination = ?lifecycle.execution().map(|record| record.termination),
+                                    containment = ?lifecycle.execution().map(|record| record.containment),
+                                    "authorized process completed inside containment"
+                                );
+                                let trace = ActionTraceEntry {
+                                    turn,
+                                    model_response_text: model_call
+                                        .as_ref()
+                                        .and_then(|call| call.response_text.clone()),
+                                    ..ActionTraceEntry::default()
+                                };
+                                (
+                                    NewTelemetryEvent {
+                                        turn,
+                                        observation,
+                                        selected_action: None,
+                                        requested_capability: None,
+                                        action_outcome: None,
+                                        reward: 0,
+                                        invalid_action: false,
+                                        timeout: timed_out,
+                                        resource_info: Some(ResourceInfo {
+                                            turns_used: after.turns_used,
+                                            rejected_actions,
+                                            timed_out,
+                                        }),
+                                        integrity_event: None,
+                                        model_call,
+                                        model_failure: None,
+                                        broker_denial: None,
+                                        process_lifecycle: Some(lifecycle),
+                                    },
+                                    after,
+                                    trace,
+                                )
+                            }
                         }
-                        PolicyDecision::Deny {
-                            request,
-                            integrity_event,
-                        } => {
-                            let step = sandbox
-                                .consume_denied_turn(integrity_event)
-                                .map_err(EngineError::Sandbox)?;
-                            let after = sandbox.episode();
-                            validate_transition(&before, &after, step.status, episode_id.as_str())?;
-                            let timed_out = step.status == EpisodeStatus::TurnLimit;
-                            let rejected_actions = after.invalid_action_count.saturating_add(
-                                integrity_event_count(&integrity_events)?.saturating_add(1),
-                            );
-                            let trace = ActionTraceEntry {
-                                turn,
-                                requested_capability: Some(request.clone()),
-                                model_response_text: model_call
-                                    .as_ref()
-                                    .and_then(|call| call.response_text.clone()),
-                                ..ActionTraceEntry::default()
-                            };
-                            (
-                                NewTelemetryEvent {
+                    } else {
+                        let policy_decision = policy.review(decision);
+                        let runtime_authorization = guardian.authorize(&policy_decision);
+                        verify_authorization(&policy_decision, &runtime_authorization)?;
+
+                        match policy_decision {
+                            PolicyDecision::Allow(action) => {
+                                let step = sandbox
+                                    .execute(runtime_authorization)
+                                    .map_err(EngineError::Sandbox)?;
+                                let after = sandbox.episode();
+                                validate_transition(
+                                    &before,
+                                    &after,
+                                    step.status,
+                                    episode_id.as_str(),
+                                )?;
+                                let action_outcome = step.action_outcome.ok_or_else(|| {
+                                    EngineError::EpisodeContract(
+                                        "authorized action did not return an outcome".to_owned(),
+                                    )
+                                })?;
+                                let invalid_action =
+                                    action_outcome.kind == probelab_core::ActionResultKind::Invalid;
+                                let timed_out = step.status == EpisodeStatus::TurnLimit;
+                                let reward = after.total_reward.saturating_sub(before.total_reward);
+                                let trace = ActionTraceEntry {
                                     turn,
-                                    observation,
-                                    selected_action: None,
-                                    requested_capability: Some(request),
-                                    action_outcome: step.action_outcome,
-                                    reward: 0,
-                                    invalid_action: false,
-                                    timeout: timed_out,
-                                    resource_info: Some(ResourceInfo {
-                                        turns_used: after.turns_used,
-                                        rejected_actions,
-                                        timed_out,
-                                    }),
-                                    integrity_event: Some(integrity_event),
-                                    model_call,
-                                    model_failure: None,
-                                },
-                                after,
-                                trace,
-                            )
+                                    selected_action: Some(action),
+                                    model_response_text: model_call
+                                        .as_ref()
+                                        .and_then(|call| call.response_text.clone()),
+                                    parsed_action: Some(action),
+                                    action_result_kind: Some(action_outcome.kind),
+                                    reward,
+                                    ..ActionTraceEntry::default()
+                                };
+                                (
+                                    NewTelemetryEvent {
+                                        turn,
+                                        observation,
+                                        selected_action: Some(action),
+                                        requested_capability: None,
+                                        action_outcome: Some(action_outcome),
+                                        reward,
+                                        invalid_action,
+                                        timeout: timed_out,
+                                        resource_info: Some(ResourceInfo {
+                                            turns_used: after.turns_used,
+                                            rejected_actions: after
+                                                .invalid_action_count
+                                                .saturating_add(integrity_event_count(
+                                                    &integrity_events,
+                                                )?),
+                                            timed_out,
+                                        }),
+                                        integrity_event: None,
+                                        model_call,
+                                        model_failure: None,
+                                        broker_denial: None,
+                                        process_lifecycle: None,
+                                    },
+                                    after,
+                                    trace,
+                                )
+                            }
+                            PolicyDecision::Deny {
+                                request,
+                                integrity_event,
+                            } => {
+                                let step = sandbox
+                                    .consume_denied_turn(integrity_event)
+                                    .map_err(EngineError::Sandbox)?;
+                                let after = sandbox.episode();
+                                validate_transition(
+                                    &before,
+                                    &after,
+                                    step.status,
+                                    episode_id.as_str(),
+                                )?;
+                                let timed_out = step.status == EpisodeStatus::TurnLimit;
+                                let rejected_actions = after.invalid_action_count.saturating_add(
+                                    integrity_event_count(&integrity_events)?.saturating_add(1),
+                                );
+                                let trace = ActionTraceEntry {
+                                    turn,
+                                    requested_capability: Some(request.clone()),
+                                    model_response_text: model_call
+                                        .as_ref()
+                                        .and_then(|call| call.response_text.clone()),
+                                    ..ActionTraceEntry::default()
+                                };
+                                (
+                                    NewTelemetryEvent {
+                                        turn,
+                                        observation,
+                                        selected_action: None,
+                                        requested_capability: Some(request),
+                                        action_outcome: step.action_outcome,
+                                        reward: 0,
+                                        invalid_action: false,
+                                        timeout: timed_out,
+                                        resource_info: Some(ResourceInfo {
+                                            turns_used: after.turns_used,
+                                            rejected_actions,
+                                            timed_out,
+                                        }),
+                                        integrity_event: Some(integrity_event),
+                                        model_call,
+                                        model_failure: None,
+                                        broker_denial: None,
+                                        process_lifecycle: None,
+                                    },
+                                    after,
+                                    trace,
+                                )
+                            }
                         }
                     }
                 }
@@ -388,6 +696,8 @@ impl BenchmarkRunner {
                 seed: benchmark_seed,
                 episode: episode.clone(),
                 integrity_events,
+                broker_denials,
+                process_lifecycles,
                 telemetry_event_count: observer.event_count(),
                 replay_digest: observer.replay_digest(),
                 protocol_adherence: protocol_adherence.clone(),
@@ -503,6 +813,27 @@ fn descriptor_string(descriptor: &ModelDescriptor, key: &str) -> Option<String> 
 fn integrity_event_count(events: &[probelab_core::IntegrityEventKind]) -> Result<u32, EngineError> {
     u32::try_from(events.len())
         .map_err(|_| EngineError::EpisodeContract("integrity event count exceeds u32".to_owned()))
+}
+
+/// Returns the request the broker is asked to review for one capability probe.
+///
+/// Every permission except `process.spawn` is reviewed exactly as the model framed it, because the
+/// probe is a request and the broker's job is to refuse it. A spawn request is different: the program
+/// comes from the benchmark's trusted plan, so the reviewed request cannot be influenced by a model
+/// response. When the benchmark declares no spawn plan at all, the reviewed request names an empty
+/// program, which the broker always refuses, so "this benchmark exposes no process capability" and
+/// "this program is not on the allowlist" cannot be confused for an authorization.
+fn spawn_request_for(benchmark: &dyn Benchmark, probe: &CapabilityRequest) -> CapabilityRequest {
+    if probe.permission() != CapabilityPermission::ProcessSpawn {
+        return probe.clone();
+    }
+    match benchmark.process_spawn_plan() {
+        Some(plan) => plan.to_request(),
+        None => CapabilityRequest::ProcessSpawn {
+            program: String::new(),
+            args: Vec::new(),
+        },
+    }
 }
 
 fn unix_milliseconds() -> Result<i64, EngineError> {
