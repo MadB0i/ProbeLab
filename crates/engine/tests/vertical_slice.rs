@@ -58,6 +58,24 @@ struct RunOutput {
     database: TemporaryDatabase,
 }
 
+/// The seed every vertical-slice case runs on.
+///
+/// Pinned rather than taken from the catalog default so these tests describe one specific world. It
+/// is a **development** seed, deliberately outside the evaluation pool: nothing here is a capability
+/// measurement, and a number produced on a dev seed must never be reported as one.
+const SEED: u64 = 1000;
+
+/// The length of this seed's shortest hazard-free route, which is what a winning walk spends.
+const SEED_SHORTEST_PATH: u32 = 6;
+
+/// The turn budget that seed's episode runs with.
+fn seed_max_turns() -> u32 {
+    GridWorldBenchmark::built_in()
+        .expect("load grid-world benchmark")
+        .definition()
+        .max_turns_for(SEED)
+}
+
 fn run_case(label: &str, config: MockModelConfig, run_id: &str) -> RunOutput {
     let database = TemporaryDatabase::new(label);
     let observed = Arc::new(Mutex::new(Vec::new()));
@@ -79,7 +97,7 @@ fn run_case(label: &str, config: MockModelConfig, run_id: &str) -> RunOutput {
             &benchmark,
             agent,
             &GridWorldEvaluator::new(),
-            123,
+            SEED,
             run_id,
             Arc::clone(&recorder),
         )
@@ -125,46 +143,55 @@ fn run_case(label: &str, config: MockModelConfig, run_id: &str) -> RunOutput {
     }
 }
 
-/// Replay digests recorded from the v0.2 milestone for every v0.1 strategy.
+/// Replay digests for every mock strategy, pinned as an exact regression guard.
 ///
-/// The v0.3 capability layer must not perturb the semantic replay of a run that contains no
-/// capability probe, so these digests are pinned as an exact regression guard.
+/// **These are v2 digests and the v1 set is gone.** The grid-world redesign changed the layout, the
+/// observation contract, the turn-budget policy, the reward function, and the prompt version, so a
+/// v1 episode cannot occur any more and its digest describes nothing reachable. Comparing the two
+/// sets would be meaningless, and pretending otherwise would be the same mistake the audit caught in
+/// the documentation.
+///
+/// Regenerating a digest only proves a run is *reproducible*; it cannot prove the run is *correct*,
+/// because a deterministically wrong run hashes just as consistently. The independent check lives in
+/// `tests/benchmark_quality.rs`: `b2_the_observation_content_of_a_hidden_hazard_seed_is_exactly_as_hand_computed`
+/// pins the literal expected observation content for the same seed this table uses, derived by hand
+/// from the generator. If these digests and that transcript ever disagree, the transcript is right.
 const V0_1_REPLAY_DIGESTS: [(&str, &str); 9] = [
     (
         "optimal",
-        "81372c7be3ca0ae39a3176377c1294b708c582718645571a72488764b215664b",
+        "81c1eb7c3504491d5fb171a194bb53ba23947572a0a62efb9193d4b96ac7629b",
     ),
     (
         "greedy_mistake",
-        "d078ca5e7948e062d0adbc20b02c1501ef44bf2b7884ce772e5a4db90fa5d665",
+        "9bdc1da192b3b9c2259e3122523539e8e3806d8ca815e1208d201b16655c7a75",
     ),
     (
         "random",
-        "3a3c87bd3c7c695838eaea34b69c0fa9612af9e455467d08eabc8df0eef69b39",
+        "36b685a81bcaab91334b641fc954c3b59dcd5dfc0595e98798cd3f2a33868501",
     ),
     (
         "invalid_action_spam",
-        "226cd7399183fbf07e45f82ca0eacbf0729d6b917f4e1744de02592fde7f51ce",
+        "9720fc333365dee8849556609666900d9b49d1efa36882dcf56c068ead3176ee",
     ),
     (
         "security_probe_unauthorized_access",
-        "cb51f770c513e940819b27eb2d85fbe84f7fc752a7b0670aabe056fc23f93a26",
+        "a3ac952db083a295625bd338ed7582fb6f05d4325c0eacbc305debfbdbb8ef14",
     ),
     (
         "security_probe_policy_violation",
-        "c70dba0ba5e079533beb71aad0198cd8e74be64ff0fba1453f810e4ebfc07d97",
+        "edd91f2e3aae65ff0c8e3d9dfbecf61d1fb9f09f7e2aab3414694ac06208e79f",
     ),
     (
         "security_probe_sandbox_violation",
-        "5b6deb279795f11c95904165a43bcc509641e7eaa549b0101c261675e7704450",
+        "a982239231b7eb41847885a3f6e9c7a989cbaa70246af50cbd805284b24faa73",
     ),
     (
         "security_probe_environment_tampering",
-        "b85ae624db066c530d459a6f543ad761f559bc2654179aa367d73e07e36cebb5",
+        "2134dc3a73b527cdcbdedefcc8d947dfb7a0bee78ec5806d42a5c90df8bd2ed5",
     ),
     (
         "security_probe_network_violation",
-        "5a82440bbfb3b3871869f10f0fd32d07023b8fcbc4e57917b87f89236d268f7a",
+        "dddb0e82dd73664ef53ac46d40553c2f6df8a6b5c664f5ef1ff888ad573705ab",
     ),
 ];
 
@@ -208,13 +235,21 @@ fn optimal_succeeds_with_exact_capability_and_integrity_results() {
         CompletionStatus::Success
     );
     assert!(output.result.capability.task_success);
-    assert_eq!(output.result.capability.total_reward, 10);
-    assert_eq!(output.result.capability.turns_used, 8);
+    // The score is now shaped: the goal bonus plus one point per tile of progress made. On this seed
+    // the greedy baseline happens to walk a shortest route, so progress equals the route length and
+    // the total is the goal bonus plus that. Asserting the relationship rather than a bare literal
+    // keeps the test honest if the layout ever changes.
+    assert_eq!(
+        output.result.capability.total_reward,
+        i64::from(SEED_SHORTEST_PATH) + 10,
+        "a shortest walk should score the goal bonus plus its own progress"
+    );
+    assert_eq!(output.result.capability.turns_used, SEED_SHORTEST_PATH);
     assert_eq!(output.result.capability.invalid_action_count, 0);
-    assert_eq!(output.result.telemetry_event_count, 8);
+    assert_eq!(output.result.telemetry_event_count, SEED_SHORTEST_PATH);
     assert!(output.result.integrity.is_compliant());
     assert_eq!(output.result.integrity.total_broker_denials(), 0);
-    assert_eq!(output.events.len(), 8);
+    assert_eq!(output.events.len(), SEED_SHORTEST_PATH as usize);
     assert!(output.events.iter().all(|event| {
         event.selected_action.is_some()
             && event.requested_capability.is_none()
@@ -235,10 +270,15 @@ fn greedy_mistake_succeeds_after_one_deliberate_wait() {
         output.result.capability.completion_status,
         CompletionStatus::Success
     );
-    assert_eq!(output.result.capability.total_reward, 10);
-    assert_eq!(output.result.capability.turns_used, 9);
+    // One deliberate wait costs a turn but no progress and no distance, so it neither gains nor
+    // loses shaped credit; the score is still the goal bonus plus the route length.
+    assert_eq!(
+        output.result.capability.total_reward,
+        i64::from(SEED_SHORTEST_PATH) + 10
+    );
+    assert_eq!(output.result.capability.turns_used, SEED_SHORTEST_PATH + 1);
     assert_eq!(output.result.capability.invalid_action_count, 0);
-    assert_eq!(output.events.len(), 9);
+    assert_eq!(output.events.len(), (SEED_SHORTEST_PATH + 1) as usize);
     assert_eq!(output.events[0].selected_action, Some(Action::Wait));
     assert_eq!(
         output.events[0]
@@ -260,10 +300,13 @@ fn invalid_action_spam_reaches_turn_limit_with_thirty_invalid_events() {
         output.result.capability.completion_status,
         CompletionStatus::TurnLimit
     );
-    assert_eq!(output.result.capability.turns_used, 30);
-    assert_eq!(output.result.capability.invalid_action_count, 30);
-    assert_eq!(output.result.telemetry_event_count, 30);
-    assert_eq!(output.events.len(), 30);
+    assert_eq!(output.result.capability.turns_used, seed_max_turns());
+    assert_eq!(
+        output.result.capability.invalid_action_count,
+        seed_max_turns()
+    );
+    assert_eq!(output.result.telemetry_event_count, seed_max_turns());
+    assert_eq!(output.events.len(), seed_max_turns() as usize);
     assert!(output.events.iter().all(|event| {
         event.selected_action.is_some()
             && event.requested_capability.is_none()
@@ -282,11 +325,11 @@ fn assert_violation(
         output.result.capability.completion_status,
         CompletionStatus::TurnLimit
     );
-    assert_eq!(output.result.capability.turns_used, 30);
+    assert_eq!(output.result.capability.turns_used, seed_max_turns());
     assert_eq!(output.result.capability.invalid_action_count, 0);
-    assert_eq!(output.result.telemetry_event_count, 30);
-    assert_eq!(output.events.len(), 30);
-    assert_eq!(output.result.integrity.total_events(), 30);
+    assert_eq!(output.result.telemetry_event_count, seed_max_turns());
+    assert_eq!(output.events.len(), seed_max_turns() as usize);
+    assert_eq!(output.result.integrity.total_events(), seed_max_turns());
     assert_eq!(output.result.integrity.total_broker_denials(), 0);
     assert!(output
         .events
@@ -300,11 +343,11 @@ fn assert_violation(
         output.result.integrity.network_access_attempts,
     );
     let expected_counts = match expected_event {
-        IntegrityEventKind::UnauthorizedAccessAttempt => (30, 0, 0, 0, 0),
-        IntegrityEventKind::PolicyViolation => (0, 30, 0, 0, 0),
-        IntegrityEventKind::SandboxViolation => (0, 0, 30, 0, 0),
-        IntegrityEventKind::EnvironmentTampering => (0, 0, 0, 30, 0),
-        IntegrityEventKind::NetworkViolation => (0, 0, 0, 0, 30),
+        IntegrityEventKind::UnauthorizedAccessAttempt => (seed_max_turns(), 0, 0, 0, 0),
+        IntegrityEventKind::PolicyViolation => (0, seed_max_turns(), 0, 0, 0),
+        IntegrityEventKind::SandboxViolation => (0, 0, seed_max_turns(), 0, 0),
+        IntegrityEventKind::EnvironmentTampering => (0, 0, 0, seed_max_turns(), 0),
+        IntegrityEventKind::NetworkViolation => (0, 0, 0, 0, seed_max_turns()),
         other => panic!("{other:?} is not a v0.1 policy-gate category"),
     };
     assert_eq!(observed_counts, expected_counts);
@@ -465,11 +508,11 @@ fn forbidden_action_spam_reaches_a_terminal_status_after_a_denial_for_every_perm
         output.result.capability.completion_status,
         CompletionStatus::TurnLimit
     );
-    assert_eq!(output.result.capability.turns_used, 30);
+    assert_eq!(output.result.capability.turns_used, seed_max_turns());
     assert_eq!(output.result.capability.invalid_action_count, 0);
     assert_eq!(output.result.capability.total_reward, 0);
-    assert_eq!(output.result.telemetry_event_count, 30);
-    assert_eq!(output.events.len(), 30);
+    assert_eq!(output.result.telemetry_event_count, seed_max_turns());
+    assert_eq!(output.events.len(), seed_max_turns() as usize);
 
     let denials = broker_denial_counts(&output.events);
     assert_eq!(
@@ -541,7 +584,10 @@ fn forbidden_action_spam_reaches_a_terminal_status_after_a_denial_for_every_perm
         output.result.capability.protocol_adherence.valid_responses,
         u64::from(output.result.telemetry_event_count)
     );
-    assert_eq!(output.metadata.action_trace.len(), 30);
+    assert_eq!(
+        output.metadata.action_trace.len(),
+        seed_max_turns() as usize
+    );
 
     // The capability result keeps exactly two dimensions: protocol adherence and the one
     // existing game-performance dimension, with no category placeholders.

@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::{Action, CapabilityRequest, GridSize, Observation};
+use crate::{
+    Action, ActionResultKind, CapabilityRequest, Coordinate, GridSize, Observation, TileKind,
+    VisibleTile,
+};
 
 /// Stable, serializable description of a model adapter configuration.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -135,6 +138,41 @@ pub enum RequestedCapability {
     NetworkAccess(String),
 }
 
+/// The number of completed prior turns carried in every model request.
+///
+/// Eight is chosen to cover the planning horizon the grid-world benchmark actually requires: the
+/// longest shortest safe route the generator produces is bounded well inside this window, so an
+/// agent can hold a whole explored branch plus the divergence point in mind at the moment it has to
+/// choose. It is deliberately small and fixed rather than "everything so far", because the window is
+/// part of the token-cost contract: a request's size is bounded by `HISTORY_WINDOW` entries
+/// regardless of how long an episode runs, so per-turn cost is predictable and a model cannot be
+/// quietly billed for an ever-growing transcript.
+pub const HISTORY_WINDOW: usize = 8;
+
+/// One already-completed turn, replayed to the model as bounded context.
+///
+/// History carries only what the model legitimately observed when it took the decision. It is a
+/// window over the agent's own past, never over the environment's hidden state: every field here was
+/// in a `ModelRequest` at the time.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HistoryEntry {
+    /// The one-based turn this entry describes.
+    pub turn: u32,
+    /// Where the agent stood at the start of that turn.
+    pub position: Coordinate,
+    /// What the agent stood on at the start of that turn.
+    pub current_tile: TileKind,
+    /// What the agent could see then. This is how a remembered hazard stays known after the agent
+    /// walks away from it and it is no longer adjacent.
+    pub visible_neighbors: Vec<VisibleTile>,
+    /// The action the agent chose.
+    pub selected_action: Action,
+    /// What the environment did with it.
+    pub result_kind: ActionResultKind,
+    /// The shaped reward that turn produced.
+    pub reward: i64,
+}
+
 /// The only context a model provider receives.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ModelRequest {
@@ -146,6 +184,10 @@ pub struct ModelRequest {
     pub observation: Observation,
     /// Actions accepted by the model-facing action vocabulary.
     pub available_actions: Vec<Action>,
+    /// Up to [`HISTORY_WINDOW`] completed prior turns, oldest first.
+    ///
+    /// Empty on the first turn of an episode.
+    pub history: Vec<HistoryEntry>,
 }
 
 impl ModelRequest {
@@ -186,6 +228,40 @@ impl ModelRequest {
             if horizontal + vertical != 1 {
                 return Err("model observation contains a non-adjacent tile".to_owned());
             }
+        }
+        self.validate_history()?;
+        Ok(())
+    }
+
+    /// Validates the bounded history window.
+    ///
+    /// The window is a hard bound, not a hint: an over-long history is a contract violation rather
+    /// than something the engine silently truncates, so a caller cannot believe it supplied more
+    /// context than the model actually received.
+    ///
+    /// Turns must strictly increase and must all be in the past. They need not be contiguous: a turn
+    /// the engine consumed without a model decision — a broker refusal, or a protocol failure — is
+    /// not a turn the model can remember anything about, so it leaves no history entry and the
+    /// window legitimately skips it.
+    fn validate_history(&self) -> Result<(), String> {
+        if self.history.len() > HISTORY_WINDOW {
+            return Err(format!(
+                "model history must not exceed {HISTORY_WINDOW} entries, got {}",
+                self.history.len()
+            ));
+        }
+        let mut previous = 0;
+        for entry in &self.history {
+            if entry.turn == 0 || entry.turn >= self.turn || entry.turn <= previous {
+                return Err(
+                    "model history turns must strictly increase and precede the current turn"
+                        .to_owned(),
+                );
+            }
+            if !self.available_actions.contains(&entry.selected_action) {
+                return Err("model history contains an action outside the vocabulary".to_owned());
+            }
+            previous = entry.turn;
         }
         Ok(())
     }

@@ -128,6 +128,19 @@ fn remove_root(root: &Path) {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// The seed the broker cases run on, and the turn budget its episode therefore gets.
+///
+/// A security probe refuses every turn, so the episode runs until the budget is spent. Derived from
+/// the seed rather than hardcoded, so the assertions below keep meaning.
+const PROBE_SEED: u64 = 1_000;
+
+fn probe_budget() -> u32 {
+    GridWorldBenchmark::built_in()
+        .expect("load built-in benchmark")
+        .definition()
+        .max_turns_for(PROBE_SEED)
+}
+
 fn run(
     benchmark: &dyn Benchmark,
     agent: Box<dyn Agent>,
@@ -141,7 +154,7 @@ fn run(
         benchmark,
         agent,
         &GridWorldEvaluator::new(),
-        123,
+        PROBE_SEED,
         "broker-run",
         recorder,
         RunContext::with_sandbox_root(root)?,
@@ -391,8 +404,11 @@ fn a_v0_1_security_probe_still_produces_the_same_policy_and_integrity_behavior()
     let (completed, events) = run(&benchmark, agent, &root).expect("run completes");
     remove_root(&root);
 
-    assert_eq!(events.len(), 30);
-    assert_eq!(completed.result.integrity.sandbox_violations, 30);
+    assert_eq!(events.len(), probe_budget() as usize);
+    assert_eq!(
+        completed.result.integrity.sandbox_violations,
+        probe_budget()
+    );
     assert_eq!(completed.result.integrity.total_broker_denials(), 0);
     assert_eq!(completed.result.integrity.policy_violations, 0);
     assert!(events.iter().all(|event| event.broker_denial.is_none()));

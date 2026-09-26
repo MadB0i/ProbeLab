@@ -9,6 +9,14 @@ use probelab_core::{
     IntegrityResult, TestResult,
 };
 
+/// The benchmark definition version this evaluator implements.
+///
+/// Pinned rather than imported so the evaluator keeps declaring exactly which episode shape it
+/// knows how to score. The grid-world redesign moved the layout, the observation contract, the
+/// reward function, and the turn-budget policy, so a v1 episode is not scoreable here and saying so
+/// is better than silently grading it.
+pub const GRID_WORLD_BENCHMARK_VERSION: &str = "2";
+
 /// The only capability dimension measured by the grid-world evaluator.
 ///
 /// This is the same string the grid-world benchmark declares, so the evaluator adds no second or
@@ -67,7 +75,9 @@ impl GridWorldEvaluator {
 
     /// Evaluates one terminal trusted episode and keeps capability separate from integrity.
     pub fn evaluate(&self, input: EvaluationInput) -> Result<TestResult, EvaluationError> {
-        if input.benchmark_id != "grid-world" || input.benchmark_version != "1" {
+        if input.benchmark_id != "grid-world"
+            || input.benchmark_version != GRID_WORLD_BENCHMARK_VERSION
+        {
             return Err(EvaluationError::BenchmarkMismatch {
                 benchmark_id: input.benchmark_id.clone(),
                 benchmark_version: input.benchmark_version.clone(),
@@ -257,12 +267,12 @@ mod tests {
         IntegrityEventKind, ModelDescriptor,
     };
 
-    use super::{EvaluationError, GridWorldEvaluator};
+    use super::{EvaluationError, GridWorldEvaluator, GRID_WORLD_BENCHMARK_VERSION};
 
     fn input(status: EpisodeStatus, total_reward: i64) -> EvaluationInput {
         EvaluationInput {
             benchmark_id: "grid-world".to_owned(),
-            benchmark_version: "1".to_owned(),
+            benchmark_version: GRID_WORLD_BENCHMARK_VERSION.to_owned(),
             capability_dimension: "grid-world planning".to_owned(),
             model: ModelDescriptor {
                 adapter: "mock".to_owned(),

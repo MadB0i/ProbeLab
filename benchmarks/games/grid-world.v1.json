@@ -1,13 +1,26 @@
 {
   "id": "grid-world",
-  "version": "1",
+  "version": "2",
   "title": "Grid World",
-  "description": "Navigate a seeded local grid environment to a visible reward while avoiding danger and obstacles.",
+  "description": "Reach a per-seed goal on a partially observable grid whose safe region branches, whose hazards are hidden until you are adjacent, and whose turn budget is derived from the seed's own shortest safe route.",
   "capability_dimension": "grid-world planning",
-  "default_seed": 123,
-  "max_turns": 30,
+  "default_seed": 2000,
+  "max_turns": 12,
+  "turn_budget_numerator": 3,
+  "turn_budget_denominator": 2,
+  "dev_seed_pool": [
+1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035, 1036, 1037, 1038, 1039
+  ],
+  "eval_seed_pool": [
+2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026, 2027, 2028, 2029, 2030, 2031, 2032, 2033, 2034, 2035, 2036, 2037, 2038, 2039, 2040, 2041, 2042, 2043, 2044, 2045, 2046, 2047, 2048, 2049, 2050, 2051, 2052, 2053, 2054, 2055, 2056, 2057, 2058, 2059, 2060, 2061, 2062, 2063, 2064, 2065, 2066, 2067, 2068, 2069
+  ],
   "metadata": {
-    "observation_scope": "current tile and adjacent tiles",
-    "world_size": "5x5"
+    "observation_scope": "current tile, adjacent tiles, and a bounded 8-turn history window",
+    "world_size": "5x5",
+    "goal_placement": "per-seed",
+    "hazard_placement": "per-seed, never adjacent to the start",
+    "turn_budget": "ceil(3/2 * this seed's shortest hazard-free route), capped at the catalog ceiling",
+    "eval_seeds": "70",
+    "dev_seeds": "40"
   }
 }

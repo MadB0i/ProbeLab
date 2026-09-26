@@ -1,7 +1,8 @@
 # ProbeLab architecture
 
-*Describes workspace version 0.4.1 (`main` at `0608e92` and the audit-commit follow-up). Sections are
-labelled with the milestone that introduced them; the highest is v0.4.1.*
+*Describes workspace version 0.4.1. Sections are labelled with the milestone that introduced them; the
+highest is **v0.5 (benchmark design)**. The security sections describe v0.4.1 and are unchanged by
+v0.5, which touched no containment, broker, or telemetry internals.*
 
 ## Trust boundary
 
@@ -58,6 +59,108 @@ The protocol-failure threshold is `PROTOCOL_FAILURE_THRESHOLD = 3` consecutive f
 ## Benchmark definitions
 
 Benchmark files use JSON because the workspace already depends on `serde_json` for telemetry and IPC. Definitions are versioned, embedded in the Rust binary, and validated before execution. The model prompt is a separate versioned artifact under `prompts/`; prompt changes require a version bump rather than silent in-place edits.
+
+## v0.5 benchmark design: making the measurement mean something
+
+`docs/AUDIT-2026-09-26.md` found that the grid-world benchmark did not measure reasoning. It was a
+5×5 branching-free corridor with a goal pinned to a compile-time corner, a start pinned to the
+opposite corner, a fixed 30-turn budget for an 8-move optimum, and a reward function that could only
+return `{0, +10, −10}`. A three-comparison one-step heuristic solved it on every seed, and a "run" was
+one episode on one hardcoded seed with no baseline and no interval. Six changes fix that, and each is
+worth stating with its reason rather than its mechanics.
+
+**Start and goal are drawn per seed.** This is the change that matters most, and it is not the obvious
+one. With the start pinned at a corner, every other tile lies down-and-to-the-right of it, so
+"prefer DOWN, then RIGHT" is not a heuristic — it is an exact distance descent. Measured on an
+intermediate version of this generator that still had a fixed start, the greedy baseline scored **60 of
+70** evaluation seeds *for that reason alone*. Drawing the start per seed means the goal is as often
+up-and-to-the-left as down-and-to-the-right, so no fixed direction is correct.
+
+**The safe region branches.** A monotone spine guarantees a route, and a seeded dead-end spur is hung
+off every eligible spine cell, so the safe tiles form a tree with real forks rather than a path. At a
+fork, both branches look identical and only one leads anywhere. Branch *hazards* are placed only on
+spine cells off the shortest route, never on a spur: an earlier version picked from every safe cell
+and routinely dropped a hazard onto a spur tip, deleting the very branch it was meant to guard and
+quietly returning the seed to a corridor.
+
+**The turn budget is derived per seed.** A seed's budget is `ceil(3/2 × its own shortest hazard-free
+route)`, computed deterministically from the seed. The catalog's `max_turns` is an **upper bound over
+every seed**, not any seed's budget, and the definition is refused at load time if any admitted seed
+needs more. The 1.5 factor is the calibration: it affords one wrong turn and a correction, and nothing
+more. Under the old fixed 30-turn budget an agent could waste 22 turns wandering and still win, which
+is exactly why a search policy and a coin flip were indistinguishable.
+
+**Observation is partial, and memory is therefore necessary.** The agent sees its own tile, its four
+adjacent tiles, and `distance_to_goal` — a scalar, never a direction. A hazard two or more steps away
+is invisible and does not appear at all; once the agent walks away from a hazard, it leaves the payload
+again while remaining a real hazard. Nothing in the observation reminds the agent, so remembering it is
+the agent's job. Disclosing a scalar distance is strictly *less* than what v1 leaked, where the goal
+position was a compile-time constant an agent could hardcode.
+
+**`ModelRequest` carries a bounded history.** Up to `HISTORY_WINDOW = 8` completed prior turns, each
+carrying only what the agent legitimately observed when it decided: position, visible neighbours, the
+action chosen, the result, and the reward. The bound is part of the token-cost contract — a request's
+size is capped regardless of episode length — and it is enforced as a hard limit in
+`ModelRequest::validate`, so a caller cannot believe it supplied more context than the model received.
+Eight covers the planning horizon the generator produces: the longest shortest safe route fits inside
+the window with room to spare. A turn the engine consumed without a model decision — a broker refusal
+or a protocol failure — leaves no history entry, so window turns need not be contiguous.
+
+**Reward is shaped, while completion status stays categorical.** Each move pays `+1` per tile of
+Manhattan distance reduced toward the goal and `−1` per tile increased, with `+10` on reaching the
+goal and `−10` on a hazard. `CompletionStatus` is unchanged and remains the pass/fail signal; the
+shaped total is what distinguishes two runs that both end in `turn_limit`. Under the old terminal-only
+score a run that walked 22 correct steps and timed out scored exactly the same as one that emitted
+`WAIT` thirty times.
+
+### The measurement harness is library and CLI only
+
+`crates/engine/src/harness.rs` runs N episodes over a seed pool and reports a scalar with a Wilson
+score interval. Two pools are declared in the benchmark definition — 40 dev seeds and 70 eval seeds —
+and **their disjointness is validated when the definition loads** and again in the harness
+constructor, not merely asserted by convention. A single shared seed would mean every "held out" number
+had already been tuned against, and nothing downstream could detect it.
+
+The interval is Wilson rather than the normal approximation because at 30–70 episodes with rates near 0
+or 1 for a weak policy, the normal approximation is at its worst exactly where it matters: it collapses
+to zero width at 0 % and runs outside `[0, 1]` at 100 %. Wilson stays inside the unit interval and keeps
+sensible width at both ends.
+
+**Scope, stated plainly: the desktop app does not use this.** `run_benchmark` in the Tauri layer still
+runs exactly one episode against one seed. The UI shows no success rate, no confidence interval, and no
+baseline. `crates/engine/examples/grid_world_harness.rs` is the command-line surface
+(`cargo run -p probelab-engine --example grid_world_harness -- --episodes 70`), and the test suite is
+the other consumer. Wiring multi-episode aggregates into the desktop app is follow-on UI work, and the
+existence of this module should not be read as the app having gained a statistics panel.
+
+### What the greedy-beats-search proof does and does not show
+
+`crates/engine/tests/benchmark_quality.rs::b6_greedy_is_beaten_by_a_search_policy_with_disjoint_intervals`
+measures a scripted one-step-lookahead baseline and a scripted search-based reference solver over the
+70 evaluation seeds and asserts their Wilson intervals do not overlap. Measured on this build:
+
+| Policy | Successes | Rate | 95 % CI | Mean reward | Mean turns |
+| --- | --- | --- | --- | --- | --- |
+| random (uniform valid moves) | 0 / 70 | 0.000 | [0.000, 0.052] | −2.79 | 7.60 |
+| greedy (one-step lookahead) | 20 / 70 | 0.286 | [0.193, 0.401] | 4.93 | 7.59 |
+| search (reference solver) | 66 / 70 | 0.943 | [0.862, 0.978] | 14.60 | 5.91 |
+
+**What that shows:** the instrument has a measurable range. A trivial heuristic is beatable, and the
+gap is large enough that it is not sampling noise. Whatever a real model scores on this benchmark is
+therefore a statement about something the greedy baseline does not do.
+
+**What it does not show:** that any real model reasons well. The reference solver is a scripted search
+over the agent's own accumulated evidence — it is given no layout, no goal position, and no seed, and
+it learns the map only from tiles it has seen. Beating a scripted searcher is a low bar for a competent
+model, and passing this benchmark is a *precondition* for a model being interesting here, not a
+result. No connected model has been run against the v2 benchmark yet; that is the next step.
+
+A useful negative result from building this: the branches and the hidden hazards are *not* what
+establish the gap. An intermediate generator with a per-seed start but a branch-free safe region still
+showed a wide gap (greedy 0.357, search 1.000). Reverting to the full v1 design — corner start,
+corner goal, fixed 30-turn budget — collapsed it to greedy 0.971 against search 1.000, with overlapping
+intervals, and the proof test failed as it should. The load-bearing changes are the per-seed start and
+the tight per-seed budget; the branching adds difficulty on top.
 
 ## v0.3 capability broker
 

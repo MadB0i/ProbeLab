@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(metadata, completed.metadata);
         assert_eq!(metadata.provider, "deterministic-mock");
         assert_eq!(metadata.prompt_template_version, "deterministic_mock_v1");
-        assert_eq!(metadata.environment_version, "grid_world_environment_v1");
+        assert_eq!(metadata.environment_version, "grid_world_environment_v2");
         assert_eq!(
             metadata.action_trace.len(),
             stored.telemetry_event_count as usize
@@ -355,7 +355,7 @@ mod tests {
             .expect("stored metadata");
         assert_eq!(metadata.provider, "openai-compatible");
         assert_eq!(metadata.model, "test-model");
-        assert_eq!(metadata.prompt_template_version, "grid_world_v1");
+        assert_eq!(metadata.prompt_template_version, "grid_world_v2");
         assert!(!metadata.configuration_fingerprint.is_empty());
         assert!(!metadata.action_trace.is_empty());
         assert!(metadata
@@ -479,7 +479,7 @@ mod tests {
             .expect("the engine must not fail");
         assert_eq!(completed.metadata.provider, "openai-compatible");
         assert_eq!(completed.metadata.model, "blocking-model");
-        assert_eq!(completed.metadata.prompt_template_version, "grid_world_v1");
+        assert_eq!(completed.metadata.prompt_template_version, "grid_world_v2");
         assert_eq!(
             completed.result.capability.completion_status,
             CompletionStatus::ModelProtocolFailure

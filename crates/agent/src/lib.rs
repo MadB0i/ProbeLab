@@ -175,6 +175,7 @@ mod tests {
             },
             current_tile: probelab_core::TileKind::Safe,
             visible_neighbors: Vec::new(),
+            distance_to_goal: 1,
             max_turns: 1,
             remaining_turns: 1,
             available_actions: vec![Action::Wait],
@@ -184,6 +185,7 @@ mod tests {
             turn: 1,
             observation,
             available_actions: vec![Action::Wait],
+            history: Vec::new(),
         };
 
         assert_eq!(agent.descriptor().strategy, "fixed");
@@ -208,11 +210,13 @@ mod tests {
                 },
                 current_tile: probelab_core::TileKind::Safe,
                 visible_neighbors: Vec::new(),
+                distance_to_goal: 1,
                 max_turns: 1,
                 remaining_turns: 1,
                 available_actions: vec![Action::Wait],
             },
             available_actions: vec![Action::Wait],
+            history: Vec::new(),
         };
         let response = agent.decide_with_metadata(request).expect("async decision");
         assert_eq!(response.decision, ModelDecision::GridAction(Action::Wait));

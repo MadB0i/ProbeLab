@@ -2,6 +2,9 @@
 
 #![deny(missing_docs)]
 
+pub mod harness;
+
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -11,11 +14,11 @@ use probelab_broker::{BrokerError, CapabilityBroker};
 use probelab_core::{
     ActionTraceEntry, Agent, Benchmark, CapabilityDecision, CapabilityPermission,
     CapabilityRequest, CompletedRun, ContainmentFailure, Episode, EpisodeStatus, EvaluationInput,
-    Evaluator, ModelCallFailure, ModelCallFailureKind, ModelCallInfo, ModelDecision,
+    Evaluator, HistoryEntry, ModelCallFailure, ModelCallFailureKind, ModelCallInfo, ModelDecision,
     ModelDescriptor, ModelRequest, ModelResponse, PolicyDecision, PolicyGate, ProcessLifecycle,
     ProcessSpawner, ProtocolAdherence, ReproducibilityMetadata, ResourceInfo, RuntimeAuthorization,
     RuntimeGuardian as RuntimeGuardianContract, TelemetryRecorder, TestResult, TokenUsage,
-    PROTOCOL_FAILURE_THRESHOLD,
+    HISTORY_WINDOW, PROTOCOL_FAILURE_THRESHOLD,
 };
 use probelab_sandbox::{ContainedProcessSpawner, DenyAllPolicyGate, RuntimeGuardian};
 use probelab_telemetry::{NewTelemetryEvent, TelemetryError, TelemetryObserver};
@@ -290,6 +293,7 @@ impl BenchmarkRunner {
         let mut broker_denials = Vec::new();
         let mut process_lifecycles = Vec::new();
         let mut consecutive_protocol_failures = 0_u32;
+        let mut history_window_state: VecDeque<HistoryEntry> = VecDeque::new();
 
         while episode.status == EpisodeStatus::Running {
             if episode.turns_used >= summary.max_turns {
@@ -305,11 +309,16 @@ impl BenchmarkRunner {
             })?;
             validate_observation_contract(&observation, turn, summary.max_turns)?;
             let available_actions = sandbox.available_actions();
+            let observed_position = observation.position;
+            let observed_tile = observation.current_tile;
+            let observed_neighbors = observation.visible_neighbors.clone();
+            let history = history_window(&history_window_state);
             let request = ModelRequest {
                 episode_id: episode_id.clone(),
                 turn,
                 observation: observation.clone(),
                 available_actions: available_actions.clone(),
+                history,
             };
             request.validate().map_err(EngineError::ModelRequest)?;
             let raw_response = agent.decide_with_metadata(request);
@@ -666,6 +675,22 @@ impl BenchmarkRunner {
             if let Some(integrity_event) = observed.integrity_event {
                 integrity_events.push(integrity_event);
             }
+            // Only a turn the model actually decided and the environment actually executed becomes
+            // history. A broker refusal or a protocol failure consumed a turn but produced no
+            // decision, so there is nothing for the model to remember about it.
+            if let (Some(action), Some(result_kind)) =
+                (trace.selected_action, trace.action_result_kind)
+            {
+                history_window_state.push_back(HistoryEntry {
+                    turn,
+                    position: observed_position,
+                    current_tile: observed_tile,
+                    visible_neighbors: observed_neighbors,
+                    selected_action: action,
+                    result_kind,
+                    reward: trace.reward,
+                });
+            }
             action_trace.push(trace);
             if after.status == EpisodeStatus::Running && after.turns_used >= summary.max_turns {
                 return Err(EngineError::EpisodeContract(
@@ -865,19 +890,40 @@ fn validate_initial_episode(episode: &Episode, benchmark_seed: u64) -> Result<()
 fn validate_observation_contract(
     observation: &probelab_core::Observation,
     turn: u32,
-    max_turns: u32,
+    catalog_max_turns: u32,
 ) -> Result<(), EngineError> {
     if observation.turn != turn {
         return Err(EngineError::EpisodeContract(
             "observation turn does not equal the next consumed turn".to_owned(),
         ));
     }
-    if observation.max_turns != max_turns {
+    // The environment owns its episode length, and since the grid-world redesign that length is
+    // derived per seed from its own shortest safe route. The catalog number is an upper bound over
+    // every seed, so an environment may legitimately run shorter but must never run longer: that
+    // keeps the published ceiling meaningful instead of decorative.
+    if observation.max_turns == 0 || observation.max_turns > catalog_max_turns {
         return Err(EngineError::EpisodeContract(
-            "sandbox max_turns differs from benchmark summary".to_owned(),
+            "sandbox max_turns must be non-zero and within the benchmark catalog ceiling"
+                .to_owned(),
         ));
     }
     Ok(())
+}
+
+/// Materialises the bounded history window handed to the model.
+///
+/// The window is capped at [`HISTORY_WINDOW`] entries and drops the oldest first, so a request's
+/// size is bounded no matter how long the episode runs. This is the whole point of the bound: an
+/// unbounded transcript would let per-turn cost grow without limit and would quietly make
+/// long-horizon reasoning a privilege of long budgets.
+fn history_window(history: &VecDeque<HistoryEntry>) -> Vec<HistoryEntry> {
+    history
+        .iter()
+        .rev()
+        .take(HISTORY_WINDOW)
+        .rev()
+        .cloned()
+        .collect()
 }
 
 fn verify_authorization(

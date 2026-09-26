@@ -26,8 +26,8 @@ pub use execution::{
     ProcessSpawnPlan, ProcessSpawner, StreamCapture, TerminationReason, STREAM_PREVIEW_LIMIT,
 };
 pub use model::{
-    ModelCallFailure, ModelCallFailureKind, ModelCallInfo, ModelDecision, ModelDescriptor,
-    ModelRequest, ModelResponse, RequestedCapability, TokenUsage,
+    HistoryEntry, ModelCallFailure, ModelCallFailureKind, ModelCallInfo, ModelDecision,
+    ModelDescriptor, ModelRequest, ModelResponse, RequestedCapability, TokenUsage, HISTORY_WINDOW,
 };
 pub use observation::{Coordinate, GridSize, Observation, TileKind, VisibleTile};
 pub use outcome::{ActionOutcome, ActionResultKind, Episode, EpisodeStatus, StepOutcome};

@@ -4,6 +4,16 @@
 full verification, including the commands that produced each number, is in
 `docs/AUDIT-2026-09-26.md`.*
 
+**v0.5 changed no security property.** The benchmark redesign that followed the audit touched the
+environment generator, the observation contract, the reward function, the model-facing prompt, and the
+measurement harness. It changed **no** containment, broker, policy-gate, or telemetry internals, and
+`git diff --stat` over `crates/broker` and `crates/sandbox/src/containment` for that milestone is
+empty. Two consequences worth stating plainly: the grid-world benchmark still grants no capabilities and
+still declares no `ProcessSpawnPlan`, so every containment row below remains as unreachable from the
+desktop product as it was; and the model-facing surface grew by exactly two fields — a bounded
+`history` window of the agent's own prior observations, and a `distance_to_goal` scalar. Neither
+discloses terrain the agent had not already seen, and neither is a capability.
+
 This document separates the layers in ProbeLab and states plainly what each one does and does not
 enforce. ProbeLab does not claim an OS sandbox where none exists, and it does not claim a capability
 broker is an OS sandbox.

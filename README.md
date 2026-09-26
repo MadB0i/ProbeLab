@@ -2,7 +2,14 @@
 
 *Workspace version 0.4.1.*
 
-ProbeLab is a local-first AI capability and agent evaluation environment. The current vertical slice measures two honest dimensions: **grid-world planning** and **protocol adherence**. Both claims are under active scrutiny — see `docs/AUDIT-2026-09-26.md`, which finds that the grid-world benchmark as shipped does not yet measure reasoning ability, and says what has to change before it does.
+ProbeLab is a local-first AI capability and agent evaluation environment. The current vertical slice measures two honest dimensions: **grid-world planning** and **protocol adherence**. Both claims are under active scrutiny — see `docs/AUDIT-2026-09-26.md`, which found that the grid-world benchmark as shipped did not measure reasoning ability, and `ARCHITECTURE.md`, which describes the v0.5 redesign that addresses it.
+
+**Where the benchmark stands.** The grid-world benchmark was rebuilt so that a one-step-lookahead
+heuristic is beatable by a search over the agent's own observations, with confidence intervals that do
+not overlap: greedy 0.286 `[0.193, 0.401]` against a scripted search reference at 0.943
+`[0.862, 0.978]`, over 70 held-out seeds. **No real model has been measured on it yet.** Run
+`cargo run -p probelab-engine --example grid_world_harness -- --episodes 70` to reproduce those numbers.
+The desktop app still runs a single episode and shows no success rate, no interval, and no baseline.
 
 The trusted engine owns the environment, capability broker, policy boundary, sandbox, observer, persistence, and evaluator. A connected OpenAI-compatible provider receives only the model-facing observation request; it never receives the hidden map, benchmark implementation, evaluator, filesystem paths, or persistence handles.
 
@@ -44,7 +51,7 @@ PowerShell example:
 $env:OPENAI_COMPATIBLE_API_KEY = "your-key"
 ```
 
-The provider performs one HTTP attempt per model call. There are no automatic retries. Temperature defaults to `0`, timeout to `30s`, and `max_tokens` to `200`. The exact prompt is versioned in `prompts/grid_world_v1.md`; changing its wording requires a prompt-version bump.
+The provider performs one HTTP attempt per model call. There are no automatic retries. Temperature defaults to `0`, timeout to `30s`, and `max_tokens` to `200`. The exact prompt is versioned in `prompts/grid_world_v2.md`; changing its wording requires a prompt-version bump.
 
 A connected run sends the versioned system prompt and the serialized model-facing request to the configured endpoint. Remote providers are not generally deterministic; mock runs remain replayable from their seed and action trace.
 
@@ -53,10 +60,13 @@ A connected run sends the versioned system prompt and the serialized model-facin
 ```text
 cargo fmt --check
 cargo build --workspace --locked
-cargo test --workspace --locked
+cargo test --workspace --all-targets --locked
 cargo clippy --workspace --all-targets -- -D warnings
 pnpm --dir apps/desktop build
 ```
+
+Use `--all-targets` on the test command. `cargo build --workspace` does **not** compile test targets, so
+it will happily pass with a broken test in the tree; `--all-targets` is what actually builds them.
 
 The CI workflow runs the Rust checks and the frontend production build on every push, plus the containment suite on both `ubuntu-latest` and `windows-latest`. A local desktop smoke test can be run with:
 
@@ -82,7 +92,7 @@ See `ARCHITECTURE.md` for decisions and `docs/SECURITY-STATUS.md` for enforced v
 
 ### Implemented
 
-- Seeded 5×5 grid world with safe corridor, danger, obstacles, wait, and turn limit
+- Seeded 5×5 grid world with a per-seed start and goal, a branching safe region, hazards hidden until the agent is adjacent, a turn budget derived from each seed's own shortest safe route, and shaped reward alongside the categorical completion status
 - Deterministic mock strategies plus OpenAI-compatible async provider with strict `MOVE_*` JSON protocol
 - Deny-by-default capability broker as the primary capability boundary, with no grant path for `environment.inspect`
 - `process.spawn` as the first genuinely executable capability: broker-authorized, contained on Windows, empty child environment, declared protected paths refused to the child, full process lifecycle telemetry. Implemented and empirically proven by `crates/engine/tests/process_spawn.rs` through a test-only benchmark; no shipped benchmark declares a spawn plan or grant yet, so this becomes load-bearing when a benchmark that genuinely needs process execution (a coding-capability benchmark, say) is built

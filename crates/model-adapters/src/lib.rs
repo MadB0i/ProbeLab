@@ -11,7 +11,7 @@ use probelab_core::{
     Action, AsyncModelProvider, CapabilityRequest, Coordinate, GridSize, ModelCallFailure,
     ModelCallFailureKind, ModelCallInfo, ModelDecision, ModelDescriptor, ModelProvider,
     ModelProviderFuture, ModelRequest, ModelResponse, RequestedCapability, TileKind, TokenUsage,
-    VisibleTile,
+    VisibleTile, HISTORY_WINDOW,
 };
 use rand::Rng;
 use rand::SeedableRng;
@@ -23,19 +23,23 @@ use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
 /// Version of the embedded grid-world prompt template.
-pub const GRID_WORLD_PROMPT_TEMPLATE_VERSION: &str = "grid_world_v1";
+pub const GRID_WORLD_PROMPT_TEMPLATE_VERSION: &str = "grid_world_v2";
 
 /// Short alias for the embedded grid-world prompt template version.
 pub const PROMPT_TEMPLATE_VERSION: &str = GRID_WORLD_PROMPT_TEMPLATE_VERSION;
 
 /// Version of the trusted grid-world environment recorded for reproducibility.
-pub const GRID_WORLD_ENVIRONMENT_VERSION: &str = "grid_world_environment_v1";
+///
+/// Bumped to `v2` alongside the grid-world redesign: the layout, the observation contract, the
+/// bounded history window, and the shaped reward all changed, so a `v1` fingerprint and a `v1`
+/// replay digest describe an episode that can no longer occur.
+pub const GRID_WORLD_ENVIRONMENT_VERSION: &str = "grid_world_environment_v2";
 
 /// Stable native prompt version used by deterministic mock providers.
 pub const MOCK_PROMPT_TEMPLATE_VERSION: &str = "deterministic_mock_v1";
 
 /// Version of the benchmark included in the adapter configuration fingerprint.
-pub const GRID_WORLD_BENCHMARK_VERSION: &str = "1";
+pub const GRID_WORLD_BENCHMARK_VERSION: &str = "2";
 
 /// Configuration for an OpenAI-compatible chat-completions provider.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -410,7 +414,7 @@ pub fn configuration_fingerprint(config: &OpenAiCompatibleConfig) -> String {
     format!("{digest:x}")
 }
 
-const GRID_WORLD_PROMPT: &str = include_str!("../../../prompts/grid_world_v1.md");
+const GRID_WORLD_PROMPT: &str = include_str!("../../../prompts/grid_world_v2.md");
 
 /// An OpenAI-compatible asynchronous chat-completions provider.
 pub struct OpenAiCompatibleProvider {
@@ -1049,6 +1053,412 @@ fn invalid_boundary_action(request: &ModelRequest) -> Result<Action, String> {
     }
 }
 
+/// The result of flood-filling the remembered map.
+///
+/// `route` maps each reachable cell to its parent *nearer the agent*, because the fill starts at the
+/// agent. Walking parents back from a target and then reversing the result yields the whole path.
+struct Flooded {
+    /// Every cell reachable without entering a known hazard or obstacle.
+    reached: std::collections::BTreeSet<(u8, u8)>,
+    /// Parent pointer per reachable cell, pointing toward the agent.
+    route: BTreeMap<(u8, u8), (u8, u8)>,
+}
+
+/// A reference solver that follows the revealed distance gradient and remembers where it has been.
+///
+/// This exists to answer one question empirically: **is there anything left for a policy that
+/// reasons to do, that a one-step-lookahead policy cannot already do?** If the answer were no, the
+/// benchmark would be measuring format compliance and nothing else, and no number of extra episodes
+/// would fix that.
+///
+/// The solver is **not privileged**. It receives exactly the `ModelRequest` any other agent receives
+/// and learns from the tiles it has seen and the distance readings it has taken. It is never told the
+/// layout, the goal, the start, or the seed. A solver that could read the hidden map would not be
+/// evidence about anything.
+///
+/// # The two things it has that greedy does not
+///
+/// **A working direction.** The observation reports `distance_to_goal` — a scalar, never a
+/// direction. The solver infers *which way* the goal lies by predicting what each move will do to
+/// that number, taking the move, and checking whether the prediction held. A prediction that fails
+/// flips the sign of the axis it travelled on. Working out which way is closer, from evidence, is
+/// not something a policy that reacts to a single tile can do.
+///
+/// **A memory of what it has already tried.** This is the part that matters. Per cell, the solver
+/// records which moves it has already attempted and does not repeat them until every alternative is
+/// exhausted. Without that, walking into a cul-de-sac means stepping back in on the next turn and
+/// oscillating until the budget runs out — which is exactly the failure mode that made the previous
+/// version of this benchmark unable to tell a search policy from a coin flip.
+pub struct LookaheadSolver {
+    known: BTreeMap<(u8, u8), TileKind>,
+    readings: BTreeMap<(u8, u8), u32>,
+    tried: BTreeMap<(u8, u8), Vec<Action>>,
+    seed: u64,
+}
+
+impl LookaheadSolver {
+    /// Creates a solver with an empty remembered map and no inferred direction.
+    pub fn new(seed: u64) -> Self {
+        Self {
+            known: BTreeMap::new(),
+            readings: BTreeMap::new(),
+            tried: BTreeMap::new(),
+            seed,
+        }
+    }
+
+    /// Returns the stable descriptor name for this solver.
+    pub fn strategy_name() -> &'static str {
+        "lookahead_solver"
+    }
+
+    /// Returns the seed this solver was created with.
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Records this turn's evidence and corrects the inferred direction if the last move lied.
+    fn observe(&mut self, request: &ModelRequest) -> ((u8, u8), u32) {
+        let here = (
+            request.observation.position.x,
+            request.observation.position.y,
+        );
+        let distance = request.observation.distance_to_goal;
+        self.known.insert(here, request.observation.current_tile);
+        for neighbor in &request.observation.visible_neighbors {
+            self.known.insert(
+                (neighbor.coordinate.x, neighbor.coordinate.y),
+                neighbor.tile,
+            );
+        }
+        self.readings.insert(here, distance);
+
+        (here, distance)
+    }
+
+    /// Every grid cell still consistent with all distance readings taken so far.
+    ///
+    /// This is triangulation, and it is the whole trick. Each reading says "the goal is exactly this
+    /// many Manhattan steps away", which is the boundary of a diamond centred on the agent. Two
+    /// readings on different axes normally intersect in a handful of cells, and a third collapses it
+    /// to one. Everything here comes from numbers the model was handed in its own observation: the
+    /// solver is doing arithmetic on the `distance_to_goal` field, not being told where the goal is.
+    fn consistent_goal_candidates(&self, here: (u8, u8), distance: u32) -> Vec<(u8, u8)> {
+        let mut candidates: Vec<(u8, u8)> = (0..5)
+            .flat_map(|y| (0..5).map(move |x| (x as u8, y as u8)))
+            .collect();
+        for (cell, reading) in &self.readings {
+            let expected = u32::from(cell.0.abs_diff(here.0)) + u32::from(cell.1.abs_diff(here.1));
+            let _ = expected;
+            candidates.retain(|candidate| {
+                u32::from(candidate.0.abs_diff(cell.0)) + u32::from(candidate.1.abs_diff(cell.1))
+                    == *reading
+            });
+        }
+        let _ = distance;
+        candidates
+    }
+
+    /// Decides one move.
+    fn decide(&mut self, request: &ModelRequest) -> Result<Action, String> {
+        let (here, distance) = self.observe(request);
+
+        // Standing next to the reward: take it. Nothing outranks this.
+        if let Some(action) = self.action_to_reward(request) {
+            return Ok(action);
+        }
+
+        let grid_size = request.observation.grid_size;
+        let candidates = self.consistent_goal_candidates(here, distance);
+
+        // Flood-fill what this agent knows is traversable, keeping a parent pointer per cell so a
+        // route can be walked back. An unknown tile counts as traversable: the solver re-plans every
+        // turn, so optimism costs a step rather than a life.
+        let Flooded { reached, route } = self.flood(here, grid_size);
+        if reached.len() <= 1 {
+            return self.any_legal_step(request);
+        }
+
+        // Head for the consistent goal candidate that is cheapest to reach. With more than one
+        // candidate left, the shortest reachable one is the right bet: it is the one least likely to
+        // be behind a wall the agent has not discovered.
+        let mut target: Option<((u8, u8), usize)> = None;
+        for candidate in &candidates {
+            if *candidate == here || !reached.contains(candidate) {
+                continue;
+            }
+            let hops = hops_between(here, *candidate, &route);
+            if target.is_none_or(|(_, current)| hops < current) {
+                target = Some((*candidate, hops));
+            }
+        }
+
+        if let Some((cell, _)) = target {
+            if let Some(action) = self.first_step_towards(request, cell, &route) {
+                return self.remember_and_return(here, action, request);
+            }
+        }
+
+        // No goal candidate is reachable through what the agent knows. That means the route needs
+        // ground the agent has not seen, so go and see some: step toward the reachable cell with the
+        // most unexplored neighbours, preferring one this cell has not tried yet. This is the
+        // exploration that replaces luck, and the per-cell memory is what stops it looping.
+        let mut frontier: Option<((u8, u8), usize)> = None;
+        for cell in &reached {
+            if *cell == here {
+                continue;
+            }
+            let unknown_neighbours = orthogonal(*cell, grid_size)
+                .into_iter()
+                .filter(|next| !self.known.contains_key(next))
+                .count();
+            if unknown_neighbours == 0 {
+                continue;
+            }
+            let hops = hops_between(here, *cell, &route);
+            let better = match frontier {
+                None => true,
+                Some((_, current_hops)) => unknown_neighbours > current_hops,
+            };
+            if better {
+                frontier = Some((*cell, unknown_neighbours));
+            }
+            let _ = hops;
+        }
+        if let Some((cell, _)) = frontier {
+            if let Some(action) = self.first_step_towards(request, cell, &route) {
+                return self.remember_and_return(here, action, request);
+            }
+        }
+        self.any_legal_step(request)
+    }
+
+    fn remember_and_return(
+        &mut self,
+        here: (u8, u8),
+        action: Action,
+        _request: &ModelRequest,
+    ) -> Result<Action, String> {
+        let attempted = self.tried.entry(here).or_default();
+        if !attempted.contains(&action) {
+            attempted.push(action);
+        }
+        Ok(action)
+    }
+
+    /// Every cell reachable through tiles this agent has not learned to be impassable.
+    fn flood(&self, here: (u8, u8), grid_size: GridSize) -> Flooded {
+        let mut reached = std::collections::BTreeSet::new();
+        let mut route: BTreeMap<(u8, u8), (u8, u8)> = BTreeMap::new();
+        let mut queue = std::collections::VecDeque::from([here]);
+        reached.insert(here);
+        while let Some(cell) = queue.pop_front() {
+            for next in orthogonal(cell, grid_size) {
+                if reached.contains(&next) {
+                    continue;
+                }
+                if self
+                    .known
+                    .get(&next)
+                    .is_some_and(|tile| matches!(tile, TileKind::Obstacle | TileKind::Danger))
+                {
+                    continue;
+                }
+                reached.insert(next);
+                route.insert(next, cell);
+                queue.push_back(next);
+            }
+        }
+        Flooded { reached, route }
+    }
+
+    /// The first move of the shortest remembered route from the agent to `target`.
+    fn first_step_towards(
+        &self,
+        request: &ModelRequest,
+        target: (u8, u8),
+        route: &BTreeMap<(u8, u8), (u8, u8)>,
+    ) -> Option<Action> {
+        let here = (
+            request.observation.position.x,
+            request.observation.position.y,
+        );
+        if here == target {
+            return None;
+        }
+        // `route` maps each cell to its parent *nearer the agent*, because the flood fill started at
+        // the agent. So the path has to be walked from the target back to the agent and then
+        // reversed before the first step can be read off it.
+        let mut path = vec![target];
+        let mut cursor = target;
+        let mut guard = 0;
+        while cursor != here {
+            cursor = *route.get(&cursor)?;
+            path.push(cursor);
+            guard += 1;
+            if guard > 64 {
+                return None;
+            }
+        }
+        path.reverse();
+        let first = *path.get(1)?;
+        for action in [Action::Up, Action::Down, Action::Left, Action::Right] {
+            if !request.available_actions.contains(&action) {
+                continue;
+            }
+            if let Some(destination) = action_coordinate(
+                action,
+                request.observation.position,
+                request.observation.grid_size,
+            ) {
+                if (destination.x, destination.y) == first {
+                    return Some(action);
+                }
+            }
+        }
+        None
+    }
+
+    /// The action that steps onto an adjacent reward tile, if one is adjacent.
+    fn action_to_reward(&self, request: &ModelRequest) -> Option<Action> {
+        for action in [Action::Up, Action::Down, Action::Left, Action::Right] {
+            if !request.available_actions.contains(&action) {
+                continue;
+            }
+            let Some(destination) = action_coordinate(
+                action,
+                request.observation.position,
+                request.observation.grid_size,
+            ) else {
+                continue;
+            };
+            if self
+                .known
+                .get(&(destination.x, destination.y))
+                .is_some_and(|tile| *tile == TileKind::Reward)
+            {
+                return Some(action);
+            }
+        }
+        None
+    }
+
+    fn any_legal_step(&self, request: &ModelRequest) -> Result<Action, String> {
+        request
+            .available_actions
+            .first()
+            .copied()
+            .ok_or_else(|| "model request has no available actions".to_owned())
+    }
+}
+
+/// The number of hops from `from` to `to` along a parent-pointer forest, if it is connected.
+fn hops_between(from: (u8, u8), to: (u8, u8), route: &BTreeMap<(u8, u8), (u8, u8)>) -> usize {
+    if from == to {
+        return 0;
+    }
+    let mut cursor = to;
+    let mut hops = 1;
+    let mut guard = 0;
+    while route.get(&cursor) != Some(&from) {
+        match route.get(&cursor) {
+            Some(parent) => cursor = *parent,
+            None => return usize::MAX,
+        }
+        hops += 1;
+        guard += 1;
+        if guard > 64 {
+            return usize::MAX;
+        }
+    }
+    hops
+}
+impl ModelProvider for LookaheadSolver {
+    fn descriptor(&self) -> ModelDescriptor {
+        let mut parameters = BTreeMap::new();
+        parameters.insert(
+            "configuration".to_owned(),
+            serde_json::Value::String(LookaheadSolver::strategy_name().to_owned()),
+        );
+        parameters.insert(
+            "provider".to_owned(),
+            serde_json::Value::String("deterministic-mock".to_owned()),
+        );
+        parameters.insert(
+            "model".to_owned(),
+            serde_json::Value::String(format!("native-mock-{}", LookaheadSolver::strategy_name())),
+        );
+        parameters.insert(
+            "prompt_template_version".to_owned(),
+            serde_json::Value::String(MOCK_PROMPT_TEMPLATE_VERSION.to_owned()),
+        );
+        parameters.insert(
+            "configuration_fingerprint".to_owned(),
+            serde_json::Value::String(lookahead_fingerprint(self.seed)),
+        );
+        parameters.insert(
+            "environment_version".to_owned(),
+            serde_json::Value::String(GRID_WORLD_ENVIRONMENT_VERSION.to_owned()),
+        );
+        parameters.insert(
+            "privileged".to_owned(),
+            serde_json::Value::String("false".to_owned()),
+        );
+        ModelDescriptor {
+            adapter: "deterministic-mock-v1".to_owned(),
+            strategy: LookaheadSolver::strategy_name().to_owned(),
+            seed: self.seed,
+            parameters,
+        }
+    }
+
+    fn predict(&mut self, request: ModelRequest) -> Result<ModelDecision, String> {
+        request.validate()?;
+        self.decide(&request).map(ModelDecision::GridAction)
+    }
+}
+
+fn lookahead_fingerprint(seed: u64) -> String {
+    #[derive(Serialize)]
+    struct FingerprintInput {
+        strategy: &'static str,
+        seed: u64,
+        prompt_template_version: &'static str,
+        benchmark_version: &'static str,
+        environment_version: &'static str,
+        history_window: usize,
+    }
+
+    let input = FingerprintInput {
+        strategy: LookaheadSolver::strategy_name(),
+        seed,
+        prompt_template_version: MOCK_PROMPT_TEMPLATE_VERSION,
+        benchmark_version: GRID_WORLD_BENCHMARK_VERSION,
+        environment_version: GRID_WORLD_ENVIRONMENT_VERSION,
+        history_window: HISTORY_WINDOW,
+    };
+    let bytes = serde_json::to_vec(&input).expect("lookahead fingerprint input is serializable");
+    let digest = Sha256::digest(bytes);
+    format!("{digest:x}")
+}
+
+fn orthogonal(cell: (u8, u8), grid_size: GridSize) -> Vec<(u8, u8)> {
+    let mut cells = Vec::with_capacity(4);
+    if cell.1 > 0 {
+        cells.push((cell.0, cell.1 - 1));
+    }
+    if cell.0 > 0 {
+        cells.push((cell.0 - 1, cell.1));
+    }
+    if cell.0 + 1 < grid_size.width {
+        cells.push((cell.0 + 1, cell.1));
+    }
+    if cell.1 + 1 < grid_size.height {
+        cells.push((cell.0, cell.1 + 1));
+    }
+    cells
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1472,6 +1882,7 @@ mod tests {
                 },
                 current_tile: TileKind::Safe,
                 visible_neighbors,
+                distance_to_goal: 1,
                 max_turns: 20,
                 remaining_turns: 20 - turn + 1,
                 available_actions: vec![
@@ -1489,6 +1900,7 @@ mod tests {
                 Action::Right,
                 Action::Wait,
             ],
+            history: Vec::new(),
         }
     }
 

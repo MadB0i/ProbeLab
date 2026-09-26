@@ -8,11 +8,21 @@ Windows host at `main` `0608e92`; see `docs/AUDIT-2026-09-26.md` for the full au
 - Rust 2021 workspace, pinned 1.97.0 toolchain, MIT license, and CI for Rust/frontend verification.
 - Documented core domain contracts for sync/async model providers, agents, observations, actions, environments, episodes, benchmarks, evaluators, sandbox, policy, runtime guardian, telemetry, capability results, integrity results, and reproducibility metadata.
 - Seeded 5×5 grid world with safe corridor, danger, obstacles, wait, reward, invalid transitions, distinct turn-limit termination, and non-mutating protocol-failure turns.
+- **v0.5 benchmark redesign.** The audit found the grid world did not measure reasoning, so six things changed, each load-bearing for a different reason:
+  - Start **and** goal are drawn per seed. This is the change that mattered most: with the start at a corner, "prefer DOWN then RIGHT" was an exact distance descent, not a heuristic, and the greedy baseline scored 60 of 70 evaluation seeds for that reason alone.
+  - The safe region branches. A monotone spine guarantees a route and a seeded dead-end spur is hung off every eligible spine cell, so the safe tiles form a tree with real forks. Branch hazards are placed only on spine cells off the shortest route, never on a spur — an earlier version dropped hazards onto spur tips and deleted the branches it was guarding.
+  - The turn budget is derived per seed as `ceil(3/2 × that seed's shortest hazard-free route)`. The catalog `max_turns` is an upper bound over every seed, and a definition whose ceiling any admitted seed exceeds is refused at load time.
+  - Observation is genuinely partial. The agent sees its own tile, its four neighbours, and `distance_to_goal` — a scalar, never a direction. Hazards more than one step away are absent, and a hazard leaves the payload again once the agent walks away, so remembering it is the agent's job.
+  - `ModelRequest` carries a bounded rolling history of up to `HISTORY_WINDOW = 8` completed turns, enforced as a hard limit in `ModelRequest::validate`. The bound is part of the token-cost contract: request size is capped regardless of episode length.
+  - Reward is shaped by distance-to-goal progress, so two runs that both end in `turn_limit` are distinguishable. `CompletionStatus` is unchanged and remains the categorical pass/fail signal.
+- **v0.5 measurement harness** in `crates/engine/src/harness.rs`: runs N episodes over a declared seed pool and reports a success rate with a Wilson score interval. The 40 dev seeds and 70 eval seeds are disjoint, and that disjointness is validated when the definition loads and again in the harness constructor, not left to convention. Random and greedy baselines are measured through the identical harness with identical telemetry.
+- A scripted search-based reference solver (`LookaheadSolver`) that is **not privileged**: it receives the same `ModelRequest` as any other agent, is never told the layout, goal, start, or seed, and learns the map only from tiles it has seen plus the distance readings it has taken.
+- `prompts/grid_world_v2.md` states the objective explicitly. v1 never mentioned reward, danger, or winning anywhere, so it was measuring whether a model could infer the goal from English field names.
 - Deterministic mock strategies: optimal, random, greedy mistake, invalid-action spam, and five independent security probes.
 - Fail-closed policy/runtime authorization and non-executable denied-turn transitions.
 - Deny-by-default capability broker (`crates/broker`) as the primary v0.3 boundary: `filesystem.read`, `filesystem.write`, `process.spawn`, `network.connect`, and `environment.inspect`, with canonicalized path checks, independent read/write roots, explicit program and endpoint allowlists, and an unconditional `environment.inspect` denial that has no grant path.
 - Value-free typed broker denials that consume a turn with no action, movement, or reward, are recorded as non-executable telemetry, and count only in five integrity counters disjoint from the five policy-gate counters.
-- Async OpenAI-compatible adapter with env-only credentials, HTTPS/loopback validation, no redirects/retries, typed failures, usage metadata, strict `MOVE_*` JSON protocol, and versioned `prompts/grid_world_v1.md`.
+- Async OpenAI-compatible adapter with env-only credentials, HTTPS/loopback validation, no redirects/retries, typed failures, usage metadata, strict `MOVE_*` JSON protocol, and versioned `prompts/grid_world_v2.md`.
 
 - Append-only SQLite telemetry, semantic replay digest, immutable result/run-metadata storage, token aggregation, and secret-redaction tests.
 - Adapter-neutral engine, independent grid-world evaluator, protocol adherence classification, and `model_protocol_failure` after three consecutive model-call failures.
@@ -29,14 +39,14 @@ Windows host at `main` `0608e92`; see `docs/AUDIT-2026-09-26.md` for the full au
 
 - `cargo fmt --check` — the gate. Bare form is correct here because the workspace root is a *virtual* manifest, so `cargo fmt` already covers every member; `--all` is equivalent at this root.
 - `cargo build --workspace --locked`
-- `cargo test --workspace --locked` — 223 tests passing
+- `cargo test --workspace --all-targets --locked` — 247 tests passing
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `pnpm install` in `apps/desktop`
 - `pnpm build` in `apps/desktop`
 - Local wiremock provider tests cover success, usage, timeout, HTTP error, malformed/empty/invalid output, taxonomy, empty credential, and redaction.
 - Broker tests cover per-permission allow/deny, independent read and write roots, canonicalization and traversal refusal, the unconditional `environment.inspect` denial, denial telemetry validation, and an end-to-end forbidden-action-spam run whose integrity counts are asserted against recorded denial telemetry.
 - Windows host: `cargo test -p probelab-sandbox --locked`, including the real low-integrity child escape test (`%ComSpec%` writes one file inside the designated directory and is refused outside it), the job-object limit read-back, the CPU-limit kill, and the drop-kills-child check. All 10 containment tests pass.
-- `cargo test --workspace --locked`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo build --workspace --locked` all pass on a Windows host, including the Tauri desktop crate. `cargo fmt --all` (without `--check`) is the command that *applies* formatting; it is not a verification gate and is deliberately not listed as one above.
+- `cargo test --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo build --workspace --locked` all pass on a Windows host, including the Tauri desktop crate. `cargo fmt --all` (without `--check`) is the command that *applies* formatting; it is not a verification gate and is deliberately not listed as one above.
 
 
 ## Status by area
@@ -67,29 +77,42 @@ Windows host at `main` `0608e92`; see `docs/AUDIT-2026-09-26.md` for the full au
 
 ## Next recommended milestone
 
-The audit in `docs/AUDIT-2026-09-26.md` supersedes the ordering below: its §4 finding is that the
-grid-world benchmark does not currently measure reasoning, and every item below is either a
-prerequisite for or an amplifier of that weakness. Making the existing benchmark meaningful comes
-first; see that document for the specific list.
+The audit in `docs/AUDIT-2026-09-26.md` ordered this milestone ahead of Windows identity isolation,
+and the ordering held: the containment stack is real, well tested, and empirically holds, but it is
+**unreachable from the product** because no shipped benchmark declares a spawn plan. Hardening it
+further would harden a code path no run can invoke. The benchmark, by contrast, is the project's actual
+output, and it was measuring nothing.
 
-1. Make the grid-world benchmark actually measure something: per-seed goals and hazards, a branching
-   safe region, genuine partial observability, shaped reward, a bounded history window, N ≥ 30
-   episodes over a held-out seed pool, recorded random and greedy baselines, and a scalar score with
-   a confidence interval.
-2. Expose an authorized `filesystem.read` to a contained child through the same executor, so the child can be given a read-only view of a granted root while the evaluator stays refused.
-3. Add an AppContainer layer so a contained child stops sharing the parent's user and groups. Use
-   `DeriveAppContainerSidFromAppContainerName`; `CreateAppContainerProfile` fails with
-   `HRESULT 0x80070017` on this host. Do **not** retry the restricted-token approach — it is
-   unusable without elevation, for the reason recorded in `docs/SECURITY-STATUS.md`.
-4. Add persisted trace read/recompute verification and explicit run cancellation/time budgets.
-5. Add a second benchmark — and the reasoning, coding, safety, and injection dimensions — only after
-   the capability/integrity classification remains stable and one benchmark is known to measure
-   something.
-
-
+1. **Run real models against the v2 benchmark and publish the numbers.** The instrument now has a
+   measured range — greedy 0.286 `[0.193, 0.401]` against a search reference at 0.943
+   `[0.862, 0.978]` over 70 held-out seeds. What is missing is any real model on that scale. This is
+   the first step that produces a capability claim rather than a calibration of the instrument.
+2. **Surface the aggregate in the desktop app.** The harness is library-and-CLI only by deliberate
+   scope, so the UI still runs one episode and shows no success rate, no Wilson interval, and no
+   baseline. That gap is real and is the obvious next UI milestone.
+3. **Add the AppContainer identity layer**, using `DeriveAppContainerSidFromAppContainerName`.
+   `CreateAppContainerProfile` fails with `HRESULT 0x80070017` on this host. Do **not** retry the
+   restricted-token approach — it is unusable without elevation, for the reason recorded in
+   `docs/SECURITY-STATUS.md`.
+4. **Expose an authorized `filesystem.read`** to a contained child through the same executor, so a
+   child can be given a read-only view of a granted root while the evaluator stays refused.
+5. **Add the remaining capability dimensions** — reasoning, coding, safety, injection — and the
+   Benchmark SDK, now that one benchmark is known to measure something. Multiplies correctly only
+   because of step 1.
+6. Persisted trace read/recompute verification and explicit run cancellation.
 
 ## Known limitations
 
+- **The multi-episode harness is not wired into the desktop app.** `run_benchmark` still runs one
+  episode against one seed. No success rate, confidence interval, or baseline appears in the UI, and
+  the presence of `crates/engine/src/harness.rs` should not be read otherwise.
+- **No real model has been measured on the v2 benchmark.** The reference solver is a scripted searcher,
+  not a model. Beating it is a low bar, and a pass here is a precondition for being interesting rather
+  than a result worth reporting.
+- **The greedy/search gap comes from the per-seed start and the tight per-seed budget, not from the
+  branches.** An intermediate branch-free generator still showed a wide gap. Branching and hidden
+  hazards add difficulty on top; if they are later found not to discriminate, they are calibration
+  rather than the measurement.
 - A model adapter is trusted Rust code in the desktop process. Interface design restricts the model-facing action space but does not isolate arbitrary adapter code from host resources.
 - The Windows containment layer hardens a child ProbeLab already decided to start. It is not a code sandbox: no syscall filtering, no filesystem or registry virtualization, no network restriction, and the child keeps the parent's user and privileges.
 - Remote provider responses are not deterministic even at temperature zero; mock runs are the replayability baseline.

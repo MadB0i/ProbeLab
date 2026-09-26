@@ -1,4 +1,4 @@
-﻿//! Independent telemetry observation and append-only persistence for ProbeLab.
+//! Independent telemetry observation and append-only persistence for ProbeLab.
 
 #![deny(missing_docs)]
 
@@ -102,6 +102,9 @@ impl NewTelemetryEvent {
             turn: self.turn,
             observation: self.observation.clone(),
             available_actions: self.observation.available_actions.clone(),
+            // Telemetry records one turn's observation, not a rolling window, so there is no history
+            // to revalidate here. The bound is enforced where history is built, in the engine.
+            history: Vec::new(),
         }
         .validate()
         .map_err(TelemetryError::InvalidEvent)?;
@@ -997,6 +1000,7 @@ mod tests {
             },
             current_tile: TileKind::Safe,
             visible_neighbors: Vec::new(),
+            distance_to_goal: 1,
             max_turns: 10,
             remaining_turns: 11 - turn,
             available_actions: vec![Action::Wait],

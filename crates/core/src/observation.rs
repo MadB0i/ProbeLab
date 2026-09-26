@@ -56,6 +56,17 @@ pub struct Observation {
     pub current_tile: TileKind,
     /// Only immediately adjacent terrain; the hidden map is omitted.
     pub visible_neighbors: Vec<VisibleTile>,
+    /// Manhattan distance from the agent to the goal.
+    ///
+    /// This is a gradient, not a map. The agent learns *how far* the reward tile is and never *which
+    /// way*, so descending it requires choosing a direction rather than being handed one. Disclosing
+    /// a scalar is also strictly less than what the previous version of this benchmark leaked, where
+    /// the goal was a compile-time constant the agent could hardcode.
+    ///
+    /// It is what makes the task solvable without luck: a policy that hill-climbs on this signal
+    /// while remembering where it has been can escape a local minimum, whereas a policy that reacts
+    /// to a single tile cannot.
+    pub distance_to_goal: u32,
     /// Maximum configured episode turns.
     pub max_turns: u32,
     /// Turns remaining before termination.

@@ -515,7 +515,7 @@ mod tests {
         assert!(!status.message.contains(MISSING_KEY_VARIABLE));
         assert_eq!(status.provider, "openai-compatible");
         assert_eq!(status.model, "test-model");
-        assert_eq!(status.prompt_template_version, "grid_world_v1");
+        assert_eq!(status.prompt_template_version, "grid_world_v2");
         assert_eq!(status.credential_source, "environment");
     }
 

@@ -1,4 +1,4 @@
-﻿use std::collections::VecDeque;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use probelab_agent::AsyncProviderAgent;
@@ -131,7 +131,7 @@ fn run_scripted(
             benchmark,
             Box::new(ScriptedAgent::new(responses)),
             &GridWorldEvaluator::new(),
-            123,
+            SCRIPT_SEED,
             "scripted-run",
             recorder,
         )
@@ -140,13 +140,24 @@ fn run_scripted(
     (completed, observed)
 }
 
-fn built_in_benchmark() -> GridWorldBenchmark {
-    let mut definition = GridWorldBenchmark::built_in()
+/// The seed every scripted protocol case runs on.
+///
+/// A scripted agent that always answers `WAIT` runs until the episode's budget is spent, so these
+/// tests are really about "the episode lasted exactly as long as the seed's budget says". Pinned to a
+/// dev-pool seed and derived, never hardcoded, so the assertions keep meaning if the budget policy
+/// changes.
+const SCRIPT_SEED: u64 = 1_000;
+
+/// The turn budget `SCRIPT_SEED`'s episode runs with.
+fn script_budget() -> u32 {
+    GridWorldBenchmark::built_in()
         .expect("load built-in benchmark")
         .definition()
-        .clone();
-    definition.max_turns = 30;
-    GridWorldBenchmark::from_definition(definition).expect("build benchmark")
+        .max_turns_for(SCRIPT_SEED)
+}
+
+fn built_in_benchmark() -> GridWorldBenchmark {
+    GridWorldBenchmark::built_in().expect("load built-in benchmark")
 }
 
 #[test]
@@ -179,7 +190,7 @@ fn malformed_responses_recover_before_the_three_strike_threshold() {
             .capability
             .protocol_adherence
             .valid_responses,
-        28
+        u64::from(script_budget()) - 2
     );
     assert_eq!(
         completed
@@ -187,9 +198,9 @@ fn malformed_responses_recover_before_the_three_strike_threshold() {
             .capability
             .protocol_adherence
             .total_model_calls,
-        30
+        u64::from(script_budget())
     );
-    assert_eq!(events.len(), 30);
+    assert_eq!(events.len(), script_budget() as usize);
     assert_eq!(
         events[0].model_failure.as_ref().map(|failure| failure.kind),
         Some(ModelCallFailureKind::MalformedResponse)
@@ -250,7 +261,7 @@ impl Benchmark for RestrictedBenchmark {
     fn summary(&self) -> BenchmarkSummary {
         BenchmarkSummary {
             benchmark_id: "grid-world".to_owned(),
-            benchmark_version: "1".to_owned(),
+            benchmark_version: probelab_evaluator::GRID_WORLD_BENCHMARK_VERSION.to_owned(),
             title: "test".to_owned(),
             description: "test".to_owned(),
             capability_dimension: "grid-world planning".to_owned(),
@@ -379,7 +390,7 @@ fn successful_and_failed_token_usage_is_aggregated() {
             .capability
             .protocol_adherence
             .total_model_calls,
-        30
+        u64::from(script_budget())
     );
 }
 
@@ -498,7 +509,7 @@ fn openai_metadata_and_telemetry_redact_provider_credentials() {
             &built_in_benchmark(),
             Box::new(agent),
             &GridWorldEvaluator::new(),
-            123,
+            SCRIPT_SEED,
             "openai-secret-run",
             recorder,
         )
@@ -526,11 +537,15 @@ fn openai_metadata_and_telemetry_redact_provider_credentials() {
     );
     assert_eq!(
         completed.result.reproducibility.prompt_template_version,
-        "grid_world_v1"
+        "grid_world_v2"
     );
+    // The scripted provider reports one prompt and one completion token per call, and the call count
+    // is the episode's turn budget, so the aggregate is derived rather than a literal that would rot
+    // the moment the budget policy changed.
+    let calls = u64::from(script_budget());
     assert_eq!(
         completed.result.reproducibility.token_usage,
-        usage(30, 30, 60)
+        usage(calls, calls, calls * 2)
     );
     assert!(events
         .lock()
@@ -557,7 +572,7 @@ fn run_with_mock(run_id: &str) -> probelab_core::TestResult {
                 probelab_model_adapters::MockModelProvider::new(MockModelConfig::Optimal, 9),
             )),
             &GridWorldEvaluator::new(),
-            123,
+            SCRIPT_SEED,
             run_id,
             recorder,
         )
@@ -568,7 +583,7 @@ fn run_with_mock(run_id: &str) -> probelab_core::TestResult {
 fn evaluator_keeps_protocol_failures_outside_integrity() {
     let mut input = EvaluationInput {
         benchmark_id: "grid-world".to_owned(),
-        benchmark_version: "1".to_owned(),
+        benchmark_version: probelab_evaluator::GRID_WORLD_BENCHMARK_VERSION.to_owned(),
         capability_dimension: "grid-world planning".to_owned(),
         model: ModelDescriptor {
             adapter: "test".to_owned(),
