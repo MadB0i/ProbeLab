@@ -11,8 +11,8 @@ use probelab_core::{
     Action, ActionOutcome, ActionResultKind, CapabilityDenial, CapabilityPermission, CompletedRun,
     ContainmentStatus, IntegrityEventKind, IntegrityLevel, ModelCallFailure, ModelCallFailureKind,
     ModelCallInfo, ModelRequest, Observation, ProcessAuthorization, ProcessExecution,
-    ProcessLifecycle, RequestedCapability, ResourceInfo, RunMetadata, TelemetryEvent,
-    TelemetryRecorder, TerminationReason, TestResult,
+    ProcessLifecycle, RequestedCapability, ResourceInfo, RunMetadata, StreamCapture,
+    TelemetryEvent, TelemetryRecorder, TerminationReason, TestResult, STREAM_PREVIEW_LIMIT,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -379,6 +379,14 @@ fn validate_process_execution(execution: &ProcessExecution) -> Result<(), Teleme
                 "a process that exited must report its exit code".to_owned(),
             ));
         }
+        if execution.termination == TerminationReason::Timeout && execution.exit_code.is_some() {
+            return Err(TelemetryError::InvalidEvent(
+                "a process stopped by timeout must not report an exit code it never chose"
+                    .to_owned(),
+            ));
+        }
+        validate_stream_capture(&execution.stdout)?;
+        validate_stream_capture(&execution.stderr)?;
     } else {
         if execution.pid.is_some() || execution.exit_code.is_some() {
             return Err(TelemetryError::InvalidEvent(
@@ -399,6 +407,31 @@ fn validate_process_execution(execution: &ProcessExecution) -> Result<(), Teleme
     }
     Ok(())
 }
+
+/// Checks that one captured stream is internally consistent.
+///
+/// The point of the cap is that telemetry cannot be grown without bound by a child, so the recorded
+/// preview must never be longer than the cap, and the `truncated` flag must agree with the byte count.
+fn validate_stream_capture(capture: &StreamCapture) -> Result<(), TelemetryError> {
+    if capture.preview.chars().count() > STREAM_PREVIEW_LIMIT {
+        return Err(TelemetryError::InvalidEvent(
+            "a captured stream preview exceeds the documented cap".to_owned(),
+        ));
+    }
+    let expected_truncation = capture.bytes > STREAM_PREVIEW_LIMIT as u64;
+    if capture.truncated != expected_truncation {
+        return Err(TelemetryError::InvalidEvent(
+            "a captured stream's truncated flag disagrees with its byte count".to_owned(),
+        ));
+    }
+    if !expected_truncation && capture.bytes != capture.preview.chars().count() as u64 {
+        return Err(TelemetryError::InvalidEvent(
+            "an untruncated captured stream must carry its whole content".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_broker_denial(
     event: &NewTelemetryEvent,
     denial: &CapabilityDenial,
@@ -928,8 +961,10 @@ mod tests {
 
     use probelab_core::{
         Action, ActionOutcome, ActionResultKind, CapabilityDenial, CapabilityPermission,
-        Coordinate, GridSize, IntegrityEventKind, ModelCallFailure, ModelCallFailureKind,
-        ModelCallInfo, Observation, RequestedCapability, TileKind,
+        ContainmentStatus, Coordinate, GridSize, IntegrityEventKind, IntegrityLevel,
+        ModelCallFailure, ModelCallFailureKind, ModelCallInfo, Observation, ProcessExecution,
+        ProcessLifecycle, RequestedCapability, StreamCapture, TerminationReason, TileKind,
+        STREAM_PREVIEW_LIMIT,
     };
     use rusqlite::Connection;
 
@@ -965,6 +1000,40 @@ mod tests {
             max_turns: 10,
             remaining_turns: 11 - turn,
             available_actions: vec![Action::Wait],
+        }
+    }
+
+    /// Builds an authorized-spawn event whose execution can be varied by the caller.
+    fn authorized_spawn_event(stdout: StreamCapture) -> NewTelemetryEvent {
+        let execution = ProcessExecution {
+            spawned: true,
+            pid: Some(4242),
+            exit_code: Some(0),
+            containment: ContainmentStatus::Enforced {
+                integrity: IntegrityLevel::Low,
+                limits_applied: 7,
+            },
+            termination: TerminationReason::Exited,
+            user_cpu_millis: 3,
+            kernel_cpu_millis: 1,
+            stdout,
+            stderr: StreamCapture::empty(),
+        };
+        NewTelemetryEvent {
+            turn: 1,
+            observation: observation(1),
+            selected_action: None,
+            requested_capability: None,
+            action_outcome: None,
+            reward: 0,
+            invalid_action: false,
+            timeout: false,
+            resource_info: None,
+            integrity_event: None,
+            model_call: None,
+            model_failure: None,
+            broker_denial: None,
+            process_lifecycle: Some(ProcessLifecycle::authorized(execution)),
         }
     }
 
@@ -1624,5 +1693,94 @@ mod tests {
                 [],
             )
             .is_err());
+    }
+
+    #[test]
+    fn a_captured_stream_must_agree_with_its_own_byte_count() {
+        let small = StreamCapture::new(5, "hello".to_owned(), false);
+        authorized_spawn_event(small.clone())
+            .validate()
+            .expect("a consistent capture is recordable");
+
+        // A preview longer than the documented cap would let a child inflate telemetry.
+        let oversized = StreamCapture::new(
+            STREAM_PREVIEW_LIMIT as u64 + 1,
+            "x".repeat(STREAM_PREVIEW_LIMIT + 1),
+            true,
+        );
+        assert!(
+            matches!(
+                authorized_spawn_event(oversized).validate(),
+                Err(TelemetryError::InvalidEvent(_))
+            ),
+            "an oversized preview must be refused"
+        );
+
+        // A flag that disagrees with the byte count is refused rather than trusted.
+        let lying = StreamCapture::new(9_999, "short".to_owned(), false);
+        assert!(
+            matches!(
+                authorized_spawn_event(lying).validate(),
+                Err(TelemetryError::InvalidEvent(_))
+            ),
+            "a truncated flag that disagrees with the byte count must be refused"
+        );
+
+        // An untruncated stream must carry all of its bytes.
+        let short_change = StreamCapture::new(5, "hi".to_owned(), false);
+        assert!(
+            matches!(
+                authorized_spawn_event(short_change).validate(),
+                Err(TelemetryError::InvalidEvent(_))
+            ),
+            "an untruncated stream must not silently lose content"
+        );
+    }
+
+    #[test]
+    fn a_timeout_may_not_claim_an_exit_code() {
+        let mut event = authorized_spawn_event(StreamCapture::empty());
+        let Some(lifecycle) = event.process_lifecycle.as_mut() else {
+            panic!("the helper always attaches a lifecycle");
+        };
+        let Some(execution) = lifecycle.execution.as_mut() else {
+            panic!("the helper always attaches an execution");
+        };
+        execution.termination = TerminationReason::Timeout;
+        execution.exit_code = Some(0);
+        assert!(
+            matches!(event.validate(), Err(TelemetryError::InvalidEvent(_))),
+            "a process the host stopped must not report an exit code it never chose"
+        );
+    }
+
+    #[test]
+    fn captured_output_never_enters_the_replay_projection() {
+        // The digest is a commitment to *semantic* event content. A child's output, its byte count,
+        // its process identifier and its exit code all vary between two otherwise identical runs, so
+        // none of them may participate: otherwise a deterministic mock run would stop being
+        // reproducible the moment a benchmark grew a child.
+        let quiet = authorized_spawn_event(StreamCapture::new(0, String::new(), false));
+        let loud = authorized_spawn_event(StreamCapture::new(
+            64 * 1024,
+            "PROBELAB-LOUD-MARKER".to_owned(),
+            true,
+        ));
+        let quiet_projection =
+            serde_json::to_string(&super::ReplayPayload::new("episode", 1, &quiet))
+                .expect("replay JSON");
+        let loud_projection =
+            serde_json::to_string(&super::ReplayPayload::new("episode", 1, &loud))
+                .expect("replay JSON");
+        assert_eq!(
+            quiet_projection, loud_projection,
+            "captured output must not change the replay projection"
+        );
+        assert!(!loud_projection.contains("PROBELAB-LOUD-MARKER"));
+        assert!(!loud_projection.contains("preview"));
+        assert!(!loud_projection.contains("pid"));
+        // The shape of the lifecycle itself does participate, so a timeout is still distinguishable
+        // from a normal exit in the digest.
+        assert!(loud_projection.contains("process_lifecycle"));
     }
 }

@@ -17,7 +17,7 @@ pub use containment::{
     is_process_alive, process_integrity, read_integrity, ChildOutcome, ContainedProcessSpawner,
     ContainmentError, ContainmentLimits, MandatoryIntegrity, ProtectedPaths,
     RestrictedProcessGuard, RestrictedProcessSpec, SandboxDirectory, ENFORCED_JOB_LIMITS,
-    LOW_INTEGRITY_SID, SANDBOX_DIRECTORY_SDDL,
+    LOW_INTEGRITY_SID, SANDBOX_DIRECTORY_SDDL, STDERR_CAPTURE_FILE, STDOUT_CAPTURE_FILE,
 };
 pub use security::{DenyAllPolicyGate, RuntimeGuardian};
 

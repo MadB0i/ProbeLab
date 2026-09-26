@@ -29,7 +29,8 @@ use std::time::Duration;
 
 use probelab_core::{
     ContainmentFailure, ContainmentFailureKind, ContainmentStatus, IntegrityLevel, ProcessBudget,
-    ProcessExecution, ProcessSpawnPlan, ProcessSpawner, TerminationReason,
+    ProcessExecution, ProcessSpawnPlan, ProcessSpawner, StreamCapture, TerminationReason,
+    STREAM_PREVIEW_LIMIT,
 };
 
 use super::{
@@ -97,20 +98,23 @@ impl ProcessSpawner for ContainedProcessSpawner {
         &self,
         plan: &ProcessSpawnPlan,
     ) -> Result<ProcessExecution, ContainmentFailure> {
-        if plan.program.trim().is_empty() {
+        // The plan contract is checked before anything exists. An undeclared timeout would be an
+        // unbounded child, and a job object does not bound elapsed time, so this cannot be defaulted.
+        plan.validate().map_err(|error| {
+            ContainmentFailure::new("validate_plan", ContainmentFailureKind::InvalidPlan)
+                .with_detail(error.to_string())
+        })?;
+        let timeout = plan
+            .timeout()
+            .expect("validate rejected a plan without a timeout");
+        if !cfg!(windows) {
             return Err(ContainmentFailure::new(
-                "validate_program",
-                ContainmentFailureKind::ChildStartFailed,
-            ));
-        }
-        if !plan.budget.is_coherent() {
-            return Err(ContainmentFailure::new(
-                "validate_budget",
-                ContainmentFailureKind::JobObjectUnavailable,
+                "spawn_contained",
+                ContainmentFailureKind::UnsupportedPlatform,
             ));
         }
 
-        // 1. The one directory this child may write in.
+        // 1. The one directory this child may work in.
         let designated =
             SandboxDirectory::prepare(&self.designated_directory).map_err(|error| {
                 containment_failure(
@@ -119,6 +123,8 @@ impl ProcessSpawner for ContainedProcessSpawner {
                     ContainmentFailureKind::DesignatedDirectoryUnavailable,
                 )
             })?;
+        let capture_stdout = designated.path().join(STDOUT_CAPTURE_FILE);
+        let capture_stderr = designated.path().join(STDERR_CAPTURE_FILE);
         designated.verify().map_err(|error| {
             containment_failure(
                 "verify_designated_directory",
@@ -145,7 +151,9 @@ impl ProcessSpawner for ContainedProcessSpawner {
         let limits = limits_from(&plan.budget);
         let mut spec = RestrictedProcessSpec::new(plan.program.as_str())
             .with_args(plan.args.iter())
-            .with_current_directory(child_directory(designated.path()));
+            .with_current_directory(child_directory(designated.path()))
+            .with_stdout_file(capture_stdout.clone())
+            .with_stderr_file(capture_stderr.clone());
         if !self.inherit_environment {
             spec = spec.without_inherited_environment();
         }
@@ -191,43 +199,94 @@ impl ProcessSpawner for ContainedProcessSpawner {
             ));
         }
 
-        // 5. Observe the child to completion, or stop it when its budget runs out.
-        let observation = guard.wait_for(plan.budget.wall_clock()).map_err(|error| {
+        // 5. Observe the child to completion, or stop it when the plan's own timeout runs out.
+        //
+        //    The timer starts when the child is resumed rather than when the run started, so a run
+        //    that spent time on earlier turns does not eat into this child's budget.
+        let observation = guard.wait_for(timeout).map_err(|error| {
             let _ = guard.terminate();
             containment_failure("wait_for_child", error, ContainmentFailureKind::WaitFailed)
         })?;
-        let outcome = match observation {
-            Some(outcome) => outcome,
+        let (termination, exit_code, user_cpu, kernel_cpu) = match observation {
+            Some(outcome) => (
+                termination_of(&outcome, &plan.budget),
+                Some(outcome.exit_code()),
+                millis(outcome.user_cpu_time()),
+                millis(outcome.kernel_cpu_time()),
+            ),
             None => {
+                // The job is terminated as a whole, so anything the child started dies with it and no
+                // process outlives the timeout. The exit code is deliberately absent: the host stopped
+                // this child, so the child never chose one.
                 let _ = guard.terminate();
-                return Ok(ProcessExecution {
-                    spawned: true,
-                    pid: Some(pid),
-                    exit_code: None,
-                    containment: ContainmentStatus::Enforced {
-                        integrity: IntegrityLevel::Low,
-                        limits_applied: ENFORCED_JOB_LIMITS,
-                    },
-                    termination: TerminationReason::WallClockBudgetExceeded,
-                    user_cpu_millis: 0,
-                    kernel_cpu_millis: 0,
-                });
+                (TerminationReason::Timeout, None, 0, 0)
             }
         };
+        let (stdout, stderr) = read_capture(&capture_stdout, &capture_stderr);
 
         Ok(ProcessExecution {
             spawned: true,
             pid: Some(pid),
-            exit_code: Some(outcome.exit_code()),
+            exit_code,
             containment: ContainmentStatus::Enforced {
                 integrity: IntegrityLevel::Low,
                 limits_applied: ENFORCED_JOB_LIMITS,
             },
-            termination: termination_of(&outcome, &plan.budget),
-            user_cpu_millis: millis(outcome.user_cpu_time()),
-            kernel_cpu_millis: millis(outcome.kernel_cpu_time()),
+            termination,
+            user_cpu_millis: user_cpu,
+            kernel_cpu_millis: kernel_cpu,
+            stdout,
+            stderr,
         })
     }
+}
+
+/// The file a contained child's standard output is captured into, inside the designated directory.
+pub const STDOUT_CAPTURE_FILE: &str = "probelab-stdout.log";
+
+/// The file a contained child's standard error is captured into, inside the designated directory.
+pub const STDERR_CAPTURE_FILE: &str = "probelab-stderr.log";
+
+/// Reads both capture files into bounded telemetry records.
+///
+/// The total byte count comes from the file length, so it reflects everything the child wrote even
+/// though only a bounded preview is kept. A missing file is reported as an empty stream rather than
+/// as a failure: a child that wrote nothing still ran, and its exit code is the fact that matters.
+fn read_capture(stdout: &Path, stderr: &Path) -> (StreamCapture, StreamCapture) {
+    (read_one_capture(stdout), read_one_capture(stderr))
+}
+
+fn read_one_capture(path: &Path) -> StreamCapture {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return StreamCapture::empty();
+    };
+    let bytes = metadata.len();
+    let preview = read_bounded_preview(path);
+    let truncated = bytes > STREAM_PREVIEW_LIMIT as u64;
+    StreamCapture::new(bytes, preview, truncated)
+}
+
+/// Reads at most a bounded preview from the start of a capture file.
+///
+/// The read is capped in bytes first and then capped in characters, because a lossy UTF-8 conversion
+/// expands invalid bytes into multi-byte replacement characters and would otherwise let a hostile
+/// child push far more than the cap into telemetry.
+fn read_bounded_preview(path: &Path) -> String {
+    use std::io::Read;
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let mut buffer = vec![0u8; STREAM_PREVIEW_LIMIT];
+    let Ok(read) = file.read(&mut buffer) else {
+        return String::new();
+    };
+    buffer.truncate(read);
+    let mut preview = String::from_utf8_lossy(&buffer).into_owned();
+    if preview.chars().count() > STREAM_PREVIEW_LIMIT {
+        preview = preview.chars().take(STREAM_PREVIEW_LIMIT).collect();
+    }
+    preview
 }
 
 /// Maps a core budget onto the job object limits the containment layer understands.
@@ -334,6 +393,7 @@ fn classify(error: &ContainmentError) -> ContainmentFailureKind {
         | ContainmentError::ProtectionJournal { .. } => {
             ContainmentFailureKind::PathProtectionUnavailable
         }
+        ContainmentError::InvalidPlan => ContainmentFailureKind::InvalidPlan,
         ContainmentError::Win32 { step, .. } => {
             if step.contains("job") || step.contains("Job") {
                 ContainmentFailureKind::JobObjectUnavailable

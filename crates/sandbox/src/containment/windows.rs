@@ -15,7 +15,8 @@ use std::time::Duration;
 
 use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, ERROR_INVALID_PARAMETER, HANDLE, WAIT_OBJECT_0,
+    CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_INVALID_PARAMETER,
+    GENERIC_READ, GENERIC_WRITE, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
     WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
@@ -30,6 +31,10 @@ use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
     SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    OPEN_ALWAYS, OPEN_EXISTING,
+};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
     JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
@@ -43,7 +48,7 @@ use windows_sys::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, OpenProcess, OpenProcessToken, ResumeThread,
     TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE,
     PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    STARTF_USESHOWWINDOW, STARTUPINFOW,
+    STARTF_USESHOWWINDOW, STARTF_USESTDHANDLES, STARTUPINFOW,
 };
 
 use super::{
@@ -424,11 +429,25 @@ impl PendingChild {
     /// Creates the child suspended, so it has executed no instructions yet.
     fn create(spec: &RestrictedProcessSpec) -> Result<Self, ContainmentError> {
         let mut line = command_line(spec);
+        let directory = spec.current_directory().map(wide_path).transpose()?;
+        // When a stream is redirected, all three standard handles must be valid and inheritable, and
+        // `bInheritHandles` must be set. Standard input is pointed at the null device so a child can
+        // never block on, or read from, the operator's console. The redirection handles are dropped
+        // as soon as creation returns: the child holds its own copies from that point on.
+        let streams = StandardStreams::open(spec)?;
         let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
         startup.cb = size_of::<STARTUPINFOW>() as u32;
         startup.dwFlags = STARTF_USESHOWWINDOW;
         startup.wShowWindow = 0;
-        let directory = spec.current_directory().map(wide_path).transpose()?;
+        if let Some(streams) = streams.as_ref() {
+            // `STARTF_USESTDHANDLES` is set only when handles are actually supplied. Setting the flag
+            // with null handles would hand the child invalid standard streams instead of the inherited
+            // ones, which silently breaks a child that redirects to a file from inside a script.
+            startup.dwFlags |= STARTF_USESTDHANDLES;
+            startup.hStdInput = streams.input.as_raw();
+            startup.hStdOutput = streams.output.as_raw();
+            startup.hStdError = streams.error.as_raw();
+        }
         let environment = if spec.inherits_environment() {
             match spec.environment() {
                 [] => None,
@@ -440,13 +459,14 @@ impl PendingChild {
             Some(environment_block(spec.environment(), false)?)
         };
         let mut information: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        let inherit_handles = i32::from(streams.is_some());
         let created = unsafe {
             CreateProcessW(
                 null(),
                 line.as_mut_ptr(),
                 null(),
                 null(),
-                0,
+                inherit_handles,
                 CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
                 environment
                     .as_ref()
@@ -1053,6 +1073,90 @@ fn set_label(path: &Path, descriptor: &LocalSecurityDescriptor) -> Result<(), Co
     }
     Ok(())
 }
+/// The three standard handles a contained child is given when its output is redirected.
+///
+/// Standard input is the null device rather than the host's console, so a child can neither read the
+/// operator's terminal nor block waiting for input that will never arrive. Output and error are
+/// write-only file handles inside the designated sandbox directory.
+struct StandardStreams {
+    input: OwnedHandle,
+    output: OwnedHandle,
+    error: OwnedHandle,
+}
+
+impl StandardStreams {
+    /// Opens the declared capture files, or returns `None` when no stream is redirected.
+    ///
+    /// Both handles are marked inheritable, because `CreateProcessW` only passes a handle to a child
+    /// when the handle itself is inheritable and `bInheritHandles` is set. Handle inheritance is only
+    /// enabled at all when a stream is redirected, so a spec that captures nothing behaves exactly as
+    /// it did before redirection existed.
+    fn open(spec: &RestrictedProcessSpec) -> Result<Option<Self>, ContainmentError> {
+        if !spec.redirects_output() {
+            return Ok(None);
+        }
+        let input = Self::open_file("NUL", OPEN_EXISTING, GENERIC_READ)?;
+        let output = match spec.stdout_path() {
+            Some(path) => Self::open_file(
+                &path.as_os_str().to_string_lossy(),
+                CREATE_ALWAYS,
+                GENERIC_WRITE,
+            )?,
+            // A stream with no declared destination is discarded rather than inherited.
+            None => Self::open_file("NUL", OPEN_ALWAYS, GENERIC_WRITE)?,
+        };
+        let error = match spec.stderr_path() {
+            Some(path) => Self::open_file(
+                &path.as_os_str().to_string_lossy(),
+                CREATE_ALWAYS,
+                GENERIC_WRITE,
+            )?,
+            None => Self::open_file("NUL", OPEN_ALWAYS, GENERIC_WRITE)?,
+        };
+        Ok(Some(Self {
+            input,
+            output,
+            error,
+        }))
+    }
+
+    /// Opens one device or file and marks the handle inheritable.
+    fn open_file(name: &str, creation: u32, access: u32) -> Result<OwnedHandle, ContainmentError> {
+        let wide = wide_string(OsStr::new(name));
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null(),
+                creation,
+                FILE_ATTRIBUTE_NORMAL,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+            return Err(ContainmentError::Win32 {
+                step: "CreateFileW(standard stream)",
+                code: last_error(),
+            });
+        }
+        let handle = OwnedHandle::new(handle).ok_or(ContainmentError::Win32 {
+            step: "CreateFileW(standard stream)",
+            code: ERROR_INVALID_PARAMETER,
+        })?;
+        if unsafe {
+            SetHandleInformation(handle.as_raw(), HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
+        } == 0
+        {
+            return Err(ContainmentError::Win32 {
+                step: "SetHandleInformation(inherit)",
+                code: last_error(),
+            });
+        }
+        Ok(handle)
+    }
+}
+
 /// A handle that closes itself, so no error path can leak one.
 struct OwnedHandle(HANDLE);
 

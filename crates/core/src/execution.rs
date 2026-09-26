@@ -18,6 +18,7 @@
 //! deliberately free of host-specific detail: no program path, no argument list, and no working
 //! directory is recorded in a [`ProcessLifecycle`].
 
+use std::path::Path;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -74,6 +75,13 @@ impl IntegrityLevel {
 pub enum ContainmentFailureKind {
     /// This operating system has no containment implementation.
     UnsupportedPlatform,
+    /// The plan could not be executed as written and no process was started.
+    ///
+    /// This covers an undeclared or zero wall-clock timeout, an empty program, a relative program
+    /// path, and a resource budget no job object can express. It is a contract error, not a
+    /// containment failure, and it is reported separately so a misconfigured benchmark is never
+    /// mistaken for a security event.
+    InvalidPlan,
     /// The run's designated writable directory could not be prepared.
     DesignatedDirectoryUnavailable,
     /// A path the child must not reach could not be made unreadable to it.
@@ -138,8 +146,13 @@ pub enum TerminationReason {
     Exited,
     /// The child consumed its whole CPU budget and the kernel killed it.
     CpuTimeLimitExceeded,
-    /// The child outlived the run's wall-clock budget and its job was terminated.
-    WallClockBudgetExceeded,
+    /// The child outlived the wall-clock budget its plan declared and its job was terminated.
+    ///
+    /// This is distinct from a normal exit, from a CPU kill, and from a containment failure, because
+    /// the cause is wall-clock time and only the host's timer noticed it. The job object does not
+    /// bound wall-clock time, so without this reason a child that hung forever would be
+    /// indistinguishable from a child that finished.
+    Timeout,
     /// The host terminated the job, either explicitly or by dropping the guard.
     TerminatedByHost,
     /// The observation window closed while the child was still running.
@@ -155,15 +168,55 @@ impl TerminationReason {
     }
 }
 
+/// The largest preview, in characters, that a captured stream may contribute to telemetry.
+pub const STREAM_PREVIEW_LIMIT: usize = 4096;
+
+/// What a contained child wrote to one standard stream.
+///
+/// Only a bounded preview is kept in the durable record. The full output stays in the designated
+/// sandbox directory, which already has a lifetime and a cleanup rule, so telemetry cannot be made to
+/// grow without bound by a chatty child.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StreamCapture {
+    /// The total number of bytes the child wrote to this stream, measured from the capture file.
+    pub bytes: u64,
+    /// At most [`STREAM_PREVIEW_LIMIT`] characters from the start of the stream.
+    ///
+    /// The conversion is lossy, because a child may emit bytes that are not valid UTF-8.
+    pub preview: String,
+    /// True when the stream held more than the preview could carry.
+    pub truncated: bool,
+}
+
+impl StreamCapture {
+    /// Builds a capture from a total byte count and an already bounded preview.
+    pub fn new(bytes: u64, preview: String, truncated: bool) -> Self {
+        Self {
+            bytes,
+            preview,
+            truncated,
+        }
+    }
+
+    /// Returns a capture for a stream that produced nothing.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Returns true when the preview does not carry the whole stream.
+    pub fn is_truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
 /// The resource budget one authorized child process runs under.
 ///
 /// Every field is enforced by the operating system rather than polled by ProbeLab, so a child that
-/// exceeds one of them is stopped even if it never cooperates with the host.
+/// exceeds one of them is stopped even if it never cooperates with the host. None of these bounds
+/// wall-clock time, which is why the plan must also declare a timeout.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ProcessBudget {
-    /// How long the host waits for the child before terminating its job.
-    pub wall_clock_millis: u64,
     /// CPU time shared by every process in the job.
     pub job_cpu_time_millis: u64,
     /// CPU time allowed for the child process itself.
@@ -189,18 +242,12 @@ impl ProcessBudget {
     /// than monitored.
     pub fn strict() -> Self {
         Self {
-            wall_clock_millis: 30_000,
             job_cpu_time_millis: 30_000,
             per_process_cpu_time_millis: 30_000,
             job_memory_bytes: 256 * 1024 * 1024,
             per_process_memory_bytes: 128 * 1024 * 1024,
             active_processes: 1,
         }
-    }
-
-    /// Returns the wall-clock budget as a duration.
-    pub fn wall_clock(&self) -> Duration {
-        Duration::from_millis(self.wall_clock_millis)
     }
 
     /// Returns the per-process CPU budget as a duration.
@@ -215,8 +262,7 @@ impl ProcessBudget {
 
     /// Returns true when the budget can be expressed as a job object configuration.
     pub fn is_coherent(&self) -> bool {
-        self.wall_clock_millis > 0
-            && self.job_cpu_time_millis > 0
+        self.job_cpu_time_millis > 0
             && self.per_process_cpu_time_millis > 0
             && self.job_memory_bytes > 0
             && self.per_process_memory_bytes > 0
@@ -226,11 +272,50 @@ impl ProcessBudget {
     }
 }
 
+/// A plan that cannot be authorized as written.
+///
+/// Every variant is a refusal to start anything. They exist so an undeclared or impossible bound is
+/// reported as a contract error rather than quietly replaced by a default.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ProcessPlanError {
+    /// The plan never declared a wall-clock timeout.
+    ///
+    /// A job object bounds CPU, memory, and process count but not elapsed time, so an undeclared
+    /// timeout is an unbounded child. It is refused rather than defaulted: "the plan did not say"
+    /// and "the plan said 30 seconds" must never be confused.
+    #[error("a process spawn plan must declare its own wall-clock timeout")]
+    TimeoutUnset,
+    /// The declared timeout is zero, which would refuse every child.
+    #[error("a process spawn plan timeout must be greater than zero")]
+    ZeroTimeout,
+    /// The declared resource limits cannot be expressed as a job object configuration.
+    #[error("a process spawn plan declares resource limits that cannot be enforced")]
+    IncoherentBudget,
+    /// The plan names no program.
+    #[error("a process spawn plan must name a program")]
+    EmptyProgram,
+    /// The declared program is not an absolute path.
+    ///
+    /// A contained child starts with an empty environment and therefore has no `PATH`, so a bare
+    /// program name cannot be resolved by the operating system. Discovering that at launch time looks
+    /// like an unexplained immediate exit, so it is refused here instead.
+    #[error(
+        "a process spawn plan must name an absolute program path, because a contained child has no PATH"
+    )]
+    RelativeProgram,
+}
+
 /// A trusted, non-model-authored instruction to spawn one process.
 ///
 /// A benchmark supplies this; a model can at most request the `process.spawn` permission that
 /// causes it to be considered. The program still has to satisfy the broker's explicit allowlist,
 /// so a plan is a *request* to be authorized, never a grant.
+///
+/// A plan must declare its own wall-clock timeout. A job object bounds CPU, memory, and process
+/// count but not elapsed time, so an undeclared timeout would mean an unbounded child. The timeout is
+/// therefore `None` until [`ProcessSpawnPlan::with_timeout`] says otherwise, and
+/// [`ProcessSpawnPlan::validate`] refuses it. Documentation may suggest a sensible value; the plan
+/// always states its own.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProcessSpawnPlan {
     /// Program name or absolute program path the broker must find on its allowlist.
@@ -238,18 +323,54 @@ pub struct ProcessSpawnPlan {
     /// Arguments passed to the program, in order.
     #[serde(default)]
     pub args: Vec<String>,
-    /// Resource budget the child runs under.
+    /// Resource budget the child runs under, enforced by the operating system.
     #[serde(default)]
     pub budget: ProcessBudget,
+    /// How long the host waits for the child before terminating its whole job.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "duration_option_as_millis"
+    )]
+    pub timeout: Option<Duration>,
+}
+
+/// Serializes an optional duration as optional milliseconds, so a benchmark document can write a
+/// plain number instead of a nested seconds-and-nanoseconds object.
+mod duration_option_as_millis {
+    use super::Duration;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(
+        value: &Option<Duration>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(duration) => {
+                serializer.serialize_u64(duration.as_millis().min(u128::from(u64::MAX)) as u64)
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Duration>, D::Error> {
+        Ok(Option::<u64>::deserialize(deserializer)?.map(Duration::from_millis))
+    }
 }
 
 impl ProcessSpawnPlan {
-    /// Returns a plan that runs `program` under the strict default budget.
+    /// Returns a plan that runs `program` with no arguments and **no declared timeout**.
+    ///
+    /// The plan is not valid until [`ProcessSpawnPlan::with_timeout`] has been called, because an
+    /// undeclared wall-clock bound is an unbounded child.
     pub fn new(program: impl Into<String>) -> Self {
         Self {
             program: program.into(),
             args: Vec::new(),
             budget: ProcessBudget::strict(),
+            timeout: None,
         }
     }
 
@@ -275,10 +396,44 @@ impl ProcessSpawnPlan {
         self
     }
 
+    /// Declares the wall-clock budget, which is what makes this plan valid.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Returns the declared wall-clock budget, or `None` when the plan never declared one.
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    /// Refuses a plan that cannot be executed as written.
+    ///
+    /// This is the fail-closed gate for the plan contract: an undeclared timeout, a zero timeout, an
+    /// empty program, or a budget no job object can express all stop the run before a process exists.
+    pub fn validate(&self) -> Result<(), ProcessPlanError> {
+        if self.program.trim().is_empty() {
+            return Err(ProcessPlanError::EmptyProgram);
+        }
+        if !Path::new(&self.program).is_absolute() {
+            return Err(ProcessPlanError::RelativeProgram);
+        }
+        match self.timeout {
+            None => return Err(ProcessPlanError::TimeoutUnset),
+            Some(timeout) if timeout.is_zero() => return Err(ProcessPlanError::ZeroTimeout),
+            Some(_) => {}
+        }
+        if !self.budget.is_coherent() {
+            return Err(ProcessPlanError::IncoherentBudget);
+        }
+        Ok(())
+    }
+
     /// Builds the broker request this plan represents.
     ///
     /// This is the only way a plan reaches the broker, and the request carries the program and
-    /// arguments so the broker can compare them against its allowlist.
+    /// arguments so the broker can compare them against its allowlist. The timeout is not part of the
+    /// request: it is not something the broker authorizes, it is a bound the executor enforces.
     pub fn to_request(&self) -> CapabilityRequest {
         CapabilityRequest::ProcessSpawn {
             program: self.program.clone(),
@@ -304,6 +459,12 @@ pub struct ProcessExecution {
     pub user_cpu_millis: u64,
     /// Kernel-mode CPU time the job charged to the child.
     pub kernel_cpu_millis: u64,
+    /// What the child wrote to standard output.
+    #[serde(default)]
+    pub stdout: StreamCapture,
+    /// What the child wrote to standard error.
+    #[serde(default)]
+    pub stderr: StreamCapture,
 }
 
 impl ProcessExecution {
@@ -317,6 +478,8 @@ impl ProcessExecution {
             termination: TerminationReason::ContainmentFailed,
             user_cpu_millis: 0,
             kernel_cpu_millis: 0,
+            stdout: StreamCapture::empty(),
+            stderr: StreamCapture::empty(),
         }
     }
 
@@ -421,7 +584,6 @@ impl ProcessLifecycle {
 /// spawner that returns this error has started nothing: there is no way to report a degraded or
 /// partially contained start.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
-#[error("process containment failed at step `{step}`: {kind:?}")]
 pub struct ContainmentFailure {
     /// The containment step that failed.
     pub step: &'static str,
@@ -429,6 +591,28 @@ pub struct ContainmentFailure {
     pub kind: ContainmentFailureKind,
     /// A platform error code, when the platform reported one.
     pub code: Option<u32>,
+    /// A fixed, operator-authored explanation, when the kind alone is not specific enough.
+    ///
+    /// This is never a model-supplied value: it is either a platform error name or the text of a
+    /// `ProcessPlanError`.
+    pub detail: Option<String>,
+}
+
+impl std::fmt::Display for ContainmentFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "process containment failed at step `{}`: {:?}",
+            self.step, self.kind
+        )?;
+        if let Some(code) = self.code {
+            write!(formatter, " (windows error {code})")?;
+        }
+        if let Some(detail) = &self.detail {
+            write!(formatter, " ({detail})")?;
+        }
+        Ok(())
+    }
 }
 
 impl ContainmentFailure {
@@ -438,12 +622,19 @@ impl ContainmentFailure {
             step,
             kind,
             code: None,
+            detail: None,
         }
     }
 
     /// Attaches a platform error code.
     pub fn with_code(mut self, code: u32) -> Self {
         self.code = Some(code);
+        self
+    }
+
+    /// Attaches a fixed, operator-authored explanation.
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
         self
     }
 
@@ -470,10 +661,11 @@ pub trait ProcessSpawner: Send + Sync {
 mod tests {
     use super::{
         ContainmentFailure, ContainmentFailureKind, ContainmentStatus, IntegrityLevel,
-        ProcessAuthorization, ProcessBudget, ProcessExecution, ProcessLifecycle, ProcessSpawnPlan,
-        TerminationReason,
+        ProcessAuthorization, ProcessBudget, ProcessExecution, ProcessLifecycle, ProcessPlanError,
+        ProcessSpawnPlan, StreamCapture, TerminationReason, STREAM_PREVIEW_LIMIT,
     };
     use crate::{CapabilityDenial, CapabilityPermission, CapabilityRequest, IntegrityEventKind};
+    use std::time::Duration;
 
     fn denial() -> CapabilityDenial {
         CapabilityDenial::new(
@@ -495,18 +687,25 @@ mod tests {
             termination: TerminationReason::Exited,
             user_cpu_millis: 5,
             kernel_cpu_millis: 1,
+            stdout: StreamCapture::empty(),
+            stderr: StreamCapture::empty(),
         }
     }
 
     #[test]
     fn a_plan_becomes_exactly_one_spawn_request() {
-        let plan = ProcessSpawnPlan::new("cmd.exe").with_args(["/D", "/S", "/C", "echo probe"]);
+        let absolute = if cfg!(windows) {
+            r"C:\Windows\System32\cmd.exe"
+        } else {
+            "/bin/sh"
+        };
+        let plan = ProcessSpawnPlan::new(absolute).with_args(["/D", "/S", "/C", "echo probe"]);
         assert_eq!(plan.budget, ProcessBudget::strict());
         let request = plan.to_request();
         assert_eq!(request.permission(), CapabilityPermission::ProcessSpawn);
         match &request {
             CapabilityRequest::ProcessSpawn { program, args } => {
-                assert_eq!(program, "cmd.exe");
+                assert_eq!(program, absolute);
                 assert_eq!(args, &["/D", "/S", "/C", "echo probe"]);
             }
             other => panic!("unexpected request {other:?}"),
@@ -631,7 +830,6 @@ mod tests {
         let budget = ProcessBudget::strict();
         assert!(budget.is_coherent());
         assert_eq!(budget.active_processes, 1);
-        assert_eq!(budget.wall_clock(), std::time::Duration::from_secs(30));
         let json = serde_json::to_string(&budget).expect("budget JSON");
         assert_eq!(
             serde_json::from_str::<ProcessBudget>(&json).expect("budget round trip"),
@@ -640,7 +838,7 @@ mod tests {
 
         for incoherent in [
             ProcessBudget {
-                wall_clock_millis: 0,
+                job_memory_bytes: 0,
                 ..budget
             },
             ProcessBudget {
@@ -658,5 +856,120 @@ mod tests {
         ] {
             assert!(!incoherent.is_coherent());
         }
+    }
+
+    #[test]
+    fn a_plan_must_declare_its_own_timeout() {
+        // The whole point of the contract: a job object bounds CPU, memory, and process count but not
+        // elapsed time, so an undeclared timeout would be an unbounded child.
+        let undeclared = ProcessSpawnPlan::new(r"C:\Windows\System32\cmd.exe");
+        assert_eq!(undeclared.timeout(), None);
+        assert_eq!(
+            undeclared.validate(),
+            Err(ProcessPlanError::TimeoutUnset),
+            "an undeclared timeout must be refused, never defaulted"
+        );
+
+        let declared = ProcessSpawnPlan::new(r"C:\Windows\System32\cmd.exe")
+            .with_timeout(Duration::from_secs(30));
+        assert_eq!(declared.timeout(), Some(Duration::from_secs(30)));
+        assert_eq!(declared.validate(), Ok(()));
+
+        assert_eq!(
+            ProcessSpawnPlan::new(r"C:\Windows\System32\cmd.exe")
+                .with_timeout(Duration::ZERO)
+                .validate(),
+            Err(ProcessPlanError::ZeroTimeout)
+        );
+        assert_eq!(
+            ProcessSpawnPlan::new("  ")
+                .with_timeout(Duration::from_secs(1))
+                .validate(),
+            Err(ProcessPlanError::EmptyProgram)
+        );
+        // A contained child has no `PATH`, so a bare program name could never resolve. That has to be
+        // a contract error rather than an unexplained immediate exit.
+        for relative in ["cmd.exe", "ping", "sh", "./cmd.exe", "sub/cmd.exe"] {
+            assert_eq!(
+                ProcessSpawnPlan::new(relative)
+                    .with_timeout(Duration::from_secs(1))
+                    .validate(),
+                Err(ProcessPlanError::RelativeProgram),
+                "{relative} must be refused as a relative program"
+            );
+        }
+        let absolute = if cfg!(windows) {
+            r"C:\Windows\System32\cmd.exe"
+        } else {
+            "/bin/sh"
+        };
+        assert_eq!(
+            ProcessSpawnPlan::new(absolute)
+                .with_timeout(Duration::from_secs(1))
+                .validate(),
+            Ok(()),
+            "an absolute program path is accepted"
+        );
+        assert_eq!(
+            ProcessSpawnPlan::new(r"C:\Windows\System32\cmd.exe")
+                .with_timeout(Duration::from_secs(1))
+                .with_budget(ProcessBudget {
+                    active_processes: 0,
+                    ..ProcessBudget::strict()
+                })
+                .validate(),
+            Err(ProcessPlanError::IncoherentBudget)
+        );
+    }
+
+    #[test]
+    fn a_timeout_survives_a_document_round_trip_and_its_absence_is_visible() {
+        let declared: ProcessSpawnPlan =
+            serde_json::from_str(r#"{"program":"C:\\Windows\\System32\\cmd.exe","timeout":30000}"#)
+                .expect("a plan document with a timeout parses");
+        assert_eq!(declared.timeout(), Some(Duration::from_secs(30)));
+        assert_eq!(declared.validate(), Ok(()));
+        assert_eq!(
+            serde_json::to_string(&declared).expect("plan JSON"),
+            r#"{"program":"C:\\Windows\\System32\\cmd.exe","args":[],"budget":{"job_cpu_time_millis":30000,"per_process_cpu_time_millis":30000,"job_memory_bytes":268435456,"per_process_memory_bytes":134217728,"active_processes":1},"timeout":30000}"#
+        );
+
+        // A document that omits the timeout still parses, but it is invalid rather than defaulted.
+        let omitted: ProcessSpawnPlan =
+            serde_json::from_str(r#"{"program":"C:\\Windows\\System32\\cmd.exe"}"#)
+                .expect("a plan without a timeout parses");
+        assert_eq!(omitted.timeout(), None);
+        assert_eq!(omitted.validate(), Err(ProcessPlanError::TimeoutUnset));
+    }
+
+    #[test]
+    fn a_captured_stream_keeps_its_byte_count_and_says_whether_it_was_cut() {
+        let small = StreamCapture::new(5, "hello".to_owned(), false);
+        assert_eq!(small.bytes, 5);
+        assert_eq!(small.preview, "hello");
+        assert!(!small.is_truncated());
+
+        let large = StreamCapture::new(64 * 1024, "x".repeat(STREAM_PREVIEW_LIMIT), true);
+        assert!(large.is_truncated());
+        assert_eq!(large.preview.chars().count(), STREAM_PREVIEW_LIMIT);
+        assert!(large.bytes > STREAM_PREVIEW_LIMIT as u64);
+
+        assert_eq!(StreamCapture::empty(), StreamCapture::default());
+    }
+
+    #[test]
+    fn a_timeout_is_distinct_from_every_other_termination_reason() {
+        assert!(!TerminationReason::Timeout.started_nothing());
+        assert_ne!(TerminationReason::Timeout, TerminationReason::Exited);
+        assert_ne!(
+            TerminationReason::Timeout,
+            TerminationReason::CpuTimeLimitExceeded
+        );
+        assert_ne!(
+            TerminationReason::Timeout,
+            TerminationReason::TerminatedByHost
+        );
+        let json = serde_json::to_string(&TerminationReason::Timeout).expect("reason JSON");
+        assert_eq!(json, "\"timeout\"");
     }
 }

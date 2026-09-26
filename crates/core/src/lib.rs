@@ -22,8 +22,8 @@ pub use capability::{
 pub use error::DomainError;
 pub use execution::{
     ContainmentFailure, ContainmentFailureKind, ContainmentStatus, IntegrityLevel,
-    ProcessAuthorization, ProcessBudget, ProcessExecution, ProcessLifecycle, ProcessSpawnPlan,
-    ProcessSpawner, TerminationReason,
+    ProcessAuthorization, ProcessBudget, ProcessExecution, ProcessLifecycle, ProcessPlanError,
+    ProcessSpawnPlan, ProcessSpawner, StreamCapture, TerminationReason, STREAM_PREVIEW_LIMIT,
 };
 pub use model::{
     ModelCallFailure, ModelCallFailureKind, ModelCallInfo, ModelDecision, ModelDescriptor,

@@ -75,7 +75,9 @@ use self::windows as platform;
 use self::other as platform;
 
 pub use protection::ProtectedPaths;
-pub use spawn::{ContainedProcessSpawner, ENFORCED_JOB_LIMITS};
+pub use spawn::{
+    ContainedProcessSpawner, ENFORCED_JOB_LIMITS, STDERR_CAPTURE_FILE, STDOUT_CAPTURE_FILE,
+};
 
 /// The mandatory integrity level SID assigned to a contained child: low integrity, `S-1-16-4096`.
 pub const LOW_INTEGRITY_SID: &str = "S-1-16-4096";
@@ -193,6 +195,14 @@ pub enum ContainmentError {
     /// A directory, file, or process entry could not be deleted.
     #[error("a contained filesystem entry could not be removed")]
     RemovalFailed,
+    /// The plan could not be executed as written and no process was started.
+    ///
+    /// This covers an undeclared or zero wall-clock timeout, an empty program, a relative program
+    /// path, and a resource budget no job object can express. It is a contract error, not a
+    /// containment failure, and it is reported separately so a misconfigured benchmark is never
+    /// mistaken for a security event.
+    #[error("process spawn plan is not executable and no process was started")]
+    InvalidPlan,
     /// A path to protect was empty or could not be recorded in the recovery journal.
     #[error("a protected path is empty or cannot be recorded safely")]
     ProtectionPathInvalid,
@@ -443,6 +453,8 @@ pub struct RestrictedProcessSpec {
     current_directory: Option<PathBuf>,
     environment: Vec<(OsString, OsString)>,
     inherit_environment: bool,
+    stdout_path: Option<PathBuf>,
+    stderr_path: Option<PathBuf>,
 }
 
 impl RestrictedProcessSpec {
@@ -454,7 +466,41 @@ impl RestrictedProcessSpec {
             current_directory: None,
             environment: Vec::new(),
             inherit_environment: true,
+            stdout_path: None,
+            stderr_path: None,
         }
+    }
+
+    /// Sends the child's standard output to a file instead of inheriting the host's streams.
+    ///
+    /// Capturing rather than inheriting closes an information leak: a child that inherited the host's
+    /// console could write into a terminal, a log, or a pipe the operator never agreed to expose, and
+    /// the output would have no bounded home. The file is created or truncated by the containment
+    /// layer, and the child receives a write-only handle to it.
+    pub fn with_stdout_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.stdout_path = Some(path.into());
+        self
+    }
+
+    /// Sends the child's standard error to a file instead of inheriting the host's streams.
+    pub fn with_stderr_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.stderr_path = Some(path.into());
+        self
+    }
+
+    /// Returns the file the child's standard output is written to, when one was declared.
+    pub fn stdout_path(&self) -> Option<&Path> {
+        self.stdout_path.as_deref()
+    }
+
+    /// Returns the file the child's standard error is written to, when one was declared.
+    pub fn stderr_path(&self) -> Option<&Path> {
+        self.stderr_path.as_deref()
+    }
+
+    /// Returns true when at least one standard stream is redirected to a file.
+    pub fn redirects_output(&self) -> bool {
+        self.stdout_path.is_some() || self.stderr_path.is_some()
     }
 
     /// Appends one argument to the command line.

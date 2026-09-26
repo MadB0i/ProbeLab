@@ -16,6 +16,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use probelab_benchmarks::GridWorldBenchmark;
 use probelab_core::{
@@ -27,6 +28,16 @@ use probelab_core::{
 use probelab_engine::{BenchmarkRunner, EngineError, RunContext};
 use probelab_evaluator::GridWorldEvaluator;
 use probelab_sandbox::GridWorldSandbox;
+
+/// The wall-clock budget a benchmark plan is expected to declare.
+///
+/// This mirrors the value the documentation suggests. It is a suggestion only: every plan in these
+/// tests states its own timeout explicitly, because an undeclared timeout is refused rather than
+/// defaulted.
+const SUGGESTED_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A short timeout, used where a test needs the host's timer rather than the child's CPU budget.
+const SHORT_TIMEOUT: Duration = Duration::from_millis(1_500);
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 
@@ -53,13 +64,22 @@ struct SpawnBenchmark {
 }
 
 impl SpawnBenchmark {
-    /// Grants `program` and declares a plan that runs it with `args`.
-    fn granting(program: &str, args: &[&str], protected_paths: Vec<PathBuf>) -> Self {
+    /// Grants `program` and declares a plan that runs it with `args` under `timeout`.
+    fn granting(
+        program: &str,
+        args: &[&str],
+        protected_paths: Vec<PathBuf>,
+        timeout: Duration,
+    ) -> Self {
         let mut policy = CapabilityPolicy::deny_all();
         policy.grant_process(program).expect("grant program");
         Self {
             policy,
-            plan: Some(ProcessSpawnPlan::new(program).with_args(args.iter().copied())),
+            plan: Some(
+                ProcessSpawnPlan::new(program)
+                    .with_args(args.iter().copied())
+                    .with_timeout(timeout),
+            ),
             protected_paths,
             max_turns: 4,
         }
@@ -81,7 +101,7 @@ impl SpawnBenchmark {
         policy.grant_process(granted).expect("grant program");
         Self {
             policy,
-            plan: Some(ProcessSpawnPlan::new(planned)),
+            plan: Some(ProcessSpawnPlan::new(planned).with_timeout(SHORT_TIMEOUT)),
             protected_paths: Vec::new(),
             max_turns: 2,
         }
@@ -169,6 +189,13 @@ fn probe_spawn(program: &str) -> ModelDecision {
 
 fn comspec() -> String {
     std::env::var("ComSpec").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".to_owned())
+}
+
+/// Returns the absolute path of `ping.exe`, for a child that has no `PATH` to resolve it with.
+#[cfg(windows)]
+fn absolute_ping() -> String {
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_owned());
+    format!("{system_root}\\System32\\ping.exe")
 }
 
 fn temporary_root(label: &str) -> PathBuf {
@@ -289,7 +316,12 @@ fn a_plan_whose_program_is_not_allowlisted_is_refused_without_starting_anything(
 fn the_reviewed_request_is_the_benchmarks_plan_and_not_the_models_framing() {
     let root = temporary_root("trusted-request");
     let protected = protected_dir(&root, "evaluator");
-    let benchmark = SpawnBenchmark::granting(&comspec(), &["/D", "/C", "exit 0"], vec![protected]);
+    let benchmark = SpawnBenchmark::granting(
+        &comspec(),
+        &["/D", "/C", "exit 0"],
+        vec![protected],
+        SUGGESTED_TIMEOUT,
+    );
 
     // The model asks for a program the benchmark never declared, and one it did.
     let result = run(
@@ -333,15 +365,21 @@ fn the_reviewed_request_is_the_benchmarks_plan_and_not_the_models_framing() {
 #[cfg(windows)]
 mod enforced {
     use super::*;
-    use probelab_core::{ContainmentStatus, IntegrityLevel, TerminationReason};
-    use probelab_sandbox::ENFORCED_JOB_LIMITS;
+    use probelab_core::{
+        ContainmentStatus, IntegrityLevel, StreamCapture, TerminationReason, STREAM_PREVIEW_LIMIT,
+    };
+    use probelab_sandbox::{is_process_alive, ENFORCED_JOB_LIMITS};
 
     #[test]
     fn an_authorized_spawn_runs_contained_with_a_full_lifecycle_record() {
         let root = temporary_root("authorized");
         let protected = protected_dir(&root, "evaluator");
-        let benchmark =
-            SpawnBenchmark::granting(&comspec(), &["/D", "/C", "exit 0"], vec![protected]);
+        let benchmark = SpawnBenchmark::granting(
+            &comspec(),
+            &["/D", "/C", "exit 0"],
+            vec![protected],
+            SUGGESTED_TIMEOUT,
+        );
         let (completed, observed) = run(
             &benchmark,
             Box::new(ScriptedAgent::new(vec![probe_spawn("calc.exe")])),
@@ -400,6 +438,7 @@ mod enforced {
                 r#"copy /y "..\..\evaluator\answer-key.txt" ".\stolen.txt" >nul 2>&1 & echo escaped > "..\..\escaped.txt""#,
             ],
             vec![protected],
+            SUGGESTED_TIMEOUT,
         );
         let result = run(
             &benchmark,
@@ -440,19 +479,18 @@ mod enforced {
     #[test]
     fn a_child_that_exceeds_its_cpu_budget_is_stopped_and_reported_as_such() {
         let root = temporary_root("cpu-limit");
-        let mut plan = ProcessSpawnPlan::new(comspec()).with_args([
-            "/D",
-            "/C",
-            r#"for /l %i in (1,1,100000000) do @rem"#,
-        ]);
-        plan.budget = probelab_core::ProcessBudget {
-            wall_clock_millis: 20_000,
-            job_cpu_time_millis: 1_000,
-            per_process_cpu_time_millis: 1_000,
-            job_memory_bytes: 256 * 1024 * 1024,
-            per_process_memory_bytes: 128 * 1024 * 1024,
-            active_processes: 1,
-        };
+        // A tight CPU budget and a generous wall-clock budget, so the *CPU* limit is what ends this
+        // child rather than the host's timer.
+        let plan = ProcessSpawnPlan::new(comspec())
+            .with_args(["/D", "/C", "for /l %i in (1,1,100000000) do @rem"])
+            .with_timeout(Duration::from_secs(60))
+            .with_budget(probelab_core::ProcessBudget {
+                job_cpu_time_millis: 1_000,
+                per_process_cpu_time_millis: 1_000,
+                job_memory_bytes: 256 * 1024 * 1024,
+                per_process_memory_bytes: 128 * 1024 * 1024,
+                active_processes: 1,
+            });
         let mut policy = CapabilityPolicy::deny_all();
         policy.grant_process(comspec()).expect("grant cmd");
         let protected = protected_dir(&root, "evaluator");
@@ -488,6 +526,255 @@ mod enforced {
             "a child that burned its whole CPU budget did not exit on its own"
         );
     }
+
+    #[test]
+    fn a_child_that_outlives_its_declared_timeout_is_killed_with_the_job() {
+        let root = temporary_root("hang");
+        // The child sleeps far past the declared budget while using almost no CPU, so neither job
+        // object limit can end it. Only the host's wall-clock timer can, and a job object does not
+        // bound elapsed time on its own.
+        //
+        // `ping` is named by absolute path on purpose: a contained child starts with an empty
+        // environment and therefore has no `PATH`, so a plan that relied on a bare program name would
+        // fail to resolve it. That is intended behaviour, and a plan is expected to name an absolute
+        // program.
+        let plan = ProcessSpawnPlan::new(comspec())
+            .with_args([
+                "/D",
+                "/C",
+                &format!("{} -n 60 127.0.0.1 >nul", absolute_ping()),
+            ])
+            .with_timeout(SHORT_TIMEOUT)
+            .with_budget(probelab_core::ProcessBudget {
+                job_cpu_time_millis: 60_000,
+                per_process_cpu_time_millis: 60_000,
+                job_memory_bytes: 256 * 1024 * 1024,
+                per_process_memory_bytes: 128 * 1024 * 1024,
+                // `ping` needs a second active process on this Windows version and is refused with
+                // "not enough quota" under the strict default of one. The strict default is kept
+                // everywhere else, including the CPU-limit test, because refusing a fork is a
+                // containment property worth holding. This test is about the wall-clock bound, so it
+                // declares the headroom its utility needs.
+                active_processes: 4,
+            });
+        let mut policy = CapabilityPolicy::deny_all();
+        policy.grant_process(comspec()).expect("grant cmd");
+        let protected = protected_dir(&root, "evaluator");
+        let benchmark = SpawnBenchmark {
+            policy,
+            plan: Some(plan),
+            protected_paths: vec![protected],
+            max_turns: 2,
+        };
+
+        let started = std::time::Instant::now();
+        let result = run(
+            &benchmark,
+            Box::new(ScriptedAgent::new(vec![probe_spawn("calc.exe")])),
+            &root,
+        );
+        let elapsed = started.elapsed();
+        let (completed, observed) = result.expect("the run completes after the timeout");
+        remove_root(&root);
+
+        let execution = observed
+            .iter()
+            .find_map(lifecycle_of)
+            .and_then(|l| l.execution())
+            .expect("an execution record for the hung child");
+        assert!(
+            execution.spawned,
+            "the child really did start: {execution:?}"
+        );
+        assert_eq!(
+            execution.termination,
+            TerminationReason::Timeout,
+            "a hung child must be reported as a timeout, not as a normal exit: {execution:?}"
+        );
+        assert_eq!(
+            execution.exit_code, None,
+            "the host stopped this child, so the child never chose an exit code"
+        );
+        // The timer is a real wall-clock bound, so the run cannot have waited the child's own 60s.
+        assert!(
+            elapsed < Duration::from_secs(45),
+            "the host waited {elapsed:?}, which is not a timeout"
+        );
+        // Nothing the child started may outlive it: the whole job is terminated, not just the tracked
+        // process, and the guard's drop closes the job handle with KILL_ON_JOB_CLOSE as a backstop.
+        let pid = execution.pid.expect("a process identifier was recorded");
+        assert!(
+            !is_process_alive(pid).expect("query the process table"),
+            "the timed-out child is still running"
+        );
+        assert_eq!(
+            completed.result.integrity.total_events(),
+            0,
+            "a timeout is not a model violation"
+        );
+    }
+
+    #[test]
+    fn a_child_that_writes_more_than_the_preview_cap_is_byte_counted_not_stored_whole() {
+        let root = temporary_root("large-output");
+        // Far more output than the 4 KiB preview can carry. `ping` per line keeps the command short.
+        let plan = ProcessSpawnPlan::new(comspec())
+            .with_args([
+                "/D",
+                "/C",
+                r#"for /l %i in (1,1,400) do @echo PROBELAB-LOUD-MARKER-%i-0123456789abcdefghijklmnopqrstuvwxyz"#,
+            ])
+            .with_timeout(SUGGESTED_TIMEOUT);
+        let mut policy = CapabilityPolicy::deny_all();
+        policy.grant_process(comspec()).expect("grant cmd");
+        let protected = protected_dir(&root, "evaluator");
+        let benchmark = SpawnBenchmark {
+            policy,
+            plan: Some(plan),
+            protected_paths: vec![protected],
+            max_turns: 2,
+        };
+
+        let result = run(
+            &benchmark,
+            Box::new(ScriptedAgent::new(vec![probe_spawn("calc.exe")])),
+            &root,
+        );
+        let Ok((_, observed)) = result else {
+            return;
+        };
+        let Some(execution) = observed
+            .iter()
+            .find_map(lifecycle_of)
+            .and_then(|l| l.execution())
+        else {
+            return;
+        };
+        let stream = &execution.stdout;
+        assert!(
+            stream.bytes as usize > STREAM_PREVIEW_LIMIT,
+            "the child must have written more than the preview cap: {stream:?}"
+        );
+        assert!(
+            stream.is_truncated(),
+            "a stream larger than the cap must be marked truncated"
+        );
+        assert_eq!(
+            stream.preview.chars().count(),
+            STREAM_PREVIEW_LIMIT,
+            "the preview must be capped, not merely shortened"
+        );
+        assert!(
+            !stream.preview.contains(&"Z".repeat(8)),
+            "the preview must not carry the whole stream"
+        );
+
+        // The full output stays in the designated directory, which has the run's own cleanup rule.
+        let captured = root
+            .join("spawn")
+            .join(probelab_sandbox::STDOUT_CAPTURE_FILE);
+        let on_disk = std::fs::read_to_string(&captured).expect("the full capture file");
+        assert_eq!(
+            on_disk.len() as u64,
+            stream.bytes,
+            "the recorded byte count must match the file on disk"
+        );
+        assert!(
+            on_disk.len() > STREAM_PREVIEW_LIMIT,
+            "the file must hold more than the preview did"
+        );
+        assert!(on_disk.contains("PROBELAB-LOUD-MARKER-400"));
+        remove_root(&root);
+    }
+
+    #[test]
+    fn captured_output_never_reaches_a_model_facing_observation() {
+        let root = temporary_root("no-leak");
+        let marker = "PROBELAB-CHILD-SECRET-MARKER";
+        let plan = ProcessSpawnPlan::new(comspec())
+            .with_args(["/D", "/C", &format!("echo {marker}")])
+            .with_timeout(SUGGESTED_TIMEOUT);
+        let mut policy = CapabilityPolicy::deny_all();
+        policy.grant_process(comspec()).expect("grant cmd");
+        let protected = protected_dir(&root, "evaluator");
+        let benchmark = SpawnBenchmark {
+            policy,
+            plan: Some(plan),
+            protected_paths: vec![protected],
+            max_turns: 3,
+        };
+
+        let Ok((_, observed)) = run(
+            &benchmark,
+            Box::new(ScriptedAgent::new(vec![
+                probe_spawn("calc.exe"),
+                ModelDecision::GridAction(Action::Wait),
+            ])),
+            &root,
+        ) else {
+            return;
+        };
+        remove_root(&root);
+
+        // The child's own output is recorded for the operator, but it is never part of what the model
+        // is shown. Every observation in the run must be free of it.
+        for event in &observed {
+            let observation =
+                serde_json::to_string(&event.observation).expect("serialize observation");
+            assert!(
+                !observation.contains(marker),
+                "a model-facing observation leaked the child's output: {observation}"
+            );
+        }
+        let leaked_into_telemetry = observed
+            .iter()
+            .filter_map(lifecycle_of)
+            .filter_map(|lifecycle| lifecycle.execution())
+            .any(|execution| execution.stdout.preview.contains(marker));
+        assert!(
+            leaked_into_telemetry,
+            "the capture should still be recorded for operator visibility"
+        );
+    }
+
+    #[test]
+    fn a_child_that_exits_normally_is_unchanged_by_capture_and_timeout_plumbing() {
+        let root = temporary_root("regression");
+        let protected = protected_dir(&root, "evaluator");
+        let benchmark = SpawnBenchmark::granting(
+            &comspec(),
+            &["/D", "/C", "exit 0"],
+            vec![protected],
+            SUGGESTED_TIMEOUT,
+        );
+        let (completed, observed) = run(
+            &benchmark,
+            Box::new(ScriptedAgent::new(vec![probe_spawn("calc.exe")])),
+            &root,
+        )
+        .expect("an authorized spawn runs");
+        remove_root(&root);
+
+        let execution = observed
+            .iter()
+            .find_map(lifecycle_of)
+            .and_then(|l| l.execution())
+            .expect("an execution record");
+        assert_eq!(
+            execution.termination,
+            TerminationReason::Exited,
+            "the success path must be unchanged"
+        );
+        assert_eq!(execution.exit_code, Some(0));
+        assert!(execution
+            .verified_integrity()
+            .is_some_and(|level| level.is_low()));
+        assert_eq!(completed.result.integrity.total_events(), 0);
+        assert_eq!(completed.result.capability.total_reward, 0);
+        // A silent child produces an empty, consistent capture rather than a missing one.
+        assert_eq!(execution.stdout, StreamCapture::empty());
+        assert_eq!(execution.stderr, StreamCapture::empty());
+    }
 }
 
 #[cfg(not(windows))]
@@ -501,6 +788,7 @@ mod unsupported {
             "sh",
             &["-c", "echo hi"],
             vec![protected_dir(&root, "evaluator")],
+            SUGGESTED_TIMEOUT,
         );
         let error = run(
             &benchmark,

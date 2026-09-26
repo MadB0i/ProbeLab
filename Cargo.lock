@@ -2537,7 +2537,7 @@ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 
 [[package]]
 name = "probelab-agent"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "probelab-core",
  "tokio",
@@ -2545,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "probelab-benchmarks"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "probelab-core",
  "probelab-sandbox",
@@ -2556,7 +2556,7 @@ dependencies = [
 
 [[package]]
 name = "probelab-broker"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "probelab-core",
  "serde_json",
@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "probelab-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2574,7 +2574,7 @@ dependencies = [
 
 [[package]]
 name = "probelab-desktop"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "probelab-agent",
  "probelab-benchmarks",
@@ -2594,7 +2594,7 @@ dependencies = [
 
 [[package]]
 name = "probelab-engine"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "probelab-agent",
  "probelab-benchmarks",
@@ -2614,7 +2614,7 @@ dependencies = [
 
 [[package]]
 name = "probelab-evaluator"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "probelab-core",
  "serde_json",
@@ -2623,7 +2623,7 @@ dependencies = [
 
 [[package]]
 name = "probelab-model-adapters"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "probelab-core",
  "rand 0.9.5",
@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "probelab-sandbox"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "probelab-agent",
  "probelab-core",
@@ -2654,7 +2654,7 @@ dependencies = [
 
 [[package]]
 name = "probelab-telemetry"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "probelab-core",
  "rusqlite",
