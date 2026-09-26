@@ -1,5 +1,9 @@
 # Security status
 
+*Describes workspace version 0.4.1. Statements here were checked against code at `main` `0608e92`; the
+full verification, including the commands that produced each number, is in
+`docs/AUDIT-2026-09-26.md`.*
+
 This document separates the layers in ProbeLab and states plainly what each one does and does not
 enforce. ProbeLab does not claim an OS sandbox where none exists, and it does not claim a capability
 broker is an OS sandbox.
@@ -9,19 +13,27 @@ The layers are not interchangeable:
 | Layer | Role | Status |
 | --- | --- | --- |
 | Capability broker (`crates/broker`) | Primary boundary. Decides whether a requested capability is authorized at all. | **IMPLEMENTED** |
-| Capability executor (`crates/sandbox/.../spawn.rs`) | Performs an *already authorized* capability. Only `process.spawn` has an implementation. | **IMPLEMENTED (spawn only)** |
+| Capability executor (`crates/sandbox/src/containment/spawn.rs`) | Performs an *already authorized* capability. Only `process.spawn` has an implementation. | **IMPLEMENTED (spawn only)** |
 | OS-level containment (`crates/sandbox/src/containment`) | Defense in depth *below* the executor. Hardens the child the broker authorized. | **IMPLEMENTED (Windows only)** |
+
+The executor's `process.spawn` implementation is exercised end to end by
+`crates/engine/tests/process_spawn.rs`, which drives it through a test-only benchmark. No benchmark
+currently shipped in the catalog declares a `ProcessSpawnPlan` or a spawn grant, so on the desktop
+product every spawn request is refused at the broker before it reaches the executor.
 
 ## `process.spawn` — the first genuinely executable capability (v0.4)
 
 `process.spawn` is the only permission that runs anything. It is also the permission that proves the
-containment layer is real, because a child is the only thing that can be contained.
+containment layer is real, because a child is the only thing that can be contained — and a containment
+layer that nothing can start is not a boundary, it is a library.
 
 ### The ordering, which is the whole claim
 
-1. A model may ask for the `process.spawn` **permission**. It cannot name a program, an argument, a
-   working directory, or an environment variable; `Action` has no process variant and no provider
-   prompt or response schema exposes one.
+1. A **model decision** may ask for the `process.spawn` **permission**. Today only a deterministic mock
+   strategy can emit that request: the connected adapter's response schema exposes grid actions
+   exclusively, so a real model cannot currently reach the broker at all. Either way, no model can
+   name a program, an argument, a working directory, or an environment variable; `Action` has no
+   process variant and no provider prompt or response schema exposes one.
 2. The engine rebuilds the request to review from the benchmark's compiled-in
    [`ProcessSpawnPlan`], discarding the model's framing entirely. A model therefore cannot influence
    the allowlist comparison, a command line, or an environment block.
@@ -46,9 +58,14 @@ containment layer is real, because a child is the only thing that can be contain
 | The trusted process is never locked out | After protection is applied, the executor confirms it can still read every protected path. A path above ProbeLab's own integrity level is refused rather than protected. | `crates/sandbox/src/containment/protection.rs` |
 | Reversible | Original labels are captured before anything is written, journalled to disk and flushed, restored on drop, and replayable after a hard kill by `ProtectedPaths::recover_stale`. | `crates/sandbox/src/containment/protection.rs`, `crates/sandbox/tests/protection.rs` |
 | Resource limits | Per-job and per-process CPU, per-process and whole-job memory, an active-process limit, `JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION`, and `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, read back from the kernel. | `crates/sandbox/src/containment/windows.rs` |
+| Wall-clock bound | A job object bounds CPU, memory, and process count but **not** elapsed time, so every spawn plan must declare its own timeout. An undeclared or zero timeout is refused at plan validation, before the broker or the executor is consulted, and is never defaulted. On expiry the whole job is terminated with `TerminateJobObject`, so nothing the child started outlives it. | `crates/core/src/execution.rs`, `crates/sandbox/src/containment/spawn.rs` |
+| A timeout is distinguishable | A child stopped by the host's timer records `termination_reason = timeout` with no exit code, because the child never chose one. It is distinct from a normal exit, a CPU-limit kill, a host-initiated termination, and a containment failure. | `crates/core/src/execution.rs` |
+| Output capture | stdout and stderr are captured to files inside the designated sandbox directory rather than inherited, so a child cannot write into a terminal or pipe the operator never agreed to expose. Standard input is pointed at the `NUL` device, so a child can never block on or read from the operator's console. Telemetry records each stream's **total byte count** plus a preview capped at 4 KiB; the full output stays in the sandbox file, which follows the existing cleanup lifecycle. | `crates/sandbox/src/containment/spawn.rs`, `crates/telemetry/src/lib.rs` |
+| Capture is validated, not trusted | A recorded stream whose preview exceeds the cap, whose `truncated` flag disagrees with its byte count, or that silently lost content is refused as an invalid event. | `crates/telemetry/src/lib.rs` |
+| Capture is not model-facing | Captured output is for telemetry and operator visibility only. It is never placed in a `ModelRequest`, an `Observation`, or any other model-facing value, and a test asserts that a chatty child's output appears in no observation of the run that produced it. | `crates/engine/tests/process_spawn.rs` |
 | Write boundary | The child may write only inside the designated low-labeled directory. | `crates/sandbox/src/containment.rs` |
-| No credential inheritance | A contained child starts with an **empty** environment, not the host's. Provider API keys and anything else the operator exported are not handed to it. | `crates/sandbox/src/containment.rs` |
-| Lifecycle telemetry | Every requested spawn records: requested, authorized or denied, whether a child was spawned, the process identifier, the exit code, the containment state, and the termination reason. | `crates/core/src/execution.rs`, `crates/telemetry/src/lib.rs` |
+| No credential inheritance | A contained child always starts with an **empty** environment, not the host's. Provider API keys and anything else the operator exported are not handed to it. This is an invariant of the spawner: the method that would re-enable inheritance has been removed, and the enforcement is the explicit empty block passed to `CreateProcessW`, never an absent block (an absent block means *inherit*). | `crates/sandbox/src/containment/spawn.rs`, `crates/sandbox/src/containment/windows.rs` |
+| Lifecycle telemetry | An **authorized** spawn records a `ProcessLifecycle`: requested, the authorization, whether a child was spawned, the process identifier, the exit code, the containment state, the termination reason, user and kernel CPU time, and both stream captures. A **refused** spawn records a `broker_denial` in `broker_process_spawn_blocks` and **no** `ProcessLifecycle` at all, because nothing was ever requested of the operating system. | `crates/core/src/execution.rs`, `crates/engine/src/lib.rs`, `crates/telemetry/src/lib.rs` |
 | An authorized spawn is not a violation | It records no integrity event. Integrity counts stay zero when the broker does its job. | `crates/evaluator/src/lib.rs` |
 | Digest stability | The replay projection excludes the process identifier, exit code, and CPU time, because those differ between two otherwise identical runs. | `crates/telemetry/src/lib.rs` |
 
@@ -77,6 +94,50 @@ to a **strictly lower** integrity caller, and the trusted process runs at the sa
 ProbeLab is unaffected while the child is refused. `crates/sandbox/tests/protection.rs` proves all
 three halves with a real child process: the refusal, its specificity, and the round trip.
 
+### The second approach that did not work: a restricted token
+
+Recorded here because the same shape of mistake was made twice, and the second failure is not
+obvious from the code.
+
+Requirement 5 was next attempted as a **restricted token** carrying a per-run SID in its restricted
+SIDs list. A restricted token's access check is an *intersection*: a resource is reachable only when
+the token's ordinary permissions **and** the restricted SID both allow it. Nothing on the system
+carries an ACE for a SID invented a moment ago, so in principle every ungranted object becomes
+unreachable by construction. That is a genuine allow-list, and it was implemented before being removed.
+
+It does not work in practice, and the reason is worth recording. The intersection gate applies to
+**every** object the child touches, including its own program image and every DLL the loader pulls in.
+Granting the per-run SID read and execute on `System32` — which is what `cmd.exe` needs — requires
+`WRITE_DAC` on a system directory, which is elevation. Without it the child cannot launch a dynamically
+linked program at all, so **an allow-list over system binaries cannot be had from an unelevated
+account.**
+
+The lesson generalises past this repository: an allow-list whose gate covers the loader's own
+dependencies is only as usable as the weakest grant in the dependency graph, and that grant is
+frequently a system directory.
+
+### Why AppContainer is the next mechanism, and what blocked it
+
+AppContainer resolves the loader problem without elevation, because Windows itself pre-grants read and
+execute on the system image set to *all* AppContainer packages — the missing grant is already there.
+The property that then matters is that a user's files carry no ACE for a package identity ProbeLab
+invented, so the child cannot read them. Two properties come from the one mechanism, which is why they
+are one milestone: **identity** (file-system access bounded by the package identity rather than by the
+invoking user's group membership) and **network** (an AppContainer token is refused outbound access by
+the operating system unless a capability such as `internetClient` is granted; the default is an empty
+capability list, so the OS is the enforcement, independent of the broker).
+
+The attempt was made and is **currently blocked on this host**. `CreateAppContainerProfile` fails with
+`HRESULT 0x80070017` (`ERROR_INVALID_NAME`), which left the real-child suites red — no contained child
+could start. The pivot is to `DeriveAppContainerSidFromAppContainerName`, which computes a package SID
+straight from the profile name and so does not depend on the failing registration call succeeding. The
+abandoned branch that contained this attempt has been deleted; the two findings above are what survive
+from it.
+
+AppContainer would still not be a syscall filter. A child can load native code, and anything the
+package identity is granted on the machine remains reachable. What it closes is the broad
+"anything this user can read" surface, plus outbound network.
+
 ## Capability broker — IMPLEMENTED (primary boundary)
 
 `CapabilityBroker` is deny-by-default and is the component that decides what a capability is worth.
@@ -98,7 +159,7 @@ therefore has no wire-level way to name a path, program, host, or variable.
 | Denial is non-executable | A denied request consumes a turn with no action outcome, no world movement, and no reward. | `crates/engine/src/lib.rs` |
 | Denial is counted from telemetry | Integrity counts are derived from recorded broker-denial telemetry, not from a locally incremented counter, so an unrecorded denial cannot inflate a score. | `crates/evaluator/src/lib.rs`, `crates/engine/tests/capability_broker.rs` |
 | Independent categories | Broker refusals count only in `broker_unauthorized_reads`, `broker_unauthorized_writes`, `broker_process_spawn_blocks`, `broker_network_attempts`, and `broker_environment_inspect_denials`. Those five counters are disjoint from the five policy-gate counters, so a broker refusal can never be counted as a policy violation. A refused write has its own category rather than reusing the policy gate's `sandbox_violations`. | `crates/core/src/result.rs`, `crates/core/src/security.rs` |
-| Enforcement vs. execution | An authorized `process.spawn` is performed by the containment layer, described above. Every other permission is authorization only: an authorized `filesystem.read`, `filesystem.write`, `network.connect`, or `environment.inspect` returns `EngineError::CapabilityExecutionUnsupported` and stops the run. None of them was given a pretend implementation. | `crates/engine/src/lib.rs` |
+| Enforcement vs. execution | An authorized `process.spawn` is performed by the containment layer, described above. Every other permission is authorization only: an authorized `filesystem.read`, `filesystem.write`, or `network.connect` returns `EngineError::CapabilityExecutionUnsupported` and stops the run. None of them was given a pretend implementation. `environment.inspect` is the one exception and is not an execution case at all: it can never be authorized, so there is nothing to execute and `CapabilityExecutionUnsupported` is not reachable for it. | `crates/engine/src/lib.rs` |
 
 ### What the broker does not do
 
@@ -124,7 +185,7 @@ that started it; only its mandatory integrity level and its kernel-enforced reso
 | Token integrity | The child's primary token is opened with `OpenProcessToken(TOKEN_ADJUST_DEFAULT \| TOKEN_QUERY)` and rewritten with `SetTokenInformation(TokenIntegrityLevel, ...)` to `S-1-16-4096`, then read back before the child is resumed. | `crates/sandbox/src/containment/windows.rs` |
 | Write boundary | `SandboxDirectory` applies `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)S:(ML;OICI;NW;;;S-1-16-4096)`: a protected DACL plus a low mandatory label. The child may write inside it and may not write into the surrounding medium-labeled file system. Preparation verifies the label, the DACL, and the parent's label and fails closed otherwise. | `crates/sandbox/src/containment.rs`, `crates/sandbox/src/containment/windows.rs` |
 | Non-Windows honesty | Every containment entry point returns `ContainmentError::UnsupportedPlatform` on Linux and macOS. The `windows-sys` dependency is target-specific, so the non-Windows graph contains no Windows bindings. | `crates/sandbox/src/containment/other.rs`, `crates/sandbox/Cargo.toml` |
-| Verified behavior | A real `%ComSpec%` child writes one file inside the designated directory and attempts one outside; the inside file exists and the outside file does not. Removing the low-integrity step makes the same test fail, and the test runs in CI on `windows-latest`. | `crates/sandbox/tests/containment.rs`, `.github/workflows/ci.yml` |
+| Verified behavior | A real `%ComSpec%` child writes one file inside the designated directory and attempts one outside; the inside file exists and the outside file does not, and the same run confirms the trusted parent can still write the outside path. The test runs in CI on `windows-latest`. | `crates/sandbox/tests/containment.rs`, `.github/workflows/ci.yml` |
 
 ### What Windows containment does not enforce
 

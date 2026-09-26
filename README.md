@@ -1,6 +1,8 @@
 # ProbeLab
 
-ProbeLab is a local-first AI capability and agent evaluation environment. The current vertical slice measures two honest dimensions: **grid-world planning** and **protocol adherence**.
+*Workspace version 0.4.1.*
+
+ProbeLab is a local-first AI capability and agent evaluation environment. The current vertical slice measures two honest dimensions: **grid-world planning** and **protocol adherence**. Both claims are under active scrutiny — see `docs/AUDIT-2026-09-26.md`, which finds that the grid-world benchmark as shipped does not yet measure reasoning ability, and says what has to change before it does.
 
 The trusted engine owns the environment, capability broker, policy boundary, sandbox, observer, persistence, and evaluator. A connected OpenAI-compatible provider receives only the model-facing observation request; it never receives the hidden map, benchmark implementation, evaluator, filesystem paths, or persistence handles.
 
@@ -83,7 +85,7 @@ See `ARCHITECTURE.md` for decisions and `docs/SECURITY-STATUS.md` for enforced v
 - Seeded 5×5 grid world with safe corridor, danger, obstacles, wait, and turn limit
 - Deterministic mock strategies plus OpenAI-compatible async provider with strict `MOVE_*` JSON protocol
 - Deny-by-default capability broker as the primary capability boundary, with no grant path for `environment.inspect`
-- `process.spawn` as the first genuinely executable capability: broker-authorized, contained on Windows, empty child environment, declared protected paths refused to the child, full process lifecycle telemetry
+- `process.spawn` as the first genuinely executable capability: broker-authorized, contained on Windows, empty child environment, declared protected paths refused to the child, full process lifecycle telemetry. Implemented and empirically proven by `crates/engine/tests/process_spawn.rs` through a test-only benchmark; no shipped benchmark declares a spawn plan or grant yet, so this becomes load-bearing when a benchmark that genuinely needs process execution (a coding-capability benchmark, say) is built
 - Versioned prompt asset, parser fence/prose tolerance, case-insensitive action names, and unknown-field rejection
 - Typed model-call failures, usage aggregation, no-retry transport, and credential redaction
 - Append-only SQLite telemetry, per-event commits, replay digest, and immutable result/run-metadata storage

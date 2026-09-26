@@ -1,5 +1,8 @@
 # ProbeLab architecture
 
+*Describes workspace version 0.4.1 (`main` at `0608e92` and the audit-commit follow-up). Sections are
+labelled with the milestone that introduced them; the highest is v0.4.1.*
+
 ## Trust boundary
 
 The runtime data flow is:
@@ -46,7 +49,7 @@ The strict protocol accepts exactly one `{ "action": "..." }` object. Markdown f
 
 Every completed run returns `CompletedRun { result, metadata }`. `TestResult` contains the trusted capability/integrity result and safe reproducibility metadata. `RunMetadata` is stored separately in the same SQLite transaction and contains provider/model, prompt version, non-secret configuration fingerprint, environment version, start/end time, token usage, and the ordered action trace.
 
-The configuration fingerprint hashes only model name, temperature, max tokens, prompt template version, and benchmark version. API keys, environment-variable names, endpoints, headers, raw request bodies, and response bodies are excluded.
+The configuration fingerprint hashes six fields: model name, temperature, max tokens, prompt template version, benchmark version, and the declared request timeout. API keys, environment-variable names, endpoints, headers, raw request bodies, and response bodies are excluded.
 
 The replay digest hashes a semantic projection of observations, decisions, transitions, rewards, integrity events, and protocol-failure kinds. It excludes timestamps, run IDs, response text, request IDs, elapsed time, and token usage. Mock runs with the same seed and strategy remain field-identical; remote-provider runs are not assumed reproducible.
 
@@ -96,10 +99,18 @@ policy-gate categories. A refused write gets its own broker category rather than
 
 ## v0.4: `process.spawn` as the first executable capability
 
-`process.spawn` is the only permission that runs anything, and it is the permission that makes the
-containment layer a real boundary rather than a library nothing calls.
+`process.spawn` is the only permission that runs anything. It is the permission that makes the containment
+layer a real boundary rather than a library nothing calls — but that boundary is **not yet exercised by
+any shipped benchmark**. `GridWorldBenchmark` grants no capabilities at all and declares no
+`ProcessSpawnPlan`, so in the desktop product a spawn request is always refused before it reaches the
+executor. The executable path is proven by the integration suite in
+`crates/engine/tests/process_spawn.rs`, which drives it through a test-only benchmark. The capability
+becomes load-bearing the moment a benchmark that genuinely needs process execution exists, such as a
+future coding-capability benchmark.
 
-A model can ask for the `process.spawn` **permission** and nothing more. The request the broker
+A model can ask for the `process.spawn` **permission** and nothing more — though today only a
+deterministic mock strategy can emit that request at all; the connected adapter's response schema
+exposes grid actions exclusively, so a real model cannot reach the broker. The request the broker
 reviews is rebuilt from the benchmark's compiled-in `ProcessSpawnPlan`, so the model cannot influence
 the allowlist comparison, a command line, or an environment block. A plan is a *request* to be
 authorized, never a grant: the broker still has to find the program on its explicit allowlist.
@@ -117,14 +128,35 @@ Two design points are worth stating because they are easy to get wrong:
   treated as "nothing to protect", because a child that can read the evaluator has not been isolated
   in any meaningful sense.
 - **The child gets an empty environment.** It does not inherit the host's, so provider credentials are
-  not handed to a process one argument away from exfiltrating them.
+  not handed to a process one argument away from exfiltrating them. This is an invariant of
+  `ContainedProcessSpawner`, not a default: there is no public method that opts back into inheritance.
+  One consequence worth knowing is that the child has no `PATH`, so a plan must name an absolute
+  program path.
 
 An authorized spawn consumes a turn without moving the world and records no integrity event: the
 broker working correctly is not a violation. A refused spawn is a non-executable turn recorded in
-`broker_process_spawn_blocks`. Every requested spawn records a `ProcessLifecycle` with the requested
-flag, the authorization, whether a child spawned, the PID, the exit code, the containment state, and
-the termination reason. The replay projection deliberately excludes the PID, exit code, and CPU time
-so a mock run's digest stays reproducible.
+`broker_process_spawn_blocks` and records a `broker_denial`, **not** a `ProcessLifecycle` — nothing was
+ever requested of the operating system, so there is no lifecycle to describe. An authorized spawn
+records a `ProcessLifecycle` carrying the requested flag, the authorization, whether a child spawned,
+the PID, the exit code, the containment state, the termination reason, user and kernel CPU time, and
+both stream captures. The replay projection deliberately excludes the PID, exit code, CPU time, and
+captured output so a mock run's digest stays reproducible.
+
+### Wall-clock bound and output capture
+
+A job object bounds CPU, memory, and process count, but **not elapsed time**, so the plan carries its own
+wall-clock timeout. `ProcessSpawnPlan::validate` refuses a plan that does not declare one, or declares
+zero, and no code path substitutes a value on the plan's behalf. On expiry the executor terminates the
+whole job with `TerminateJobObject`, so nothing the child started outlives the timeout, and the run
+records `TerminationReason::Timeout` with no exit code because the child never chose one.
+
+The child's stdout and stderr are redirected to files inside the run's existing designated directory
+rather than inherited, which closes an information leak: an inheriting child could write into a
+terminal or pipe the operator never agreed to expose. Standard input is pointed at the `NUL` device, so
+a child can never block on or read from the operator's console. Telemetry keeps each stream's total
+byte count and a preview capped at 4 KiB, while the full output stays in the sandbox file and follows
+the directory's existing cleanup. Captured output is never placed in a model-facing value and does not
+participate in the replay projection, because all of it differs between two otherwise identical runs.
 
 The other four permissions are unchanged: they are authorized or refused by the broker and then
 stop the run with `CapabilityExecutionUnsupported`. None of them was given a premature implementation.

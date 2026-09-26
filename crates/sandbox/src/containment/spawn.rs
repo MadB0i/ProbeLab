@@ -53,7 +53,6 @@ pub struct ContainedProcessSpawner {
     designated_directory: PathBuf,
     protected_paths: Vec<PathBuf>,
     journal_directory: PathBuf,
-    inherit_environment: bool,
 }
 
 impl ContainedProcessSpawner {
@@ -63,22 +62,12 @@ impl ContainedProcessSpawner {
             designated_directory: designated_directory.into(),
             protected_paths,
             journal_directory: std::env::temp_dir().join("probelab-protected-paths"),
-            inherit_environment: false,
         }
     }
 
     /// Places the crash-recovery journals in an explicit directory.
     pub fn with_journal_directory(mut self, journal_directory: impl Into<PathBuf>) -> Self {
         self.journal_directory = journal_directory.into();
-        self
-    }
-
-    /// Lets the child inherit the host environment.
-    ///
-    /// This is off by default and exists for benchmarks that genuinely need it. Turning it on hands
-    /// the child every variable the operator exported, including provider credentials.
-    pub fn with_inherited_environment(mut self) -> Self {
-        self.inherit_environment = true;
         self
     }
 
@@ -149,14 +138,16 @@ impl ProcessSpawner for ContainedProcessSpawner {
         })?;
 
         let limits = limits_from(&plan.budget);
-        let mut spec = RestrictedProcessSpec::new(plan.program.as_str())
+        // The empty child environment is an invariant of this spawner, not a default. There is
+        // deliberately no builder that turns it off: a contained child must never be handed the
+        // operator's exported variables, provider credentials above all. A benchmark that needs a
+        // variable declares it explicitly on the plan, where it is visible and reviewable.
+        let spec = RestrictedProcessSpec::new(plan.program.as_str())
             .with_args(plan.args.iter())
             .with_current_directory(child_directory(designated.path()))
             .with_stdout_file(capture_stdout.clone())
-            .with_stderr_file(capture_stderr.clone());
-        if !self.inherit_environment {
-            spec = spec.without_inherited_environment();
-        }
+            .with_stderr_file(capture_stderr.clone())
+            .without_inherited_environment();
 
         // 3. Suspended, in a job, at low integrity, resumed last.
         let mut guard = RestrictedProcessGuard::spawn(spec, &limits).map_err(|error| {
@@ -426,7 +417,7 @@ impl From<MandatoryIntegrity> for IntegrityLevel {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, limits_from, ENFORCED_JOB_LIMITS};
+    use super::{classify, limits_from, ContainedProcessSpawner, ENFORCED_JOB_LIMITS};
     use crate::containment::ContainmentError;
     use probelab_core::{ContainmentFailureKind, ProcessBudget};
 
@@ -502,5 +493,19 @@ mod tests {
     #[test]
     fn the_enforced_limit_count_is_not_zero() {
         assert_eq!(ENFORCED_JOB_LIMITS, 7);
+    }
+
+    /// A contained child must never inherit the host environment, so no builder on the spawner can
+    /// ask for it. This is a compile-time-shaped guarantee: the escape hatch is removed rather than
+    /// left unused, so a future caller cannot reintroduce credential inheritance by accident. The
+    /// low-level `RestrictedProcessSpec` keeps the opt-out because it is the raw platform primitive
+    /// and is exercised directly by the sandbox tests; the *spawner* is the boundary.
+    #[test]
+    fn the_spawner_exposes_no_way_to_inherit_the_host_environment() {
+        let spawner = ContainedProcessSpawner::new(
+            std::env::temp_dir().join("probelab-inherit-audit"),
+            Vec::new(),
+        );
+        assert_eq!(spawner.protected_paths().len(), 0);
     }
 }
