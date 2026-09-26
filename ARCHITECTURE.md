@@ -162,6 +162,81 @@ corner goal, fixed 30-turn budget — collapsed it to greedy 0.971 against searc
 intervals, and the proof test failed as it should. The load-bearing changes are the per-seed start and
 the tight per-seed budget; the branching adds difficulty on top.
 
+## v0.5 phase 0: is the bounded history window actually load-bearing?
+
+**Answer: no, and the reason is structural rather than a bug.** The v0.5 measurement harness in
+`crates/engine/tests/phase0_memory.rs` measures it rather than assuming it.
+
+Two reactive policies were added, and they are deliberately the *same policy*. Identical move rules,
+identical tie-breaks, identical information from the current observation. The only difference is that
+`MemoryReactive` reads `ModelRequest::history` and `StatelessReactive` has no way to. Their
+descriptors are compared key-by-key to prove nothing else differs, so the gap between their scores is
+the value of the window with nothing confounded.
+
+Measured over all 70 evaluation seeds:
+
+| Policy | Successes | Rate | 95 % CI | Mean reward | Mean turns |
+| --- | --- | --- | --- | --- | --- |
+| stateless reactive | 9 / 70 | 0.129 | [0.069, 0.227] | 2.76 | 7.90 |
+| memory reactive | 9 / 70 | 0.129 | [0.069, 0.227] | 2.76 | 7.90 |
+
+Identical, down to the mean reward and the terminal-status breakdown. Stronger than the aggregate
+tie: `p0_the_two_reactive_policies_take_identical_action_sequences` replays both policies on every
+evaluation seed with a real reconstructed history window and asserts they choose the **same action on
+every turn of every seed**. They are not merely tied; they are behaviourally identical.
+
+### Why, proved rather than guessed
+
+Three tests establish the mechanism, and each would fail if the explanation stopped being true.
+
+**The window is delivered.** `p0_the_history_window_is_delivered_to_the_model` drives a real engine
+run and records the history length the model receives on each turn: zero on turn one, non-empty
+afterwards, never above the cap. Without this control, "memory made no difference" would be
+unfalsifiable — an empty window would produce the same null result.
+
+**The observation radius equals the step size.** `p0_the_observation_radius_equals_the_step_size`
+walks every evaluation seed and asserts, for every cell: at Manhattan distance ≥ 2 it is *never* in
+the observation, and at distance 1 it is *always* in the observation. That is the whole explanation. A
+memory window can only pay off when a policy must act on information that is no longer in front of it.
+Here the cell a policy is about to step onto was adjacent on the turn it chose the move, so it was
+told what that cell is. A remembered hazard is never the binding constraint, because the visible hazard
+already is.
+
+**A seen goal can never outlive its own turn.** `p0_a_seen_goal_can_never_survive_its_own_turn` proves
+the most obvious route to memory paying off is closed. Both reactive policies step onto an adjacent
+reward the moment they see one, so a goal can never end up "remembered but not yet adjacent" — the
+state in which remembering where you saw the goal would be worth something. The episode ends on the
+turn the goal is first seen.
+
+The search solver's knowledge scope was verified before any of this was built on top of it.
+`p0_the_search_solver_decisions_depend_only_on_the_request_stream` replays one fixed request stream
+against two `LookaheadSolver`s constructed with different seeds over different layouts and requires
+identical decisions: if any part of the hidden layout reached the solver through the seed, the two
+would diverge.
+
+### What would make memory load-bearing, and why it was not done here
+
+The three structural facts above point at the same lever: **the observation radius must exceed the step
+size.** If the agent could see two or three tiles out, a hazard or a dead end would be visible before
+it became the cell underfoot, and the window would carry real information across the gap. The
+alternatives — a changing environment where a tile stops being safe once you leave it, or hazards that
+move — also work. All three are genuine benchmark design changes that alter what the grid world
+measures.
+
+None of them were made. Phase 0's brief was to establish whether memory is load-bearing and to report
+the result honestly **rather than forcing a fix**, and the honest result is that it is not, today, for
+this environment and this policy class. Changing the generator to manufacture a result would have made
+the benchmark measure something else while appearing to satisfy the brief. The finding is recorded
+instead, pinned by a test that will fail if a future change makes memory matter, and the lever is
+documented for whoever picks up the design next.
+
+One incidental finding: the `HISTORY_WINDOW` added in v0.5 is consumed by **no** shipped policy. The
+search solver accumulates its memory through `&mut self` across `predict` calls rather than from
+`request.history`, because an in-process agent does not need the field. The window exists for a
+connected model, which gets a fresh request each turn and has no other memory. That is a real and
+intended use, but it means the window's *usefulness* is currently asserted only for real providers —
+which is one more reason no connected model has been measured on this benchmark yet.
+
 ## v0.3 capability broker
 
 `crates/broker` is the primary capability boundary. It is deny-by-default and answers one question:

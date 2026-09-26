@@ -16,8 +16,18 @@ Windows host at `main` `0608e92`; see `docs/AUDIT-2026-09-26.md` for the full au
   - `ModelRequest` carries a bounded rolling history of up to `HISTORY_WINDOW = 8` completed turns, enforced as a hard limit in `ModelRequest::validate`. The bound is part of the token-cost contract: request size is capped regardless of episode length.
   - Reward is shaped by distance-to-goal progress, so two runs that both end in `turn_limit` are distinguishable. `CompletionStatus` is unchanged and remains the categorical pass/fail signal.
 - **v0.5 measurement harness** in `crates/engine/src/harness.rs`: runs N episodes over a declared seed pool and reports a success rate with a Wilson score interval. The 40 dev seeds and 70 eval seeds are disjoint, and that disjointness is validated when the definition loads and again in the harness constructor, not left to convention. Random and greedy baselines are measured through the identical harness with identical telemetry.
-- A scripted search-based reference solver (`LookaheadSolver`) that is **not privileged**: it receives the same `ModelRequest` as any other agent, is never told the layout, goal, start, or seed, and learns the map only from tiles it has seen plus the distance readings it has taken.
+- A scripted search-based reference solver (`LookaheadSolver`) that is **not privileged**: it receives the same `ModelRequest` as any other agent, is never told the layout, goal, start, or seed, and learns the map only from tiles it has seen plus the distance readings it has taken. Its knowledge scope is verified by a test that replays one request stream against two solvers built with different seeds over different layouts and requires identical decisions.
 - `prompts/grid_world_v2.md` states the objective explicitly. v1 never mentioned reward, danger, or winning anywhere, so it was measuring whether a model could infer the goal from English field names.
+
+### v0.5 phase 0 — memory load-bearing proof
+
+- `StatelessReactive` and `MemoryReactive` added as the two halves of a controlled experiment: same
+  policy, same rules, same current-observation information, differing only in whether the policy can
+  read `ModelRequest::history`. Their descriptors are compared key-by-key in a test so nothing else can
+  be confounded.
+- **Result: memory is not load-bearing on this benchmark.** Both score 9/70 with identical mean reward,
+  mean turns, and status breakdown, and they choose the same action on every turn of every evaluation
+  seed. Reported as found; see Known limitations for the structural reason and the three proof tests.
 - Deterministic mock strategies: optimal, random, greedy mistake, invalid-action spam, and five independent security probes.
 - Fail-closed policy/runtime authorization and non-executable denied-turn transitions.
 - Deny-by-default capability broker (`crates/broker`) as the primary v0.3 boundary: `filesystem.read`, `filesystem.write`, `process.spawn`, `network.connect`, and `environment.inspect`, with canonicalized path checks, independent read/write roots, explicit program and endpoint allowlists, and an unconditional `environment.inspect` denial that has no grant path.
@@ -39,7 +49,7 @@ Windows host at `main` `0608e92`; see `docs/AUDIT-2026-09-26.md` for the full au
 
 - `cargo fmt --check` — the gate. Bare form is correct here because the workspace root is a *virtual* manifest, so `cargo fmt` already covers every member; `--all` is equivalent at this root.
 - `cargo build --workspace --locked`
-- `cargo test --workspace --all-targets --locked` — 247 tests passing
+- `cargo test --workspace --all-targets --locked` — 256 tests passing
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `pnpm install` in `apps/desktop`
 - `pnpm build` in `apps/desktop`
@@ -103,6 +113,15 @@ output, and it was measuring nothing.
 
 ## Known limitations
 
+- **The bounded history window is not load-bearing on the grid world.** Phase 0 measured it: a
+  stateless reactive policy and an otherwise identical memory-reading reactive policy both score
+  9/70, with identical mean reward, mean turns, and terminal-status breakdown, and they take the same
+  action on every turn of every evaluation seed. The reason is structural — the observation radius
+  equals the step size, so the cell a policy is about to enter was adjacent on the turn it chose the
+  move, and a goal seen on any turn ends the episode on that turn. Making memory matter needs an
+  observation radius larger than one step, a changing environment, or moving hazards. That would change
+  what the benchmark measures, so it was recorded rather than forced. Full analysis and the three
+  supporting proof tests are in `ARCHITECTURE.md` and `crates/engine/tests/phase0_memory.rs`.
 - **The multi-episode harness is not wired into the desktop app.** `run_benchmark` still runs one
   episode against one seed. No success rate, confidence interval, or baseline appears in the UI, and
   the presence of `crates/engine/src/harness.rs` should not be read otherwise.

@@ -1352,6 +1352,276 @@ impl LookaheadSolver {
     }
 }
 
+/// A reactive policy that sees only the turn it is being asked about.
+///
+/// This is one half of the memory experiment. It receives the same `ModelRequest` every other agent
+/// does, and it reads exactly one field of it: `observation`. It never looks at `history`, so it
+/// cannot remember a hazard it has walked away from, a dead end it has already entered, or a goal it
+/// has already seen. Everything it knows, it knows because it can see it right now.
+pub struct StatelessReactive;
+
+impl StatelessReactive {
+    /// Returns the stable descriptor name for this policy.
+    pub fn strategy_name() -> &'static str {
+        "stateless_reactive"
+    }
+}
+
+impl ModelProvider for StatelessReactive {
+    fn descriptor(&self) -> ModelDescriptor {
+        reactive_descriptor(Self::strategy_name(), 0, false)
+    }
+
+    fn predict(&mut self, request: ModelRequest) -> Result<ModelDecision, String> {
+        request.validate()?;
+        // Deliberately passes no history. The policy is not "mostly ignoring" memory; it has no way
+        // to read it, so the comparison against MemoryReactive isolates the window exactly.
+        reactive_decide(&request, &Belief::from_observation_only(&request))
+            .map(ModelDecision::GridAction)
+    }
+}
+
+/// A reactive policy that additionally replays the bounded history window.
+///
+/// This is the other half of the memory experiment, and it is deliberately the *same policy* as
+/// [`StatelessReactive`]: identical move rules, identical tie-breaks, identical information from the
+/// current observation. The single difference is that it reads `request.history` and therefore knows
+/// about tiles that are not currently adjacent.
+///
+/// What that buys it, concretely:
+/// * a hazard it saw earlier is still treated as a hazard after it has walked away;
+/// * a dead end it has already entered can be recognised and not re-entered;
+/// * a reward tile it has already seen is still a known destination, so leaving it and coming back is
+///   a planned move rather than a re-search.
+///
+/// It is constrained to the legitimate observation interface exactly as the stateless one is: it
+/// learns nothing from the layout, the seed, or the goal, only from tiles that were in its own
+/// observation at some point.
+pub struct MemoryReactive;
+
+impl MemoryReactive {
+    /// Returns the stable descriptor name for this policy.
+    pub fn strategy_name() -> &'static str {
+        "memory_reactive"
+    }
+}
+
+impl ModelProvider for MemoryReactive {
+    fn descriptor(&self) -> ModelDescriptor {
+        reactive_descriptor(Self::strategy_name(), 0, true)
+    }
+
+    fn predict(&mut self, request: ModelRequest) -> Result<ModelDecision, String> {
+        request.validate()?;
+        reactive_decide(&request, &Belief::from_observation_and_history(&request))
+            .map(ModelDecision::GridAction)
+    }
+}
+
+/// Everything a reactive policy is allowed to believe, gathered from the legitimate interface.
+///
+/// Built two ways so the two policies provably differ only in what they were shown. Both read the
+/// current observation; [`Belief::from_observation_and_history`] additionally replays the bounded
+/// window, which is the entire subject of the experiment.
+#[derive(Clone, Debug, Default)]
+struct Belief {
+    /// Tiles the agent knows something about, from the current observation and possibly from history.
+    tiles: BTreeMap<(u8, u8), TileKind>,
+    /// The goal's position, if the agent has ever seen the reward tile.
+    seen_goal: Option<Coordinate>,
+    /// Cells the agent has previously stood on.
+    visited: std::collections::BTreeSet<(u8, u8)>,
+}
+
+impl Belief {
+    /// Belief built from the current turn only.
+    fn from_observation_only(request: &ModelRequest) -> Self {
+        let mut belief = Self::default();
+        belief.absorb_observation(request);
+        belief
+    }
+
+    /// Belief built from the current turn plus every remembered turn in the window.
+    ///
+    /// The history is replayed oldest-first and then the current observation is applied last, so a
+    /// tile the agent can see right now always overrides a stale memory of it. That ordering matters:
+    /// memory must never be able to overrule the present.
+    fn from_observation_and_history(request: &ModelRequest) -> Self {
+        let mut belief = Self::default();
+        for entry in &request.history {
+            belief.visited.insert((entry.position.x, entry.position.y));
+            belief
+                .tiles
+                .insert((entry.position.x, entry.position.y), entry.current_tile);
+            for neighbor in &entry.visible_neighbors {
+                belief.tiles.insert(
+                    (neighbor.coordinate.x, neighbor.coordinate.y),
+                    neighbor.tile,
+                );
+            }
+        }
+        belief.absorb_observation(request);
+        belief
+    }
+
+    /// Folds the current turn in, last, so it wins over any memory of the same tile.
+    fn absorb_observation(&mut self, request: &ModelRequest) {
+        let here = (
+            request.observation.position.x,
+            request.observation.position.y,
+        );
+        self.visited.insert(here);
+        self.tiles.insert(here, request.observation.current_tile);
+        for neighbor in &request.observation.visible_neighbors {
+            let key = (neighbor.coordinate.x, neighbor.coordinate.y);
+            self.tiles.insert(key, neighbor.tile);
+            if neighbor.tile == TileKind::Reward {
+                self.seen_goal = Some(neighbor.coordinate);
+            }
+        }
+        if request.observation.current_tile == TileKind::Reward {
+            self.seen_goal = Some(request.observation.position);
+        }
+    }
+
+    /// True when the agent knows this tile cannot be entered.
+    fn is_blocked(&self, cell: (u8, u8)) -> bool {
+        matches!(
+            self.tiles.get(&cell),
+            Some(TileKind::Obstacle) | Some(TileKind::Danger)
+        )
+    }
+
+    /// True when the agent knows the reward is on this tile.
+    fn is_goal(&self, cell: (u8, u8)) -> bool {
+        self.seen_goal.is_some_and(|goal| (goal.x, goal.y) == cell)
+    }
+}
+
+/// The move rule both reactive policies share.
+///
+/// It is one-step and myopic by construction: it looks at the four adjacent tiles and the current
+/// distance reading, and nothing else. There is no search, no lookahead beyond a single tile, and no
+/// planning. That is deliberate — the question Phase 0 asks is whether *memory alone*, with no extra
+/// cleverness, changes what a reactive policy can do.
+fn reactive_decide(request: &ModelRequest, belief: &Belief) -> Result<Action, String> {
+    let grid_size = request.observation.grid_size;
+    let here = request.observation.position;
+    let here_distance = request.observation.distance_to_goal;
+
+    let candidates = vec![Action::Up, Action::Down, Action::Left, Action::Right]
+        .into_iter()
+        .filter(|action| request.available_actions.contains(action))
+        .filter_map(|action| {
+            action_coordinate(action, here, grid_size).map(|target| (action, target))
+        })
+        .filter(|(_, target)| !belief.is_blocked((target.x, target.y)))
+        .collect::<Vec<_>>();
+
+    if candidates.is_empty() {
+        return request
+            .available_actions
+            .first()
+            .copied()
+            .ok_or_else(|| "model request has no available actions".to_owned());
+    }
+
+    // 1. The reward, if it is known to be adjacent. Nothing outranks standing on the goal.
+    if let Some((action, _)) = candidates
+        .iter()
+        .find(|(_, target)| belief.is_goal((target.x, target.y)))
+    {
+        return Ok(*action);
+    }
+
+    // 2. Head for a remembered goal. This is the one rule a stateless policy cannot have: once the
+    //    reward has been seen and then left behind, only memory knows where it went.
+    if let Some(goal) = belief.seen_goal {
+        let goal_distance = u32::from(goal.x.abs_diff(here.x)) + u32::from(goal.y.abs_diff(here.y));
+        if goal_distance > 0 {
+            let mut best: Option<(u32, Action)> = None;
+            for (action, target) in &candidates {
+                let next =
+                    u32::from(target.x.abs_diff(goal.x)) + u32::from(target.y.abs_diff(goal.y));
+                if next >= goal_distance {
+                    continue;
+                }
+                if best.is_none_or(|(current, _)| next < current) {
+                    best = Some((next, *action));
+                }
+            }
+            if let Some((_, action)) = best {
+                return Ok(action);
+            }
+        }
+    }
+
+    // 3. Otherwise descend the current distance gradient. This rule is identical in both policies and
+    //    is available to a stateless one, because `distance_to_goal` is in the current observation.
+    let mut best: Option<(i64, Action)> = None;
+    for (action, target) in &candidates {
+        let next = u32::from(target.x.abs_diff(here.x)) + u32::from(target.y.abs_diff(here.y));
+        let change = i64::from(here_distance) - i64::from(next);
+        if best.is_none_or(|(current, _)| change > current) {
+            best = Some((change, *action));
+        }
+    }
+    if let Some((_, action)) = best {
+        return Ok(action);
+    }
+
+    // 4. Nothing improved. Prefer a tile the agent has not stood on before, which is the other thing
+    //    memory buys, and only fall back to the first legal move when every option is familiar.
+    for (action, target) in &candidates {
+        if !belief.visited.contains(&(target.x, target.y)) {
+            return Ok(*action);
+        }
+    }
+    Ok(candidates[0].0)
+}
+
+/// The descriptor shared by both reactive policies.
+///
+/// `reads_history` is recorded as an explicit parameter so a result bundle states which of the two
+/// ran, and a reader can tell them apart without reading the source.
+fn reactive_descriptor(strategy: &'static str, seed: u64, reads_history: bool) -> ModelDescriptor {
+    let mut parameters = BTreeMap::new();
+    parameters.insert(
+        "configuration".to_owned(),
+        serde_json::Value::String(strategy.to_owned()),
+    );
+    parameters.insert(
+        "provider".to_owned(),
+        serde_json::Value::String("deterministic-mock".to_owned()),
+    );
+    parameters.insert(
+        "model".to_owned(),
+        serde_json::Value::String(format!("native-mock-{strategy}")),
+    );
+    parameters.insert(
+        "prompt_template_version".to_owned(),
+        serde_json::Value::String(MOCK_PROMPT_TEMPLATE_VERSION.to_owned()),
+    );
+    parameters.insert(
+        "environment_version".to_owned(),
+        serde_json::Value::String(GRID_WORLD_ENVIRONMENT_VERSION.to_owned()),
+    );
+    parameters.insert(
+        "reads_history".to_owned(),
+        serde_json::Value::String(reads_history.to_string()),
+    );
+    parameters.insert(
+        "history_window".to_owned(),
+        serde_json::Value::String(HISTORY_WINDOW.to_string()),
+    );
+    ModelDescriptor {
+        adapter: "deterministic-mock-v1".to_owned(),
+        strategy: strategy.to_owned(),
+        seed,
+        parameters,
+    }
+}
+
 /// The number of hops from `from` to `to` along a parent-pointer forest, if it is connected.
 fn hops_between(from: (u8, u8), to: (u8, u8), route: &BTreeMap<(u8, u8), (u8, u8)>) -> usize {
     if from == to {

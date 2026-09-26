@@ -21,8 +21,8 @@ use probelab_engine::harness::{Harness, MeasurementPlan, SeedPools};
 use probelab_engine::BenchmarkRunner;
 use probelab_evaluator::GridWorldEvaluator;
 use probelab_model_adapters::{
-    LookaheadSolver, MockModelConfig, MockModelProvider, OpenAiCompatibleConfig,
-    OpenAiCompatibleProvider,
+    LookaheadSolver, MemoryReactive, MockModelConfig, MockModelProvider, OpenAiCompatibleConfig,
+    OpenAiCompatibleProvider, StatelessReactive,
 };
 use probelab_telemetry::SqliteTelemetryRecorder;
 
@@ -145,6 +145,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &plan,
             "lookahead",
             &mut lookahead_factory,
+        )?,
+    );
+
+    // The memory experiment. These two policies are identical except that one reads the bounded
+    // history window and the other cannot, so the difference between them is the value of memory.
+    let mut stateless_factory = |_seed: u64| -> Box<dyn Agent> {
+        Box::new(ProviderAgent::from_provider(StatelessReactive))
+    };
+    report(
+        "stateless reactive",
+        &harness.measure(
+            benchmark_ref,
+            &evaluator,
+            &runner,
+            &plan,
+            "stateless",
+            &mut stateless_factory,
+        )?,
+    );
+
+    let mut memory_factory =
+        |_seed: u64| -> Box<dyn Agent> { Box::new(ProviderAgent::from_provider(MemoryReactive)) };
+    report(
+        "memory reactive",
+        &harness.measure(
+            benchmark_ref,
+            &evaluator,
+            &runner,
+            &plan,
+            "memory",
+            &mut memory_factory,
         )?,
     );
 
