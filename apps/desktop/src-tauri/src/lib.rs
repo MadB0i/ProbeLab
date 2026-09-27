@@ -13,9 +13,14 @@ use probelab_telemetry::{SqliteResultRepository, SqliteTelemetryRecorder};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
+mod brain;
 mod commands;
 mod provider;
 
+pub use brain::{
+    brain_panel, get_experiment, list_experiments, run_experiment, BrainCommandError, BrainSurface,
+    ExperimentRequest,
+};
 pub use commands::{
     get_provider_status, get_result, get_run_metadata, list_agents, list_benchmark_details,
     list_benchmarks, list_providers, run_benchmark, subscribe_telemetry, AgentSummary,
@@ -63,6 +68,12 @@ impl RecentEventBuffer {
 /// Thread-safe application state shared by the Tauri command boundary.
 pub struct AppState {
     catalog: BenchmarkCatalog,
+    /// The command center's view of the Lab Brain and the experiments it has run.
+    ///
+    /// Managed state rather than something a command owns, because the panel asks "what is true right
+    /// now" as well as "tell me when it changes" — a channel alone would show an empty panel after a
+    /// reload even though a run had already finished.
+    pub brain: BrainSurface,
     recorder: Arc<SqliteTelemetryRecorder>,
     results: Arc<SqliteResultRepository>,
     recent_events: RecentEventBuffer,
@@ -138,8 +149,13 @@ pub fn run() {
                 },
             )?);
             let results = Arc::new(SqliteResultRepository::new(&database_path)?);
+            let brain = BrainSurface::default();
+            // The Brain's runner records into the same durable sink as a single-episode run, so an
+            // experiment's events and a run's events end up in one place rather than two.
+            brain.set_recorder(recorder.clone());
             app.manage(AppState {
                 catalog: BenchmarkCatalog::new()?,
+                brain,
                 recorder,
                 results,
                 recent_events,
@@ -147,6 +163,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            brain_panel,
+            get_experiment,
+            list_experiments,
+            run_experiment,
             list_agents,
             list_benchmark_details,
             list_benchmarks,

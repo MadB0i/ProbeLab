@@ -3,7 +3,18 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentCatalog } from "./AgentCatalog";
 import { BenchmarkCatalog as BenchmarkCatalogPanel } from "./BenchmarkCatalog";
-import { listAgents, listBenchmarkDetails, type AgentSummary, type BenchmarkDetail } from "./api";
+import {
+  BRAIN_EVENT,
+  BRAIN_MODEL_EVENT,
+  brainPanel,
+  listAgents,
+  listBenchmarkDetails,
+  runExperiment,
+  type AgentSummary,
+  type BenchmarkDetail,
+  type BrainReadModel,
+} from "./api";
+import { BrainPanel } from "./BrainPanel";
 
 type BenchmarkSummary = {
   benchmark_id: string;
@@ -510,6 +521,17 @@ const App = () => {
   const [registryAgents, setRegistryAgents] = useState<AgentSummary[]>([]);
   const [registryBenchmarks, setRegistryBenchmarks] = useState<BenchmarkDetail[]>([]);
   const [registryError, setRegistryError] = useState<string | null>(null);
+
+  /**
+   * The Brain's read model, and nothing derived from it locally.
+   *
+   * `null` until the first response, which the panel renders as its own state rather than as an empty
+   * set of numbers. The whole point of the read model is that this component cannot compute a metric the
+   * backend did not compute, so nothing here is derived.
+   */
+  const [brain, setBrain] = useState<BrainReadModel | null>(null);
+  const [brainError, setBrainError] = useState<string | null>(null);
+  const [brainRunning, setBrainRunning] = useState(false);
   const [benchmarksError, setBenchmarksError] = useState<string | null>(null);
   const [selectedStrategy, setSelectedStrategy] = useState<Strategy>("optimal");
   const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE_URL);
@@ -721,6 +743,75 @@ const App = () => {
   }, []);
 
   /**
+   * Load the Brain's read model and subscribe to its updates.
+   *
+   * Event-driven, not polled. The backend emits the complete model whenever it changes and emits
+   * individual events as a run produces them, so the panel shows exactly what the orchestrator
+   * recorded. A polling loop would either lag or generate load proportional to its own interval, and
+   * either way it would be reconstructing backend state on a timer.
+   */
+  useEffect(() => {
+    let active = true;
+    brainPanel()
+      .then((model) => {
+        if (active) {
+          setBrain(model);
+          setBrainError(null);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setBrainError(`The orchestrator did not report its state: ${formatError(error)}`);
+        }
+      });
+
+    const modelListener = listen<BrainReadModel>(BRAIN_MODEL_EVENT, ({ payload }) => {
+      if (active) {
+        setBrain(payload);
+        setBrainError(null);
+        setBrainRunning(false);
+      }
+    });
+    const eventListener = listen(BRAIN_EVENT, () => {
+      // Per-event notifications are only used to keep the running indicator honest. The model itself
+      // arrives whole, so there is no client-side accumulation that could drift from the run's record.
+      if (active) {
+        setBrainRunning(true);
+      }
+    });
+    return () => {
+      active = false;
+      void modelListener.then((unlisten) => unlisten());
+      void eventListener.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  /**
+   * Runs an experiment through the real orchestrator.
+   *
+   * The benchmark comes from the selected run target and the agent from the strategy picker, so the
+   * experiment the Brain supervises is the one the user picked rather than a demo.
+   */
+  const startExperiment = useCallback(async () => {
+    if (!benchmark) {
+      return;
+    }
+    setBrainRunning(true);
+    setBrainError(null);
+    try {
+      const model = await runExperiment({
+        benchmarkId: benchmark.benchmark_id,
+        agentId: selectedStrategy,
+        episodes: 5,
+        rootSeed: null,
+      });
+      setBrain(model);
+    } catch (error) {
+      setBrainRunning(false);
+      setBrainError(`The experiment could not start: ${formatError(error)}`);
+    }
+  }, [benchmark, selectedStrategy]);
+  /**
    * Load the authoritative registries.
    *
    * Both are fetched together and a failure in either is surfaced rather than swallowed, because a
@@ -892,6 +983,19 @@ const App = () => {
       </header>
 
       <main className="main-content">
+        {/*
+         * The Brain panel sits above the run controls because it is the layer deciding what runs and
+         * monitoring what happened. Everything below it is a control the user drives; everything in it
+         * is state the orchestrator reports.
+         */}
+        <BrainPanel
+          model={brain}
+          error={brainError}
+          running={brainRunning}
+          onRun={() => void startExperiment()}
+          canRun={benchmark !== null}
+        />
+
         {/*
          * The catalog section.
          *

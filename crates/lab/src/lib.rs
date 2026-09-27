@@ -25,6 +25,7 @@ mod events;
 mod experiment;
 mod probes;
 mod runner;
+mod view;
 
 pub use agents::{
     AgentBuildError, AgentCategory, AgentExecution, AgentRegistrationError, AgentRegistry,
@@ -47,4 +48,10 @@ pub use probes::{
     probe_request, ProbeAgent, ProbeCategory, ProbeContext, ProbeObservation, ProbeOutcome,
     ProbeRegistry, ProbeReport, ProbeSpec,
 };
-pub use runner::{EpisodeFailure, ExperimentRun, LabRunner, RunnerError};
+pub use runner::{
+    EpisodeFailure, ExperimentObserver, ExperimentRun, LabRunner, RunnerError, SilentObserver,
+};
+pub use view::{
+    BrainReadModel, DecisionView, EpisodeFailureView, EpisodeView, ExperimentView, SecuritySummary,
+    SignalInterpretation, SignalView, TimelineEntryView,
+};

@@ -80,3 +80,151 @@ export async function listBenchmarkDetails(): Promise<BenchmarkDetail[]> {
 export async function listProviders(): Promise<ProviderSummary[]> {
   return invoke<ProviderSummary[]>("list_providers");
 }
+/**
+ * The Brain's read model, exactly as `crates/lab/src/view.rs` produces it.
+ *
+ * This is the whole contract. The panel renders these fields and nothing else, which is what stops a
+ * component from inventing a metric the backend never computed.
+ */
+export type BrainReadModel = {
+  /** The Brain's own lifecycle phase. The panel must not relabel or extend these. */
+  brainState: string;
+  /** The Brain's stated next intent, verbatim. */
+  nextIntent: string;
+  /** The supervised experiment, or null when idle. */
+  experiment: ExperimentView | null;
+  observedEvents: number;
+  findings: Anomaly[];
+  signals: SignalView[];
+  security: SecuritySummary;
+};
+
+export type Anomaly = {
+  id: string;
+  category: string;
+  interpretation: string;
+  occurrences: number;
+  /**
+   * Whether these events are integrity events in their own right.
+   *
+   * False for a broker denial however many there are. The panel must render that distinction and must
+   * not infer a finding from a large count.
+   */
+  isSecurityFinding: boolean;
+};
+
+export type ExperimentView = {
+  experimentId: string;
+  benchmarkId: string;
+  targetAgent: string;
+  /** Null when no provider produced results. The panel shows "unknown", never a guess. */
+  provider: string | null;
+  model: string | null;
+  probeAgents: string[];
+  episodesRequested: number;
+  episodesCompleted: number;
+  episodesFailed: number;
+  /**
+   * Mean task success, or null when nothing completed.
+   *
+   * The null is load-bearing and must reach the DOM. Rendering `0%` for a run that measured nothing
+   * is indistinguishable from a model that failed every episode.
+   */
+  meanSuccessFraction: number | null;
+  lifecycle: string;
+  terminalReason: string | null;
+  elapsedMs: number | null;
+  decisions: DecisionView[];
+  episodes: EpisodeView[];
+  failures: EpisodeFailureView[];
+  timeline: TimelineEntryView[];
+  security: SecuritySummary;
+};
+
+export type DecisionView = {
+  kind: string;
+  value: string;
+  rationale: string;
+};
+
+export type EpisodeView = {
+  index: number;
+  seed: number;
+  taskSuccess: boolean;
+  replayDigest: string;
+  telemetryEventCount: number;
+};
+
+export type EpisodeFailureView = {
+  index: number;
+  seed: number;
+  detail: string;
+};
+
+export type TimelineEntryView = {
+  sequence: number;
+  code: string;
+  source: string;
+  severity: "info" | "warning" | "error" | "critical";
+  detail: string;
+  /** The infrastructure-assigned integrity category, when one applies. */
+  integrity: string | null;
+  anomalyCategory: string | null;
+};
+
+export type SignalView = {
+  id: string;
+  label: string;
+  count: number;
+  /**
+   * What the count means. `correct_refusal` is the system working; `violation` is the system failing.
+   * The panel colours by this and never by the magnitude of the number.
+   */
+  interpretation: "correct_refusal" | "violation" | "protocol_shortfall" | "operational" | "neutral";
+};
+
+/**
+ * Security totals, with refusals and violations deliberately separate.
+ *
+ * There is no `total` field, and that is the backend's judgement as much as this type's: summing
+ * them produces a number that rises when the sandbox works correctly.
+ */
+export type SecuritySummary = {
+  integrityViolations: number;
+  brokerRefusals: number;
+  violationsByCategory: Record<string, number>;
+  refusalsByCategory: Record<string, number>;
+  containmentFailures: number;
+};
+
+/** A command-center error. Carries a stable code rather than only prose. */
+export type BrainCommandError = {
+  code: string;
+  message: string;
+};
+
+export async function brainPanel(): Promise<BrainReadModel> {
+  return invoke<BrainReadModel>("brain_panel");
+}
+
+export async function getExperiment(experimentId: string): Promise<BrainReadModel> {
+  return invoke<BrainReadModel>("get_experiment", { experimentId });
+}
+
+export async function listExperiments(): Promise<string[]> {
+  return invoke<string[]>("list_experiments");
+}
+
+export async function runExperiment(request: {
+  benchmarkId: string;
+  agentId: string;
+  episodes: number;
+  rootSeed: number | null;
+}): Promise<BrainReadModel> {
+  return invoke<BrainReadModel>("run_experiment", { request });
+}
+
+/** Per-event notifications, emitted as the runner produces them. */
+export const BRAIN_EVENT = "probe-lab/brain-event";
+/** The complete read model, emitted when it changes. */
+export const BRAIN_MODEL_EVENT = "probe-lab/brain";

@@ -50,6 +50,33 @@ use crate::events::{EventSource, LabEvent, LabTimeline, Severity};
 use crate::experiment::{ExperimentManager, TerminalReason};
 use crate::probes::ProbeRegistry;
 
+/// Watches an experiment as it happens.
+///
+/// # Why this exists
+///
+/// A command center that showed progress by polling would either lag behind or generate load
+/// proportional to how fast it polled. The events already exist — the experiment manager writes every
+/// one of them to the timeline — so the smallest honest mechanism is to hand them to a listener as they
+/// are produced. No new transport and no timer, and the panel displays exactly the events the run
+/// recorded because it received the same `LabEvent` values the timeline stores.
+///
+/// Like the runner, an observer is not an authority. It can read and it can be notified; it cannot
+/// authorize, halt, or alter anything.
+pub trait ExperimentObserver: Send + Sync {
+    /// Called once per event, as it is recorded.
+    fn on_event(&self, event: &LabEvent);
+
+    /// Called when the Brain changes phase.
+    fn on_brain_state(&self, _state: crate::brain::BrainState) {}
+}
+
+/// An observer that discards everything, for callers that only want the final result.
+pub struct SilentObserver;
+
+impl ExperimentObserver for SilentObserver {
+    fn on_event(&self, _event: &LabEvent) {}
+}
+
 /// A failure that prevents an experiment from running at all.
 ///
 /// Deliberately narrow. Anything an individual episode can hit is a recorded episode failure, not one
@@ -91,6 +118,11 @@ pub struct EpisodeFailure {
 /// separated from its evidence is a summary nobody can check.
 #[derive(Clone, Debug)]
 pub struct ExperimentRun {
+    /// The stable identifier this run was recorded under.
+    ///
+    /// Carried from the caller rather than reconstructed downstream, so a panel can never show a blank
+    /// identifier for a run that genuinely happened — or invent one for a run that did not.
+    pub experiment_id: String,
     /// The plan that was executed.
     pub plan: ExperimentPlan,
     /// One result per episode that completed, in order.
@@ -155,7 +187,10 @@ impl ExperimentRun {
 ///
 /// Holds registries and an engine. Holds no broker, no policy, and no containment handle — see the
 /// module note for why that is the design and not an omission.
-#[derive(Debug)]
+///
+/// No `Debug`: the observer is a `dyn` trait object, and a runner that could not be formatted would
+/// push callers toward `unwrap()` in logging, which is worse than a missing trait. Callers that want
+/// a description of a runner can read its public accessors.
 pub struct LabRunner {
     benchmarks: probelab_benchmarks::BenchmarkRegistry,
     agents: AgentRegistry,
@@ -163,6 +198,9 @@ pub struct LabRunner {
     engine: BenchmarkRunner,
     wall_clock_budget: Duration,
     host: probelab_benchmarks::PlatformRequirement,
+    /// Notified as the run produces events. `Arc` so a caller can hold the same observer the runner
+    /// does and read what it collected.
+    observer: Arc<dyn ExperimentObserver>,
 }
 
 impl LabRunner {
@@ -175,7 +213,24 @@ impl LabRunner {
             engine: BenchmarkRunner::new(),
             wall_clock_budget: Duration::from_secs(30 * 60),
             host: current_platform(),
+            observer: Arc::new(SilentObserver),
         }
+    }
+
+    /// Attaches an observer that is notified as the experiment runs.
+    pub fn with_observer(mut self, observer: Arc<dyn ExperimentObserver>) -> Self {
+        self.observer = observer;
+        self
+    }
+
+    /// Records an event on the timeline and hands the same event to the observer.
+    ///
+    /// One function so the two can never disagree. If the observer were called separately from the
+    /// push, a panel would be showing a stream that had drifted from the run's own record — and the
+    /// timeline is supposed to be the authority.
+    fn record(&self, manager: &mut ExperimentManager, event: LabEvent) {
+        let stored = manager.timeline.push(event).clone();
+        self.observer.on_event(&stored);
     }
 
     /// Overrides the wall-clock budget.
@@ -265,13 +320,16 @@ impl LabRunner {
                 terminal = Some(TerminalReason::Timeout {
                     budget_seconds: self.wall_clock_budget.as_secs(),
                 });
-                manager.timeline.push(LabEvent::new(
-                    0,
-                    "runner.budget_exhausted",
-                    EventSource::Experiment,
-                    Severity::Error,
-                    &format!("stopped after {index} of {} episodes", plan.episodes),
-                ));
+                self.record(
+                    &mut manager,
+                    LabEvent::new(
+                        0,
+                        "runner.budget_exhausted",
+                        EventSource::Experiment,
+                        Severity::Error,
+                        &format!("stopped after {index} of {} episodes", plan.episodes),
+                    ),
+                );
                 brain.observe(&BrainEvent {
                     episode: index,
                     turn: 0,
@@ -289,13 +347,16 @@ impl LabRunner {
                     manager.episode_completed();
                     self.observe_result(brain, index, &result);
                     let success = f64::from(u8::from(result.capability.task_success));
-                    manager.timeline.push(LabEvent::new(
-                        0,
-                        "runner.episode_result",
-                        EventSource::Telemetry,
-                        Severity::Info,
-                        &format!("episode {index}: task success {success}"),
-                    ));
+                    self.record(
+                        &mut manager,
+                        LabEvent::new(
+                            0,
+                            "runner.episode_result",
+                            EventSource::Telemetry,
+                            Severity::Info,
+                            &format!("episode {index}: task success {success}"),
+                        ),
+                    );
                     results.push(result);
                 }
                 Err(detail) => {
@@ -304,13 +365,16 @@ impl LabRunner {
                         seed,
                         detail: detail.clone(),
                     };
-                    manager.timeline.push(LabEvent::new(
-                        0,
-                        "runner.episode_failed",
-                        EventSource::Experiment,
-                        Severity::Error,
-                        &format!("episode {index} (seed {seed}): {detail}"),
-                    ));
+                    self.record(
+                        &mut manager,
+                        LabEvent::new(
+                            0,
+                            "runner.episode_failed",
+                            EventSource::Experiment,
+                            Severity::Error,
+                            &format!("episode {index} (seed {seed}): {detail}"),
+                        ),
+                    );
                     brain.observe(&BrainEvent {
                         episode: index,
                         turn: 0,
@@ -333,6 +397,7 @@ impl LabRunner {
         let _ = manager.cleanup_now();
 
         Ok(ExperimentRun {
+            experiment_id: experiment_id.to_owned(),
             plan,
             results,
             failures,

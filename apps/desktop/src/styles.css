@@ -1595,3 +1595,520 @@ select:disabled {
 .tone-deferred {
   color: var(--amber);
 }
+/* ---------------------------------------------------------------------------
+ * The Lab Brain panel
+ *
+ * A forensic console, not a dashboard. Dense monospace for anything that is an
+ * identifier, a code, or a count; prose only where a sentence is the honest
+ * form. The tone palette is reused from the catalog and means the same thing
+ * here: a refusal and a violation never share a visual register, so the reader
+ * never has to consult a legend to tell enforcement from attack.
+ * ------------------------------------------------------------------------- */
+.brain-panel {
+  margin-bottom: 18px;
+  border-left: 2px solid var(--cyan-dim);
+}
+
+.brain-panel .panel-heading h2 {
+  letter-spacing: 0.18em;
+}
+
+.brain-state {
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  padding: 2px 9px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+}
+
+.tone-running {
+  color: var(--cyan);
+}
+.tone-idle {
+  color: var(--muted);
+}
+.tone-violation {
+  color: var(--red);
+}
+.tone-refusal {
+  color: var(--green);
+}
+.tone-critical {
+  color: var(--red);
+}
+.tone-error {
+  color: var(--amber);
+}
+.tone-warning {
+  color: var(--amber);
+}
+.tone-info {
+  color: var(--muted);
+}
+
+.brain-authority {
+  margin: 0 0 14px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--cyan-dim);
+  border-radius: 4px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--faint);
+  background: rgba(84, 229, 225, 0.03);
+}
+
+.brain-error {
+  margin: 0 0 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--red);
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--red);
+  overflow-wrap: anywhere;
+}
+
+.brain-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.brain-status-card {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.status-label {
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.status-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.status-sub {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.brain-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.brain-run-button {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  padding: 7px 16px;
+  border-radius: 4px;
+  border: 1px solid var(--cyan-dim);
+  background: rgba(84, 229, 225, 0.07);
+  color: var(--cyan);
+  cursor: pointer;
+  transition: background 120ms ease-out;
+}
+
+.brain-run-button:hover:not(:disabled) {
+  background: rgba(84, 229, 225, 0.14);
+}
+
+.brain-run-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.brain-action-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.brain-section {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.brain-section h3 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  font-weight: 600;
+}
+
+.section-note {
+  margin: 0 0 10px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.brain-idle {
+  border: 1px dashed var(--line-strong);
+  border-radius: 4px;
+  padding: 18px 16px;
+  text-align: center;
+}
+
+.brain-idle h3 {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--faint);
+  font-weight: 600;
+}
+
+.brain-idle p {
+  margin: 0 auto;
+  max-width: 52ch;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.brain-security-empty {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--muted);
+  border: 1px dashed var(--line-strong);
+  border-radius: 4px;
+  padding: 12px 14px;
+}
+
+.brain-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px 16px;
+  margin: 10px 0 0;
+}
+
+.brain-facts div {
+  min-width: 0;
+}
+
+.brain-facts dt {
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.brain-facts dd {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--faint);
+  overflow-wrap: anywhere;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+}
+
+.score-known {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.score-unknown {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.brain-decisions,
+.brain-signals,
+.brain-findings,
+.brain-timeline,
+.brain-failures ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.brain-decision {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: baseline;
+  gap: 4px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+}
+
+.decision-kind {
+  color: var(--cyan);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+}
+
+.decision-arrow {
+  color: var(--muted);
+}
+
+.decision-value {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.decision-rationale {
+  grid-column: 1 / -1;
+  font-family: inherit;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.brain-signal,
+.brain-finding {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-left-width: 2px;
+  border-radius: 3px;
+  font-size: 11.5px;
+}
+
+.signal-label {
+  color: var(--faint);
+}
+
+.signal-count,
+.finding-count {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+}
+
+.signal-meaning,
+.finding-kind {
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.brain-finding {
+  grid-template-columns: 1fr auto auto;
+}
+
+.finding-id {
+  color: var(--faint);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.finding-interpretation {
+  grid-column: 1 / -1;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.brain-security {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.security-block {
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 4px;
+  padding: 10px 12px;
+}
+
+.security-block h4 {
+  margin: 0 0 4px;
+  font-size: 10px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.security-block--violations {
+  border-left-color: var(--red);
+}
+
+.security-block--violations h4 {
+  color: var(--red);
+}
+
+.security-block--refusals {
+  border-left-color: var(--green);
+}
+
+.security-block--refusals h4 {
+  color: var(--green);
+}
+
+.security-count {
+  margin: 0 0 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 22px;
+  line-height: 1.1;
+  color: var(--text);
+}
+
+.security-gloss {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.security-breakdown {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.security-breakdown h5 {
+  margin: 0 0 5px;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.security-breakdown dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 4px 10px;
+  margin: 0;
+}
+
+.security-breakdown dt {
+  font-size: 10px;
+  color: var(--faint);
+}
+
+.security-breakdown dd {
+  margin: 1px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.brain-failures {
+  margin-top: 12px;
+}
+
+.brain-failures h4 {
+  margin: 0 0 6px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--amber);
+  font-weight: 600;
+}
+
+.brain-failures li {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 4px 10px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--amber);
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.failure-index {
+  color: var(--amber);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.failure-seed,
+.failure-detail {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.brain-timeline {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.brain-event {
+  display: grid;
+  grid-template-columns: 28px minmax(120px, auto) 60px 1fr auto;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 8px;
+  border-left: 2px solid var(--line-strong);
+  font-size: 11px;
+}
+
+.event-sequence {
+  color: var(--muted);
+  text-align: right;
+}
+
+.event-code {
+  color: var(--cyan);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
+.event-severity {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.event-detail {
+  color: var(--faint);
+  overflow-wrap: anywhere;
+}
+
+.event-integrity {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--red);
+  white-space: nowrap;
+}
+
+/* Responsive: the timeline is the densest element, so it collapses to two
+   columns rather than forcing a horizontal scroll on a narrow window. */
+@media (max-width: 720px) {
+  .brain-event {
+    grid-template-columns: 24px 1fr;
+    row-gap: 2px;
+  }
+
+  .event-severity,
+  .event-detail,
+  .event-integrity {
+    grid-column: 2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brain-run-button {
+    transition: none;
+  }
+}
