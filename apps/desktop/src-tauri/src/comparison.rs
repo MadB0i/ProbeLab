@@ -62,6 +62,10 @@ pub fn list_comparable_experiments(
         .map_err(|error| format!("could not read the stored experiments: {error}"))
 }
 
+/// Compares two or more stored experiments, or refuses and says why.
+///
+/// The only command in this module that does work, and it is a read-only report: it executes nothing,
+/// authorizes nothing, and writes nothing.
 #[tauri::command]
 pub fn compare_experiments(
     state: State<'_, AppState>,

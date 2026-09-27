@@ -16,9 +16,6 @@ use tauri::{AppHandle, Emitter, Manager};
 
 mod arena;
 mod brain;
-mod comparison;
-use comparison::{compare_experiments, list_comparable_experiments};
-use settings::{apply_settings, read_settings, reset_settings};
 mod commands;
 mod provider;
 mod security;
@@ -38,6 +35,14 @@ pub use commands::{
     list_benchmarks, list_providers, run_benchmark, subscribe_telemetry, AgentSummary,
     BenchmarkDetail, ProviderSummary,
 };
+// The comparison and settings request types are re-exported for the same reason the commands are: they
+// are the IPC contract. A caller that cannot name a type cannot write a test proving a malformed
+// payload is refused, and an untestable boundary is one whose behaviour is asserted only by whoever
+// wrote it. `tests/ipc_boundary.rs` is that test.
+mod comparison;
+pub use comparison::{
+    compare_experiments, list_comparable_experiments, ComparisonRequest, ComparisonResponse,
+};
 pub use provider::{
     ModelRunConfig, ModelRunConfigError, ProviderConnectionStatus, ProviderStatus,
     CREDENTIAL_SOURCE_ENVIRONMENT, MOCK_PROVIDER, MODEL_RUN_CONFIG_SCHEMA_VERSION,
@@ -46,6 +51,9 @@ pub use provider::{
 pub use security::{
     latest_security_report, list_security_probes, run_security_sweep, SecurityCommandError,
     SecurityProbeListing, SecuritySurface, SecuritySweepRequest,
+};
+pub use settings::{
+    apply_settings, read_settings, reset_settings, SettingsCommandError, SettingsRequest,
 };
 
 const DATABASE_FILE_NAME: &str = "probelab.sqlite3";
