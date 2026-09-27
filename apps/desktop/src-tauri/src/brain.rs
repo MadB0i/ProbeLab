@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use super::new_run_id;
+use crate::AppState;
 
 /// The event emitted whenever the Brain's view changes.
 ///
@@ -133,9 +134,10 @@ pub fn list_experiments(surface: State<'_, BrainSurface>) -> Vec<String> {
 #[tauri::command(rename_all = "snake_case")]
 pub async fn run_experiment(
     app: AppHandle,
-    surface: State<'_, BrainSurface>,
+    state: State<'_, AppState>,
     request: ExperimentRequest,
 ) -> Result<BrainReadModel, BrainCommandError> {
+    let surface = state.brain.clone();
     let run_id = new_run_id().map_err(|error| BrainCommandError::planning(error.to_string()))?;
     let experiment_id = run_id.clone();
 
@@ -152,9 +154,38 @@ pub async fn run_experiment(
     };
     surface.set_active(experiment_id.clone());
 
+    // Persist `running` *before* the first episode. This row is what makes crash recovery possible: if
+    // the process dies mid-run, this is the evidence the next start uses to conclude the run is
+    // interrupted rather than completed. Writing it only at the end would leave a crash invisible.
+    let results = state.results.clone();
+    let running_id = run_id.clone();
+    let running_benchmark = request.benchmark_id.clone();
+    let running_episodes = request.episodes;
+    if let Err(error) = results.put_experiment(&probelab_telemetry::ExperimentRecord {
+        experiment_id: running_id,
+        benchmark_id: running_benchmark,
+        lifecycle: probelab_telemetry::ExperimentLifecycle::Running,
+        terminal_reason: None,
+        episodes_requested: running_episodes,
+        episodes_completed: 0,
+        episodes_failed: 0,
+        has_score: false,
+        score: None,
+        result_json: None,
+        updated_unix_ms: 0,
+    }) {
+        // Failing to record the running state does not stop the run; it does mean a crash during it
+        // cannot be detected, which is worth saying out loud rather than only in a log.
+        tracing::error!(
+            error = %error,
+            "could not persist the running experiment state; a crash during this run will not be \
+             detected as an interruption"
+        );
+    }
+
     let observer: Arc<dyn ExperimentObserver> = Arc::new(EmittingObserver { app: app.clone() });
     let runner = LabRunner::new().with_observer(observer);
-    let surface_handle = surface.inner().clone();
+    let surface_handle = surface.clone();
 
     let result = tauri::async_runtime::spawn_blocking(move || {
         runner
@@ -173,7 +204,38 @@ pub async fn run_experiment(
     })?
     .map_err(|error| BrainCommandError::planning(error.to_string()))?;
 
-    surface.store(run_id, result.clone());
+    surface.store(run_id.clone(), result.clone());
+
+    // Persist the terminal state. A run that reached here is genuinely finished, so this is the one
+    // place `completed` is written -- and it is written from the runner's own terminal reason rather
+    // than from the absence of an error.
+    if let Some(experiment) = result.experiment.as_ref() {
+        let reason_label = experiment
+            .terminal_reason
+            .as_ref()
+            .map(|reason| format!("{reason:?}").to_lowercase());
+        let terminal = match experiment.terminal_reason {
+            Some(probelab_lab::TerminalReason::Completed) => {
+                probelab_telemetry::ExperimentLifecycle::Completed
+            }
+            _ => probelab_telemetry::ExperimentLifecycle::Failed,
+        };
+        if let Err(error) = results.put_experiment(&probelab_telemetry::ExperimentRecord {
+            experiment_id: run_id.clone(),
+            benchmark_id: experiment.benchmark_id.clone(),
+            lifecycle: terminal,
+            terminal_reason: reason_label,
+            episodes_requested: experiment.episodes_requested,
+            episodes_completed: experiment.episodes_completed,
+            episodes_failed: experiment.episodes_failed,
+            has_score: experiment.mean_success_fraction.is_some(),
+            score: experiment.mean_success_fraction,
+            result_json: None,
+            updated_unix_ms: 0,
+        }) {
+            tracing::error!(error = %error, "could not persist the terminal experiment state");
+        }
+    }
     if let Err(error) = app.emit(BRAIN_EVENT, result.clone()) {
         tracing::warn!(error = %error, "failed to emit the final brain model");
     }

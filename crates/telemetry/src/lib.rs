@@ -887,6 +887,134 @@ impl SqliteResultRepository {
             .map_err(Into::into)
     }
 
+    /// Records an experiment's lifecycle state.
+    ///
+    /// Separate from `put`, because a result is immutable evidence while this is a mutable status. A
+    /// crashed run leaves its last persisted state behind, which is what
+    /// [`Self::reconcile_interrupted`] later corrects.
+    pub fn put_experiment(&self, record: &ExperimentRecord) -> Result<(), ResultRepositoryError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| ResultRepositoryError::LockPoisoned)?;
+        connection
+            .execute(
+                "INSERT INTO experiments (
+                    experiment_id, benchmark_id, lifecycle, terminal_reason,
+                    episodes_requested, episodes_completed, episodes_failed,
+                    has_score, score, result_json, updated_unix_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(experiment_id) DO UPDATE SET
+                    lifecycle = excluded.lifecycle,
+                    terminal_reason = excluded.terminal_reason,
+                    episodes_completed = excluded.episodes_completed,
+                    episodes_failed = excluded.episodes_failed,
+                    has_score = excluded.has_score,
+                    score = excluded.score,
+                    result_json = excluded.result_json,
+                    updated_unix_ms = excluded.updated_unix_ms",
+                rusqlite::params![
+                    record.experiment_id,
+                    record.benchmark_id,
+                    record.lifecycle.as_str(),
+                    record.terminal_reason,
+                    i64::try_from(record.episodes_requested).unwrap_or(i64::MAX),
+                    i64::try_from(record.episodes_completed).unwrap_or(i64::MAX),
+                    i64::try_from(record.episodes_failed).unwrap_or(i64::MAX),
+                    i64::from(record.has_score),
+                    record.score,
+                    record.result_json,
+                    record.updated_unix_ms,
+                ],
+            )
+            .map_err(ResultRepositoryError::Sqlite)?;
+        Ok(())
+    }
+
+    /// Gets one experiment's lifecycle record.
+    pub fn get_experiment(
+        &self,
+        experiment_id: impl AsRef<str>,
+    ) -> Result<Option<ExperimentRecord>, ResultRepositoryError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| ResultRepositoryError::LockPoisoned)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT experiment_id, benchmark_id, lifecycle, terminal_reason,
+                        episodes_requested, episodes_completed, episodes_failed,
+                        has_score, score, result_json, updated_unix_ms
+                 FROM experiments WHERE experiment_id = ?1",
+            )
+            .map_err(ResultRepositoryError::Sqlite)?;
+        let mut rows = statement
+            .query(rusqlite::params![experiment_id.as_ref().to_owned()])
+            .map_err(ResultRepositoryError::Sqlite)?;
+        let Some(row) = rows.next().map_err(ResultRepositoryError::Sqlite)? else {
+            return Ok(None);
+        };
+        Ok(Some(read_experiment_row(row)?))
+    }
+
+    /// Every experiment record, newest first.
+    pub fn list_experiments(&self) -> Result<Vec<ExperimentRecord>, ResultRepositoryError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| ResultRepositoryError::LockPoisoned)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT experiment_id, benchmark_id, lifecycle, terminal_reason,
+                        episodes_requested, episodes_completed, episodes_failed,
+                        has_score, score, result_json, updated_unix_ms
+                 FROM experiments ORDER BY updated_unix_ms DESC, experiment_id DESC",
+            )
+            .map_err(ResultRepositoryError::Sqlite)?;
+        let mut rows = statement.query([]).map_err(ResultRepositoryError::Sqlite)?;
+        let mut records = Vec::new();
+        while let Some(row) = rows.next().map_err(ResultRepositoryError::Sqlite)? {
+            records.push(read_experiment_row(row)?);
+        }
+        Ok(records)
+    }
+
+    /// Marks every experiment still recorded as running as interrupted.
+    ///
+    /// Called once when the application starts. This is the transition that needs no cooperation from
+    /// the process that died: if a row says `running` and we have just started up, nothing is running.
+    ///
+    /// It is also why the lifecycle has an `interrupted` state at all. Without it, a crashed run would
+    /// be reported as completed — the single worst outcome available, because a partial measurement
+    /// would be indistinguishable from a finished one.
+    ///
+    /// Returns the identifiers it changed, so a caller can report them rather than silently rewriting
+    /// history. Only `running` is transitioned: a `planned` experiment that never started is left
+    /// alone, because nothing is known about it.
+    pub fn reconcile_interrupted(&self) -> Result<Vec<String>, ResultRepositoryError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| ResultRepositoryError::LockPoisoned)?;
+        let now = unix_milliseconds().unwrap_or(0);
+        let mut statement = connection
+            .prepare(
+                "UPDATE experiments
+                 SET lifecycle = 'interrupted', updated_unix_ms = ?1
+                 WHERE lifecycle = 'running'
+                 RETURNING experiment_id",
+            )
+            .map_err(ResultRepositoryError::Sqlite)?;
+        let mut rows = statement
+            .query(rusqlite::params![now])
+            .map_err(ResultRepositoryError::Sqlite)?;
+        let mut changed = Vec::new();
+        while let Some(row) = rows.next().map_err(ResultRepositoryError::Sqlite)? {
+            changed.push(row.get(0).map_err(ResultRepositoryError::Sqlite)?);
+        }
+        Ok(changed)
+    }
+
     /// Gets immutable execution metadata stored for a run identifier, if present.
     pub fn get_metadata(
         &self,
@@ -929,6 +1057,148 @@ pub enum ResultRepositoryError {
     /// The repository's internal database lock was poisoned.
     #[error("result repository database lock was poisoned")]
     LockPoisoned,
+    /// A stored lifecycle value was not one of the known states.
+    ///
+    /// Refused rather than defaulted. Defaulting would turn a corrupted row into a
+    /// plausible-looking lifecycle, which is precisely the failure the lifecycle exists to prevent.
+    #[error("stored experiment lifecycle {value:?} is not a known state")]
+    UnknownLifecycle {
+        /// The unrecognised value found in the database.
+        value: String,
+    },
+}
+
+/// The lifecycle of a persisted experiment.
+///
+/// Five states, and the fifth is the point. `planned`, `running`, `completed`, and `failed` are all
+/// things a live process can assert. `interrupted` is the one a dead process cannot: it is written by
+/// the *next* start, on the evidence that a row said `running` while nothing was running.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExperimentLifecycle {
+    /// Recorded but not started.
+    Planned,
+    /// Episodes are executing.
+    Running,
+    /// Every requested episode was attempted and the run reached a terminal state.
+    Completed,
+    /// The run reached a terminal state other than completion.
+    Failed,
+    /// The process died while the experiment was running.
+    Interrupted,
+}
+
+impl ExperimentLifecycle {
+    /// The stable stored value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExperimentLifecycle::Planned => "planned",
+            ExperimentLifecycle::Running => "running",
+            ExperimentLifecycle::Completed => "completed",
+            ExperimentLifecycle::Failed => "failed",
+            ExperimentLifecycle::Interrupted => "interrupted",
+        }
+    }
+
+    /// Parses a stored value, refusing anything unrecognised.
+    ///
+    /// An unknown value is an error rather than a default. Defaulting would silently turn a corrupted
+    /// row into a plausible-looking lifecycle, which is the failure mode this whole mechanism exists
+    /// to prevent.
+    pub fn parse(value: &str) -> Result<Self, ResultRepositoryError> {
+        match value {
+            "planned" => Ok(ExperimentLifecycle::Planned),
+            "running" => Ok(ExperimentLifecycle::Running),
+            "completed" => Ok(ExperimentLifecycle::Completed),
+            "failed" => Ok(ExperimentLifecycle::Failed),
+            "interrupted" => Ok(ExperimentLifecycle::Interrupted),
+            other => Err(ResultRepositoryError::UnknownLifecycle {
+                value: other.to_owned(),
+            }),
+        }
+    }
+
+    /// Whether this state means the run is over.
+    pub fn is_terminal(self) -> bool {
+        !matches!(
+            self,
+            ExperimentLifecycle::Planned | ExperimentLifecycle::Running
+        )
+    }
+
+    /// Whether the episodes this run recorded can be trusted as a complete measurement.
+    ///
+    /// False for anything that is not `completed`. A partial run's episodes are real evidence of what
+    /// happened, and they are kept -- but they are not a measurement, and a caller must not present
+    /// them as one.
+    pub fn is_a_complete_measurement(self) -> bool {
+        self == ExperimentLifecycle::Completed
+    }
+}
+
+/// One persisted experiment's lifecycle state.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentRecord {
+    /// Stable identifier.
+    pub experiment_id: String,
+    /// The benchmark it ran.
+    pub benchmark_id: String,
+    /// Where it is in its lifecycle.
+    pub lifecycle: ExperimentLifecycle,
+    /// Why it ended, when it did.
+    pub terminal_reason: Option<String>,
+    /// Episodes the plan asked for.
+    pub episodes_requested: usize,
+    /// Episodes that produced a result.
+    pub episodes_completed: usize,
+    /// Episodes that failed.
+    pub episodes_failed: usize,
+    /// Whether a score exists.
+    ///
+    /// Stored beside the score rather than inferred from it, because a run with no completed episode
+    /// has no score and `None` must not be read as zero. A boolean that means "the absence is
+    /// deliberate" survives a schema migration better than a nullable float with an ambiguous default.
+    pub has_score: bool,
+    /// The score, when one exists.
+    pub score: Option<f64>,
+    /// The result bundle, when the run completed.
+    pub result_json: Option<String>,
+    /// When this row was last written, in Unix milliseconds.
+    pub updated_unix_ms: i64,
+}
+
+/// Reads one experiment row into a typed record.
+fn read_experiment_row(row: &rusqlite::Row<'_>) -> Result<ExperimentRecord, ResultRepositoryError> {
+    let lifecycle: String = row.get(2).map_err(ResultRepositoryError::Sqlite)?;
+    Ok(ExperimentRecord {
+        experiment_id: row.get(0).map_err(ResultRepositoryError::Sqlite)?,
+        benchmark_id: row.get(1).map_err(ResultRepositoryError::Sqlite)?,
+        lifecycle: ExperimentLifecycle::parse(&lifecycle)?,
+        terminal_reason: row.get(3).map_err(ResultRepositoryError::Sqlite)?,
+        episodes_requested: usize::try_from(
+            row.get::<_, i64>(4)
+                .map_err(ResultRepositoryError::Sqlite)?,
+        )
+        .unwrap_or(0),
+        episodes_completed: usize::try_from(
+            row.get::<_, i64>(5)
+                .map_err(ResultRepositoryError::Sqlite)?,
+        )
+        .unwrap_or(0),
+        episodes_failed: usize::try_from(
+            row.get::<_, i64>(6)
+                .map_err(ResultRepositoryError::Sqlite)?,
+        )
+        .unwrap_or(0),
+        has_score: row
+            .get::<_, i64>(7)
+            .map_err(ResultRepositoryError::Sqlite)?
+            != 0,
+        score: row.get(8).map_err(ResultRepositoryError::Sqlite)?,
+        result_json: row.get(9).map_err(ResultRepositoryError::Sqlite)?,
+        updated_unix_ms: row.get(10).map_err(ResultRepositoryError::Sqlite)?,
+    })
 }
 
 fn initialize_result_schema(connection: &Connection) -> Result<(), rusqlite::Error> {
@@ -952,6 +1222,35 @@ fn initialize_result_schema(connection: &Connection) -> Result<(), rusqlite::Err
         BEGIN
             SELECT RAISE(ABORT, 'stored results are immutable');
         END;
+
+        -- The experiment lifecycle, kept separate from results for one reason: a result is immutable
+        -- evidence, while an experiment's state *changes* as it runs. Putting both in one table would
+        -- force the immutability trigger to be relaxed, and with it the guarantee that a recorded
+        -- result cannot be rewritten.
+        --
+        -- `interrupted` exists because a process that dies mid-run leaves a row saying `running`, and
+        -- on the next start that row is provably wrong: nothing is running. Transitioning it to
+        -- `interrupted` at startup is the one transition that requires no cooperation from the dead
+        -- process, and it is what stops an abandoned run from being reported as completed.
+        CREATE TABLE IF NOT EXISTS experiments (
+            experiment_id TEXT PRIMARY KEY,
+            benchmark_id TEXT NOT NULL,
+            lifecycle TEXT NOT NULL,
+            terminal_reason TEXT,
+            episodes_requested INTEGER NOT NULL,
+            episodes_completed INTEGER NOT NULL DEFAULT 0,
+            episodes_failed INTEGER NOT NULL DEFAULT 0,
+            has_score INTEGER NOT NULL DEFAULT 0,
+            score REAL,
+            result_json TEXT,
+            updated_unix_ms INTEGER NOT NULL,
+            CHECK (length(experiment_id) > 0),
+            CHECK (lifecycle IN ('planned','running','completed','failed','interrupted')),
+            CHECK (result_json IS NULL OR json_valid(result_json)),
+            CHECK (episodes_completed >= 0 AND episodes_failed >= 0)
+        );
+        CREATE INDEX IF NOT EXISTS experiments_by_lifecycle
+            ON experiments (lifecycle, updated_unix_ms);
         "#,
     )?;
     add_result_metadata_column(connection)

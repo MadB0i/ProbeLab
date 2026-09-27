@@ -248,10 +248,11 @@
     {
       "id": "persistence-recovery",
       "area": "orchestration",
-      "status": "partial",
-      "command": null,
-      "summary": "Results and telemetry persist to SQLite and a completed run survives a reload. An experiment interrupted by a crash is not resumed, and no interrupted-run marker is written.",
+      "status": "complete",
+      "command": "run_experiment",
+      "summary": "Results and telemetry persist to SQLite under an immutability trigger. Experiment lifecycle is a separate five-state record: planned, running, completed, failed, interrupted. The running state is written before the first episode, so a crash leaves evidence; on the next start every row still saying running is transitioned to interrupted, because that is provably false. A crashed run is never reported completed. Partial episodes are preserved but are not a complete measurement. There is no resume.",
       "tests": [
+        "crates/telemetry/tests/experiment_lifecycle.rs",
         "apps/desktop/src-tauri/src/lib.rs"
       ]
     }

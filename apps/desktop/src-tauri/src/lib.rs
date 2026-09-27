@@ -164,6 +164,30 @@ pub fn run() {
                 },
             )?);
             let results = Arc::new(SqliteResultRepository::new(&database_path)?);
+            // Crash recovery, once, before anything else can read a lifecycle.
+            //
+            // A row still saying `running` at start-up is provably wrong: nothing is running. Left
+            // alone it would make a crashed run indistinguishable from a completed one, which is the
+            // worst thing a persistence layer can do — silently wrong rather than loudly absent. The
+            // identifiers corrected are logged so the correction is visible rather than silent.
+            match results.reconcile_interrupted() {
+                Ok(recovered) if !recovered.is_empty() => {
+                    tracing::warn!(
+                        interrupted = ?recovered,
+                        "experiments left running by a previous process were marked interrupted; their \
+                         partial episodes are preserved but are not a complete measurement"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    // A failure to recover must not stop the application: it would turn a recoverable
+                    // state into an unusable product. The runs stay on disk and the error is logged.
+                    tracing::error!(
+                        error = %error,
+                        "could not reconcile interrupted experiments; stored lifecycle state may be stale"
+                    );
+                }
+            }
             let brain = BrainSurface::default();
             // The Brain's runner records into the same durable sink as a single-episode run, so an
             // experiment's events and a run's events end up in one place rather than two.
