@@ -67,6 +67,26 @@ pass if the [feature matrix](docs/feature-matrix.json) disagrees with the reposi
 
 The honest list. Anything not here does not exist, and the UI does not offer it.
 
+### The command center
+
+Seven destinations in a persistent sidebar, hash-routed and deep-linkable. Each one answers a single
+question instead of stacking all of them into one long page:
+
+| Destination | What it shows |
+|---|---|
+| Command center | The orchestrator's state, the experiment it is supervising, the launch controls, and the live run's event stream. |
+| Agents | Every agent from the authoritative registry, with what each one's number measures. |
+| Benchmarks | Every registered benchmark, and the selected one. |
+| Providers | The provider protocols the lab speaks. Credentials are read from the environment by the backend and never reach this page. |
+| Arena | Real matches through the engine. The board shown is the position the engine recorded. |
+| Security | Registered probes run through the real broker and sandbox path. |
+| Replay | Deterministic reconstruction of recorded runs. |
+
+The active destination is marked by colour, a left bar, and `aria-current`, so it is not signalled by
+colour alone. The nav is a real button list in a labelled landmark: `Tab` leaves it, the arrow keys
+and `Home`/`End` move within it, and focus follows the selection. There is no routing dependency, and
+no nav item that leads nowhere — a disabled entry would be a claim the product cannot verify.
+
 ### Benchmarks
 
 | Benchmark | Status | Notes |
@@ -157,13 +177,15 @@ Stated plainly, because a laboratory that hides its limits is not one you can re
 - **`filesystem.read`, `filesystem.write`, and `network.connect` are authorization-only.** The broker
   authorizes and the execution is refused at run time. Only `process.spawn` really executes.
 - **Containment is Windows-only.** Other platforms are honestly unsupported rather than faked.
-- **An interrupted experiment is not resumed.** A crash mid-run leaves the recorded data intact but
-  writes no interrupted marker, so a half-run is not currently distinguishable from an abandoned
-  one.
+- **An interrupted experiment is not resumed.** A crash mid-run transitions the stored lifecycle to
+  `interrupted` on the next start, and the partial episodes are preserved as evidence. They are not a
+  complete measurement, and they are not re-run: the sandbox root, process identity, and provider
+  session they depended on no longer exist, so appending a second measurement to the first would be
+  worse than an honest gap.
 - **The multi-episode `Harness` is not on the product's path.** It is used by the benchmark quality
-  tests; the `Runner` has its own loop, and the UI runs that.
-- **The command center is one scrolling column**, not a navigable shell. Every panel is reachable;
-  none can be focused.
+  tests; the `Runner` has its own loop, and the UI runs that. The product path shares the Harness's
+  evaluation seed pools and Wilson interval, and keeps the per-episode failure handling the Harness
+  lacks, because a real run must survive a failed episode.
 - **External model nondeterminism** is not reproducible, by anyone.
 - **No comparison or settings panel exists yet.**
 - **No human seat in the arena**, and no LLM-powered Brain. The Brain is deterministic

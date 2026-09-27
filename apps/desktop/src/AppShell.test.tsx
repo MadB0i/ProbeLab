@@ -1,0 +1,226 @@
+/**
+ * Shell tests.
+ *
+ * Routing is the one piece of this UI with real state and a keyboard contract, so it is the piece
+ * most worth pinning: a nav that silently fails to switch pages looks identical to a nav that works
+ * until someone relies on it, and an unreachable destination cannot be reported by a user who cannot
+ * find it.
+ *
+ * The assertions deliberately test behaviour a user can observe -- which page is shown, what is
+ * announced to a screen reader, whether the back button works -- rather than the implementation.
+ */
+
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AppShell, hash_for, route_from_hash, type RouteId } from "./AppShell";
+
+const PAGES: Record<RouteId, string> = {
+  lab: "COMMAND CENTER CONTENT",
+  agents: "AGENTS CONTENT",
+  benchmarks: "BENCHMARKS CONTENT",
+  providers: "PROVIDERS CONTENT",
+  arena: "ARENA CONTENT",
+  security: "SECURITY CONTENT",
+  replay: "REPLAY CONTENT",
+};
+
+const routes = Object.fromEntries(
+  Object.entries(PAGES).map(([id, content]) => [id, <p>{content}</p>]),
+) as Record<RouteId, JSX.Element>;
+
+const renderShell = () => render(<AppShell routes={routes} />);
+
+const nav = () => screen.getByRole("navigation", { name: /command center sections/i });
+
+afterEach(() => {
+  window.location.hash = "";
+});
+
+describe("hash parsing", () => {
+  it("accepts every destination's own hash", () => {
+    for (const id of Object.keys(PAGES) as RouteId[]) {
+      expect(route_from_hash(hash_for(id))).toBe(id);
+    }
+  });
+
+  it("accepts a hash written without the leading slash", () => {
+    expect(route_from_hash("#arena")).toBe("arena");
+    expect(route_from_hash("#/arena")).toBe("arena");
+  });
+
+  it("ignores case and surrounding whitespace", () => {
+    expect(route_from_hash(" #/ARENA ")).toBe("arena");
+  });
+
+  /**
+   * An unknown hash falls back to the command center rather than rendering nothing. The alternative
+   * is a blank page from a stale link, which the user cannot tell apart from a crash.
+   */
+  it("falls back to the command center for an unknown or empty hash", () => {
+    expect(route_from_hash("#/does-not-exist")).toBe("lab");
+    expect(route_from_hash("")).toBe("lab");
+    expect(route_from_hash("#")).toBe("lab");
+  });
+});
+
+describe("destination navigation", () => {
+  it("shows the command center when no hash is set", () => {
+    renderShell();
+    expect(screen.getByText(PAGES.lab)).toBeInTheDocument();
+  });
+
+  it("switches pages when an item is clicked", () => {
+    renderShell();
+    fireEvent.click(within(nav()).getByRole("button", { name: /security/i }));
+    expect(screen.getByText(PAGES.security)).toBeInTheDocument();
+    expect(screen.queryByText(PAGES.lab)).not.toBeInTheDocument();
+  });
+
+  it("writes the destination into the hash so a page can be linked to", () => {
+    renderShell();
+    fireEvent.click(within(nav()).getByRole("button", { name: /replay/i }));
+    expect(window.location.hash).toBe("#/replay");
+  });
+
+  it("marks exactly one destination as the current page for assistive technology", () => {
+    renderShell();
+    const current = within(nav()).getAllByRole("button").filter((button) =>
+      button.getAttribute("aria-current") === "page",
+    );
+    expect(current).toHaveLength(1);
+    expect(current[0]).toHaveTextContent("LAB");
+  });
+
+  it("moves the current-page marker with the selection", () => {
+    renderShell();
+    fireEvent.click(within(nav()).getByRole("button", { name: /arena/i }));
+    const current = within(nav()).getAllByRole("button").filter((button) =>
+      button.getAttribute("aria-current") === "page",
+    );
+    expect(current).toHaveLength(1);
+    expect(current[0]).toHaveTextContent("ARENA");
+  });
+
+  it("follows a hash change made elsewhere, so the back button works", () => {
+    renderShell();
+    window.location.hash = "#/providers";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect(screen.getByText(PAGES.providers)).toBeInTheDocument();
+  });
+
+  it("names the page it is on", () => {
+    renderShell();
+    fireEvent.click(within(nav()).getByRole("button", { name: /benchmarks/i }));
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Benchmarks");
+  });
+});
+
+describe("keyboard navigation", () => {
+  it("moves to the next destination with the down arrow", () => {
+    renderShell();
+    fireEvent.keyDown(within(nav()).getByRole("button", { name: "LAB" }), { key: "ArrowDown" });
+    expect(screen.getByText(PAGES.agents)).toBeInTheDocument();
+  });
+
+  it("moves to the previous destination with the up arrow", () => {
+    renderShell();
+    fireEvent.keyDown(within(nav()).getByRole("button", { name: "LAB" }), { key: "ArrowUp" });
+    // Up from the first item wraps to the last, rather than dead-ending.
+    expect(screen.getByText(PAGES.replay)).toBeInTheDocument();
+  });
+
+  it("wraps in both directions so the list is not a dead end", () => {
+    renderShell();
+    const last = screen.getByRole("button", { name: "REPLAY" });
+    fireEvent.keyDown(last, { key: "ArrowDown" });
+    expect(screen.getByText(PAGES.lab)).toBeInTheDocument();
+  });
+
+  /**
+   * A user can focus a nav item without activating it -- clicking is not the only way to focus. The
+   * arrow key must then move relative to the item under focus, not to whatever page is open, or the
+   * press would appear to do nothing.
+   */
+  it("arrows from the focused item, not from the currently open page", () => {
+    renderShell();
+    const security = within(nav()).getByRole("button", { name: "SECURITY" });
+    // Focus without activating: no click, and the command center is still the open page.
+    security.focus();
+    fireEvent.keyDown(security, { key: "ArrowDown" });
+    expect(screen.getByText(PAGES.replay)).toBeInTheDocument();
+  });
+
+  it("jumps to the first and last destinations with Home and End", () => {
+    renderShell();
+    const items = within(nav()).getAllByRole("button");
+    fireEvent.keyDown(items[1], { key: "End" });
+    expect(screen.getByText(PAGES.replay)).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("button", { name: "REPLAY" }), { key: "Home" });
+    expect(screen.getByText(PAGES.lab)).toBeInTheDocument();
+  });
+
+  /**
+   * The roving focus has to follow the selection. If it did not, the keyboard and the screen would
+   * disagree: the page would have changed while focus sat on the previous item, and the next arrow
+   * press would jump from the wrong place.
+   */
+  it("moves focus with the selection", () => {
+    renderShell();
+    fireEvent.keyDown(within(nav()).getByRole("button", { name: "LAB" }), { key: "ArrowDown" });
+    expect(within(nav()).getByRole("button", { name: "AGENTS" })).toHaveFocus();
+  });
+
+  /**
+   * Deliberately not a focus trap. Tab has to leave the sidebar, because a user tabbing through the
+   * application must reach the page content without arrowing past a navigation column first.
+   */
+  it("does not swallow keys it does not use, so Tab still leaves the nav", () => {
+    const preventDefault = vi.fn();
+    renderShell();
+    const event = new KeyboardEvent("keydown", { key: "Tab", cancelable: true });
+    event.preventDefault = preventDefault;
+    fireEvent(within(nav()).getByRole("button", { name: "LAB" }), event);
+    expect(preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("keeps every destination reachable by tabbing through the nav", () => {
+    renderShell();
+    // The nav holds real buttons, so they are in the tab order without a roving tabindex. This test
+    // pins that: a roving tabindex that left only one item focusable would break keyboard access,
+    // and it is the classic way a sidebar becomes unusable.
+    const items = within(nav()).getAllByRole("button");
+    expect(items).toHaveLength(Object.keys(PAGES).length);
+    for (const item of items) {
+      expect(item).not.toHaveAttribute("tabindex", "-1");
+    }
+  });
+});
+
+describe("accessibility affordances", () => {
+  it("exposes the nav as a labelled landmark", () => {
+    renderShell();
+    expect(nav()).toBeInTheDocument();
+  });
+
+  it("offers a skip link to the content for keyboard users", () => {
+    renderShell();
+    const skip = screen.getByRole("link", { name: /skip to content/i });
+    expect(skip).toHaveAttribute("href", "#main-content");
+  });
+
+  it("gives the content region an id the skip link can target", () => {
+    renderShell();
+    expect(document.getElementById("main-content")).not.toBeNull();
+  });
+
+  it("states on the nav what is not here, instead of offering dead entries", () => {
+    renderShell();
+    // No disabled or "coming soon" buttons: a reader can tell what is missing from this note, and
+    // every button in the nav is a destination that works.
+    expect(within(nav()).queryAllByRole("button")).toHaveLength(Object.keys(PAGES).length);
+    for (const button of within(nav()).getAllByRole("button")) {
+      expect(button).toBeEnabled();
+    }
+    expect(within(nav()).getByText(/documented in the readme/i)).toBeInTheDocument();
+  });
+});

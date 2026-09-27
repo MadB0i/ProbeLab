@@ -42,6 +42,11 @@ SHARED_COMMANDS = {
     "agent-registry": "list_agents",
     "benchmark-registry": "list_benchmark_details",
     "provider-registry": "list_providers",
+    # The navigation shell registers no command of its own: it is a frontend-only surface whose whole
+    # job is routing between the panels below, and every destination it offers is driven by one of
+    # their commands. `brain_panel` is named as the witness because the command center is the
+    # default destination -- reaching the nav and reaching the lab page are the same act.
+    "ui-navigation": "brain_panel",
 }
 
 

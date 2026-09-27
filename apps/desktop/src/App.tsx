@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { AppShell } from "./AppShell";
 import { AgentCatalog } from "./AgentCatalog";
 import { BenchmarkCatalog as BenchmarkCatalogPanel } from "./BenchmarkCatalog";
 import {
@@ -532,6 +533,42 @@ const eventDescription = (event: TelemetryEvent): string => {
   }
   return "no decision";
 };
+
+/**
+ * The registry table, shown on its own page.
+ *
+ * Which registry it renders is a prop rather than two hard-coded copies, so the headings and the
+ * error handling cannot drift apart between the agents and benchmarks pages. Both are fed by the
+ * backend registries, so a page cannot describe an agent or benchmark the runtime cannot build.
+ */
+const RegistryPanel = ({
+  heading,
+  eyebrow,
+  count,
+  countLabel,
+  error,
+  children,
+}: {
+  heading: string;
+  eyebrow: string;
+  count: number;
+  countLabel: string;
+  error: string | null;
+  children: ReactNode;
+}) => (
+  <section className="panel catalog-panel">
+    <div className="panel-heading">
+      <div>
+        <p className="eyebrow">{eyebrow}</p>
+        <h2>{heading}</h2>
+      </div>
+      <span className="muted">
+        {count} {countLabel}
+      </span>
+    </div>
+    {error ? <p className="error-banner">{error}</p> : children}
+  </section>
+);
 
 const App = () => {
   const [benchmarks, setBenchmarks] = useState<BenchmarkSummary[]>([]);
@@ -1145,25 +1182,8 @@ const App = () => {
 
   const systemTone = systemStatus === "DEGRADED" ? "warning" : systemStatus === "RUNNING" ? "active" : "stable";
 
-  return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div className="brand-lockup">
-          <div className="brand-mark" aria-hidden="true">P//L</div>
-          <div>
-            <div className="brand-name">PROBE<span>//</span>LAB</div>
-            <div className="brand-subtitle">AI CAPABILITY &amp; AGENT EVALUATION</div>
-          </div>
-        </div>
-        <div className="system-status" aria-live="polite">
-          <span className={`status-light ${systemTone}`} aria-hidden="true" />
-          <span>SYSTEM {systemStatus}</span>
-          <span className="status-divider" aria-hidden="true" />
-          <span className="muted">LOCAL RUNTIME</span>
-        </div>
-      </header>
-
-      <main className="main-content">
+  const viewbrainPanel = (
+    <>
         {/*
          * The Brain panel sits above the run controls because it is the layer deciding what runs and
          * monitoring what happened. Everything below it is a control the user drives; everything in it
@@ -1176,7 +1196,9 @@ const App = () => {
           onRun={() => void startExperiment()}
           canRun={benchmark !== null}
         />
-
+    </>
+  );
+  const viewreplayPanel = (
         <ReplayPanel
           replay={replay}
           error={replayError}
@@ -1185,6 +1207,8 @@ const App = () => {
           canLoad={arenaMatch !== null}
           matchId={arenaMatch?.matchId ?? ""}
         />
+  );
+  const viewsecurityPanel = (
         <SecurityPanel
           probes={securityProbes}
           report={securityReport}
@@ -1198,6 +1222,9 @@ const App = () => {
           }}
           canRun={securityProbes.length > 0}
         />
+  );
+  const viewarenaPanel = (
+    <>
         {/*
          * The arena sits under the Brain panel because it is an evaluation environment the orchestrator
          * may later drive, not a game the Brain plays. The panel's own controls start a match; the
@@ -1233,37 +1260,9 @@ const App = () => {
           }}
           canPlay={arenaTested !== "" && arenaOpponent !== "" && arenaGames.length > 0}
         />
-        {/*
-         * The catalog section.
-         *
-         * It sits above the run controls on purpose: what this lab can evaluate, and what each number
-         * actually measures, is the first thing a user should be able to read. Both panels are fed by
-         * the backend registries, so neither can claim an agent or a benchmark the runtime cannot
-         * build.
-         */}
-        <section className="panel catalog-panel">
-          <div className="panel-heading">
-            <h2>WHAT THIS LAB CAN EVALUATE</h2>
-            <span className="muted">
-              {registryAgents.length} AGENTS / {registryBenchmarks.length} BENCHMARKS
-            </span>
-          </div>
-          {registryError ? (
-            <p className="error-banner">{registryError}</p>
-          ) : (
-            <div className="catalog-columns">
-              <div className="catalog-column">
-                <h3 className="catalog-column-title">Agents</h3>
-                <AgentCatalog agents={registryAgents} />
-              </div>
-              <div className="catalog-column">
-                <h3 className="catalog-column-title">Benchmarks</h3>
-                <BenchmarkCatalogPanel benchmarks={registryBenchmarks} />
-              </div>
-            </div>
-          )}
-        </section>
-
+    </>
+  );
+  const viewheroPanel = (
         <section className="hero-panel panel">
           <div className="hero-copy">
             <p className="eyebrow">VERTICAL SLICE / CONTROL DECK</p>
@@ -1279,8 +1278,8 @@ const App = () => {
             <div className="readout-detail">TRUSTED SANDBOX / LOCAL TELEMETRY</div>
           </div>
         </section>
-
-        <section className="control-grid" aria-label="Benchmark controls">
+  );
+  const viewsuiteCard = (
           <div className="panel suite-card">
             <div className="panel-heading">
               <div>
@@ -1313,7 +1312,8 @@ const App = () => {
               <strong>STATIC / EMBEDDED</strong>
             </div>
           </div>
-
+  );
+  const viewmodelCard = (
           <div className="panel model-card">
             <div className="panel-heading">
               <div>
@@ -1441,7 +1441,8 @@ const App = () => {
               <strong>{benchmark?.seed ?? "—"}</strong>
             </div>
           </div>
-
+  );
+  const viewactionCard = (
           <div className="panel action-card">
             <div className="panel-heading">
               <div>
@@ -1483,8 +1484,8 @@ const App = () => {
               <code>{runId ?? "AWAITING REQUEST"}</code>
             </div>
           </div>
-        </section>
-
+  );
+  const viewworkspaceGrid = (
         <section className="workspace-grid">
           <div className="panel progress-card">
             <div className="panel-heading">
@@ -1549,7 +1550,8 @@ const App = () => {
             </div>
           </div>
         </section>
-
+  );
+  const viewlowerGrid = (
         <section className="lower-grid">
           <div className="panel telemetry-card">
             <div className="panel-heading">
@@ -1727,7 +1729,92 @@ const App = () => {
             </div>
           </div>
         </section>
-      </main>
+  );
+
+  return (
+    <div className="app-shell">
+      <header className="topbar">
+        <div className="brand-lockup">
+          <div className="brand-mark" aria-hidden="true">P//L</div>
+          <div>
+            <div className="brand-name">PROBE<span>//</span>LAB</div>
+            <div className="brand-subtitle">AI CAPABILITY &amp; AGENT EVALUATION</div>
+          </div>
+        </div>
+        <div className="system-status" aria-live="polite">
+          <span className={`status-light ${systemTone}`} aria-hidden="true" />
+          <span>SYSTEM {systemStatus}</span>
+          <span className="status-divider" aria-hidden="true" />
+          <span className="muted">LOCAL RUNTIME</span>
+        </div>
+      </header>
+
+      {/*
+       * Every panel below is a destination, not another section of one long page.
+       *
+       * Splitting them is not a layout preference. Stacked, the run controls sat above the
+       * registries and the security probes, so the two questions a user actually arrives with --
+       * "what does this number measure?" and "what can I run?" -- required scrolling past four
+       * unrelated panels to answer. Each page now answers one question, and the sidebar states
+       * which one.
+       *
+       * The panels are the same components, fed by the same state, as before. Routing changed
+       * where they appear and nothing about what they compute.
+       */}
+      <AppShell
+        routes={{
+          lab: (
+            <div className="route-stack">
+              {viewbrainPanel}
+              {viewheroPanel}
+              <section className="lab-top" aria-label="Launch controls">
+                {viewactionCard}
+              </section>
+              {viewworkspaceGrid}
+              {viewlowerGrid}
+            </div>
+          ),
+          agents: (
+            <div className="route-stack">
+              <RegistryPanel
+                eyebrow="REGISTRY"
+                heading="Agents"
+                count={registryAgents.length}
+                countLabel="AGENTS"
+                error={registryError}
+              >
+                <AgentCatalog agents={registryAgents} />
+              </RegistryPanel>
+            </div>
+          ),
+          benchmarks: (
+            <div className="route-stack">
+              <RegistryPanel
+                eyebrow="REGISTRY"
+                heading="Benchmarks"
+                count={registryBenchmarks.length}
+                countLabel="BENCHMARKS"
+                error={registryError}
+              >
+                <BenchmarkCatalogPanel benchmarks={registryBenchmarks} />
+              </RegistryPanel>
+              <section className="route-single" aria-label="Selected benchmark">
+                {viewsuiteCard}
+              </section>
+            </div>
+          ),
+          providers: (
+            <div className="route-stack">
+              <section className="route-single" aria-label="Model provider">
+                {viewmodelCard}
+              </section>
+            </div>
+          ),
+          arena: <div className="route-stack">{viewarenaPanel}</div>,
+          security: <div className="route-stack">{viewsecurityPanel}</div>,
+          replay: <div className="route-stack">{viewreplayPanel}</div>,
+        }}
+      />
 
       <footer className="app-footer">
         <span>PROBE//LAB / DESKTOP VERTICAL SLICE</span>

@@ -240,10 +240,12 @@
     {
       "id": "ui-navigation",
       "area": "ui",
-      "status": "partial",
+      "status": "complete",
       "command": null,
-      "summary": "Six real panels render in one column. There is no navigation shell, so every panel is reachable but none can be focused. No placeholder panels exist.",
-      "tests": []
+      "summary": "Seven destinations in a persistent sidebar, hash-routed and deep-linkable, each showing one panel: command center, agents, benchmarks, providers, arena, security, replay. The active destination is marked by colour, a left bar, and aria-current, so it is not signalled by colour alone. The nav is a real button list in a labelled landmark: Tab leaves it, arrow keys and Home/End move within it, and focus follows the selection. A skip link bypasses the nav on every page. Every nav item opens a panel that exists; there are no disabled or coming-soon entries. No routing dependency is used.",
+      "tests": [
+        "apps/desktop/src/AppShell.test.tsx"
+      ]
     },
     {
       "id": "persistence-recovery",
