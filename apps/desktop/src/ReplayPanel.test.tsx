@@ -227,3 +227,47 @@ describe("ReplayPanel — no fabricated data", () => {
   });
 
 });
+
+describe("a recording with no frames", () => {
+  /*
+   * This is a correctness test, not a coverage one. The panel clamped the frame position with
+   * `Math.min(position, total - 1)`, which for an empty frame list is -1. The readout then said
+   * "Frame 0 of 0", and PREV was *enabled* -- because the disable condition was `current === 0`, and
+   * -1 is not 0 -- while doing nothing. A control that looks live and is not.
+   */
+  const emptyReplay: Replay = {
+    recordingId: "arena-ttt-0",
+    kind: "arena_match",
+    capability: "projected_only",
+    frames: [],
+    digest: "0badf00d",
+    limitations: ["This recording captured no intermediate states, so there is nothing to step."],
+  };
+
+  it("states that there is nothing to step rather than showing a frame counter", () => {
+    renderPanel({ replay: emptyReplay });
+    expect(screen.getByText(/NO FRAMES TO STEP THROUGH/i)).toBeTruthy();
+    expect(screen.queryByText(/Frame 0 of 0/i)).toBeNull();
+    expect(screen.queryByText(/^0 of 0$/i)).toBeNull();
+  });
+
+  it("offers no stepper at all, so no control looks live and is not", () => {
+    renderPanel({ replay: emptyReplay });
+    expect(screen.queryByRole("button", { name: /previous frame/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /next frame/i })).toBeNull();
+  });
+
+  it("still reports the recording's own digest", () => {
+    renderPanel({ replay: emptyReplay });
+    // The digest is evidence even when there is nothing to step, and hiding it would be worse than
+    // showing an empty recording with no way to identify it.
+    expect(screen.getByText("0badf00d")).toBeTruthy();
+  });
+
+  it("still shows every limitation the backend reported", () => {
+    renderPanel({ replay: emptyReplay });
+    expect(
+      screen.getByText(/This recording captured no intermediate states/i),
+    ).toBeTruthy();
+  });
+});

@@ -226,3 +226,84 @@ describe("accessibility affordances", () => {
     expect(within(nav()).getByText(/documented in the readme/i)).toBeInTheDocument();
   });
 });
+
+describe("the skip link", () => {
+  /*
+   * The skip link used to be a child of `<main>`, rendered after the header, with `<nav>` before
+   * `<main>` in DOM order. Tab order was therefore nine sidebar buttons and *then* the skip link: a
+   * control whose entire purpose is bypassing the sidebar was reachable only after tabbing through
+   * the sidebar. The mouse hides this completely, which is why it survived.
+   *
+   * Asserted on document order rather than on a CSS property, because document order *is* tab order
+   * for a link with no positive tabindex.
+   */
+  it("is the first focusable element in the document", () => {
+    const { container } = renderShell();
+    const focusable = container.querySelectorAll<HTMLElement>(
+      "a[href], button, input, select, textarea, summary, [tabindex]:not([tabindex='-1'])",
+    );
+    expect(focusable.length).toBeGreaterThan(1);
+    expect(focusable[0].classList.contains("skip-link")).toBe(true);
+  });
+
+  it("is outside the navigation landmark, so it is not read as a destination", () => {
+    renderShell();
+    const link = screen.getByRole("link", { name: /skip to content/i });
+    expect(within(nav()).queryByRole("link", { name: /skip to content/i })).toBeNull();
+  });
+
+  it("points at the main landmark it claims to skip to", () => {
+    renderShell();
+    const link = screen.getByRole("link", { name: /skip to content/i });
+    const target = link.getAttribute("href")?.replace("#", "");
+    expect(target).toBeTruthy();
+    expect(document.querySelector(`#${target}`)?.tagName.toLowerCase()).toBe("main");
+  });
+});
+
+describe("route changes are announced", () => {
+  /*
+   * The whole panel swaps silently on navigation, so a screen-reader user pressing a nav button got no
+   * confirmation of where they went. The `<h1>` is the one element that changes on every route, which
+   * makes it the right live region -- and `polite` rather than `assertive`, because a navigation is not
+   * an error and should not interrupt whatever is being read.
+   */
+  it("marks the title as a polite live region", () => {
+    const { container } = renderShell();
+    const title = container.querySelector("h1");
+    expect(title?.getAttribute("aria-live")).toBe("polite");
+  });
+
+  it("keeps the live region on the element that actually changes", () => {
+    const { container } = renderShell();
+    // The text is read *before* the click, because `querySelector` returns a live reference and
+    // comparing the same node's textContent to itself would pass for any value.
+    const before = container.querySelector("h1")?.textContent;
+    fireEvent.click(screen.getByRole("button", { name: /arena/i }));
+    const after = container.querySelector("h1");
+    expect(after?.getAttribute("aria-live")).toBe("polite");
+    expect(after?.textContent).not.toBe(before);
+  });
+
+});
+
+describe("the nav list is not a list of nothing", () => {
+  /*
+   * `role="list"` on a container of `<button>` elements announces an empty list, because ARIA requires
+   * a list to contain `listitem`s. These are navigation links; the buttons carry their own semantics
+   * and `aria-current` already says which is active.
+   */
+  it("does not claim to be a list", () => {
+    const { container } = renderShell();
+    const items = container.querySelector(".nav-items");
+    expect(items?.getAttribute("role")).toBeNull();
+  });
+
+  it("marks exactly one destination as the current page", () => {
+    renderShell();
+    const current = screen.getAllByRole("button").filter(
+      (button) => button.getAttribute("aria-current") === "page",
+    );
+    expect(current).toHaveLength(1);
+  });
+});

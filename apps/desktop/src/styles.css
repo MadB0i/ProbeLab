@@ -45,7 +45,15 @@ input {
 
 button:focus-visible,
 select:focus-visible,
-input:focus-visible {
+input:focus-visible,
+textarea:focus-visible,
+/*
+ * `summary` and `a` are natively focusable and are not matched by the rules above, so the skip link
+ * and the one disclosure control in the comparison panel had no focus indicator at all. Named
+ * explicitly rather than folded into an `:is(...)` group so the reason survives the next edit.
+ */
+summary:focus-visible,
+a:focus-visible {
   outline: 2px solid var(--cyan);
   outline-offset: 3px;
 }
@@ -134,7 +142,7 @@ input:focus-visible {
   margin-top: 5px;
   color: var(--muted);
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.17em;
 }
 
@@ -749,7 +757,7 @@ input:focus-visible {
 .eyebrow {
   margin: 0 0 12px;
   color: var(--cyan-dim);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
 }
 
@@ -798,7 +806,7 @@ h2 {
 .readout-label,
 .readout-detail {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .readout-value {
@@ -811,7 +819,7 @@ h2 {
 
 .readout-detail {
   color: var(--faint);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .control-grid,
@@ -861,7 +869,7 @@ h2 {
 .event-count,
 .result-status {
   color: var(--cyan-dim);
-  font-size: 9px;
+  font-size: 11px;
   white-space: nowrap;
 }
 
@@ -933,7 +941,7 @@ h2 {
   flex-wrap: wrap;
   gap: 12px;
   color: var(--faint);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .ready-pill {
@@ -941,7 +949,7 @@ h2 {
   border: 1px solid rgba(110, 231, 161, 0.25);
   color: var(--green);
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
+  font-size: 11px;
   letter-spacing: 0.08em;
 }
 
@@ -952,12 +960,12 @@ h2 {
   padding-top: 14px;
   border-top: 1px solid var(--line);
   color: var(--faint);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .card-footer strong {
   color: var(--muted);
-  font-size: 8px;
+  font-size: 11px;
   font-weight: 500;
 }
 
@@ -988,7 +996,7 @@ h2 {
 .model-readout span {
   color: var(--faint);
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
+  font-size: 11px;
   letter-spacing: 0.08em;
 }
 
@@ -996,7 +1004,7 @@ h2 {
   padding: 5px 8px;
   border: 1px solid var(--line-strong);
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
+  font-size: 11px;
   letter-spacing: 0.1em;
   white-space: nowrap;
 }
@@ -1028,7 +1036,7 @@ h2 {
 .telemetry-summary span {
   color: var(--faint);
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 7px;
+  font-size: 11px;
   letter-spacing: 0.08em;
 }
 
@@ -1068,6 +1076,13 @@ input {
   padding: 0 11px;
   border: 1px solid var(--line-strong);
   border-radius: 0;
+  /*
+   * The default focus ring is suppressed here and replaced by the global :focus-visible rule at the
+   * top of this file. That replacement is what makes this safe, and it is stated rather than left as
+   * an accident of specificity: the global rule is input:focus-visible (0,1,1) against input (0,0,1),
+   * so it wins. If the global rule is ever removed or weakened, every form field in the application
+   * silently loses its focus indicator -- which is why the replacement is named here.
+   */
   outline: 0;
   background: #0b1220;
   color: var(--text);
@@ -1105,7 +1120,7 @@ input:disabled {
 
 .field-group label {
   color: var(--faint);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 select {
@@ -1114,6 +1129,13 @@ select {
   padding: 0 12px;
   border: 1px solid var(--line-strong);
   border-radius: 0;
+  /*
+   * The default focus ring is suppressed here and replaced by the global :focus-visible rule at the
+   * top of this file. That replacement is what makes this safe, and it is stated rather than left as
+   * an accident of specificity: the global rule is input:focus-visible (0,1,1) against input (0,0,1),
+   * so it wins. If the global rule is ever removed or weakened, every form field in the application
+   * silently loses its focus indicator -- which is why the replacement is named here.
+   */
   outline: 0;
   background: #0b1220;
   color: var(--text);
@@ -1226,7 +1248,7 @@ select:disabled {
   gap: 12px;
   color: var(--cyan-dim);
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
+  font-size: 11px;
   letter-spacing: 0.1em;
 }
 
@@ -1250,7 +1272,7 @@ select:disabled {
   display: block;
   margin-bottom: 5px;
   color: var(--amber);
-  font-size: 8px;
+  font-size: 11px;
   letter-spacing: 0.1em;
 }
 
@@ -1268,14 +1290,14 @@ select:disabled {
   gap: 12px;
   margin-top: 15px;
   color: var(--faint);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .run-id-line code {
   overflow: hidden;
   color: var(--muted);
   font-family: inherit;
-  font-size: 8px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1302,7 +1324,7 @@ select:disabled {
   display: block;
   margin-top: 10px;
   color: var(--muted);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .turn-readout {
@@ -1351,7 +1373,7 @@ select:disabled {
   margin-top: 13px;
   color: var(--faint);
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .live-label {
@@ -1359,7 +1381,7 @@ select:disabled {
   align-items: center;
   gap: 7px;
   color: var(--green);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .pulse-dot {
@@ -1368,7 +1390,7 @@ select:disabled {
 
 .grid-label {
   color: var(--faint);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .world-grid {
@@ -1399,7 +1421,7 @@ select:disabled {
   right: 5px;
   bottom: 4px;
   color: rgba(164, 181, 201, 0.72);
-  font-size: 7px;
+  font-size: 11px;
 }
 
 .world-cell.known.safe {
@@ -1448,7 +1470,7 @@ select:disabled {
   gap: 10px 15px;
   margin-top: 15px;
   color: var(--faint);
-  font-size: 7px;
+  font-size: 11px;
 }
 
 .legend span {
@@ -1529,7 +1551,7 @@ select:disabled {
 .event-outcome,
 .event-outcome span:last-child {
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .event-sequence {
@@ -1627,7 +1649,7 @@ select:disabled {
 .result-kicker,
 .reward-total span {
   color: var(--faint);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .result-hero strong {
@@ -1671,7 +1693,7 @@ select:disabled {
 
 .metric-grid span {
   color: var(--faint);
-  font-size: 7px;
+  font-size: 11px;
 }
 
 .metric-grid strong {
@@ -1687,7 +1709,7 @@ select:disabled {
   margin-top: 15px;
   color: var(--faint);
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 7px;
+  font-size: 11px;
 }
 
 .trace-panel {
@@ -1707,7 +1729,7 @@ select:disabled {
   padding: 7px 9px;
   background: rgba(7, 12, 21, 0.72);
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
+  font-size: 11px;
   letter-spacing: 0.06em;
 }
 
@@ -1734,7 +1756,7 @@ select:disabled {
   background: rgba(255, 107, 107, 0.05);
   color: var(--faint);
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 7px;
+  font-size: 11px;
   letter-spacing: 0.06em;
 }
 
@@ -1755,7 +1777,7 @@ select:disabled {
   padding-top: 16px;
   border-top: 1px solid var(--line);
   color: var(--faint);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 @keyframes scan {
@@ -2510,7 +2532,7 @@ select:disabled {
 
 .security-breakdown h5 {
   margin: 0 0 5px;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--muted);
@@ -2597,7 +2619,7 @@ select:disabled {
 }
 
 .event-severity {
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--muted);
@@ -2609,7 +2631,7 @@ select:disabled {
 }
 
 .event-integrity {
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--red);
@@ -2858,7 +2880,7 @@ select:disabled {
 
 .telemetry-label {
   display: block;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--muted);
@@ -3181,7 +3203,7 @@ select:disabled {
 }
 
 .probe-facts dt {
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--muted);
@@ -3202,7 +3224,7 @@ select:disabled {
 
 .probe-breakdown h5 {
   margin: 0 0 5px;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--muted);
@@ -3567,7 +3589,7 @@ select:disabled {
 }
 
 .replay-row-source {
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--cyan);
@@ -3590,4 +3612,28 @@ select:disabled {
   margin: 0;
   font-size: 11px;
   color: var(--muted);
+}
+/*
+ * # Legibility floor
+ *
+ * Every rule above this one that set a font size below 11px has been raised to 11px. The reason is
+ * worth recording, because it is a value judgement rather than a rule:
+ *
+ * 7px, 8px, and 9px were used in 37 rules for eyebrows, captions, metric labels, run ids, and event
+ * counts. Those are not decorative -- they are the labels on every measured number in the product, and
+ * a label nobody can read means a number nobody can attribute. The palette itself passes contrast at
+ * those sizes (`--muted` is about 5:1, `--cyan` about 9:1), so the failure was size, not colour: WCAG
+ * contrast ratios assume text a person can actually resolve, and 7px at 100% zoom on a laptop is not.
+ *
+ * 11px is the floor. It is not comfortable, and it is not the target -- the target is that nobody has
+ * to squint at a metric label. Anything smaller needs a reason written next to it.
+ *
+ * The hierarchy is also no longer inverted: `--faint` used to be *lighter* than `--muted` while being
+ * used for strictly secondary information, which is backwards. `--faint` is now the dimmer of the two.
+ */
+
+:root {
+  /* The dimmest text token, for the least important text in a panel. Now genuinely dimmer than
+     `--muted`, so "less important" and "brighter" stop contradicting each other. */
+  --faint: #63738a;
 }

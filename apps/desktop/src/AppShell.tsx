@@ -197,12 +197,33 @@ export function AppShell({ routes }: { routes: Record<RouteId, ReactNode> }) {
 
   return (
     <div className="shell-frame">
+      {/*
+        The skip link is the FIRST focusable node in the document, not a child of `<main>`.
+
+        It used to sit inside `<main>` after the header, with `<nav>` before `<main>` in DOM order --
+        so tab order was nine sidebar buttons, then the skip link, then the content. A control whose
+        entire purpose is bypassing the sidebar was reachable only after tabbing through the sidebar,
+        which is the opposite of the point and impossible to notice by using the mouse.
+
+        It is also outside `<nav>`, so it is not part of the navigation landmark and a screen reader
+        walking landmarks will not read it as a destination.
+      */}
+      <a className="skip-link" href="#main-content">
+        Skip to content
+      </a>
+
       <nav className="shell-nav" aria-label="Command center sections">
         <div className="nav-brand">
           <span className="nav-brand-mark">PROBE//LAB</span>
           <span className="nav-brand-sub">EVALUATION LABORATORY</span>
         </div>
-        <div className="nav-items" ref={navRef} onKeyDown={onKeyDown} role="list">
+        {/*
+          No `role="list"`. The children are `<button>` elements, and ARIA requires a `list` to contain
+          `listitem`s -- so the role announced an empty list. These are navigation links, so the
+          container is a plain group of controls and the buttons carry their own semantics. `aria-current`
+          is what tells a screen reader which destination is active.
+        */}
+        <div className="nav-items" ref={navRef} onKeyDown={onKeyDown}>
           {ROUTES.map((route) => (
             <button
               key={route.id}
@@ -224,13 +245,19 @@ export function AppShell({ routes }: { routes: Record<RouteId, ReactNode> }) {
 
       <main className="shell-main" id="main-content">
         <header className="shell-header">
-          <h1 className="shell-title">{definition.title}</h1>
+          {/*
+            `aria-live` on the title, so a route change is announced.
+
+            The whole panel swaps silently on navigation, which meant a screen-reader user pressing a nav
+            button got no confirmation of where they went. The title is the one element that changes on
+            every route, so it is the right place for it -- and `aria-live="polite"` rather than
+            `assertive` because a navigation is not an error and should not interrupt.
+          */}
+          <h1 className="shell-title" aria-live="polite">
+            {definition.title}
+          </h1>
           <p className="shell-purpose">{definition.purpose}</p>
         </header>
-        {/* A skip link, so a keyboard user can bypass the sidebar on every page. */}
-        <a className="skip-link" href="#main-content">
-          Skip to content
-        </a>
         <div className="shell-content">{routes[definition.id]}</div>
       </main>
     </div>

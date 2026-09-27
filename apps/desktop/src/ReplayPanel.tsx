@@ -126,8 +126,73 @@ export function ReplayPanel({
   }
 
   const total = replay.frames.length;
+
+  /*
+   * A recording with no frames is a real state -- a match that recorded nothing -- and the previous
+   * clamp produced "Frame 0 of 0" with PREV enabled and doing nothing, because `current` went to -1 and
+   * `current === 0` was false. A nonsense readout and a live-looking control that cannot move.
+   *
+   * The comment claimed the clamp "keeps a stale position from rendering nothing", which is precisely
+   * what it did: `Math.min(position, -1)` is -1, and `frames[-1]` is `undefined`.
+   */
+  if (total === 0) {
+    return (
+      <section className="panel replay-panel" aria-labelledby="replay-heading">
+        <div className="panel-heading">
+          <h2 id="replay-heading">REPLAY</h2>
+          <span className="replay-capability replay-capability--partial">
+            {capabilityLabel(replay.capability)}
+          </span>
+        </div>
+
+        <dl className="replay-facts">
+          <div>
+            <dt>Recording</dt>
+            <dd className="mono">{replay.recordingId}</dd>
+          </div>
+          <div>
+            <dt>Kind</dt>
+            <dd>{replay.kind === "arena_match" ? "Arena match" : "Experiment"}</dd>
+          </div>
+          <div>
+            <dt>Frames</dt>
+            <dd className="mono">0</dd>
+          </div>
+          <div>
+            <dt>Digest</dt>
+            <dd className="mono">{replay.digest}</dd>
+          </div>
+        </dl>
+
+        {/*
+          Stated as a fact about the recording rather than as an error. Nothing failed: the backend
+          reconstructed it, and the reconstruction has no frames to step through. Every limitation the
+          backend reported is still shown, because the reason it is empty is usually in there.
+        */}
+        <div className="replay-empty">
+          <h3>NO FRAMES TO STEP THROUGH</h3>
+          <p>
+            This recording contains no frames, so there is nothing to step. The digest above is the
+            recording&apos;s own; what could not be reconstructed is listed below.
+          </p>
+        </div>
+
+        {replay.limitations.length > 0 ? (
+          <div className="replay-limitations">
+            <h3>What could not be reconstructed</h3>
+            <ul>
+              {replay.limitations.map((limitation) => (
+                <li key={limitation}>{limitation}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
   // Clamped for display only. Stepping past the end is prevented by disabling the control, so this
-  // cannot mask a bug in the frame list; it keeps a stale position from rendering nothing.
+  // cannot mask a bug in the frame list; it only guards a position left over from a longer recording.
   const current = Math.min(position, total - 1);
   const frame = replay.frames[current];
 
