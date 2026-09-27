@@ -53,7 +53,8 @@ fn scratch_directories() -> &'static std::sync::Mutex<Vec<PathBuf>> {
 }
 
 fn harness() -> Harness {
-    let root = probelab_engine::harness::unique_scratch_root("quality");
+    let root = probelab_engine::harness::unique_scratch_root("quality")
+        .expect("a unique scratch directory");
     let scratch: PathBuf = root.clone();
     let factory: probelab_engine::harness::RecorderFactory =
         Arc::new(move |run_id: &str| -> Arc<dyn TelemetryRecorder> {
@@ -226,7 +227,7 @@ fn b2_a_hazard_not_adjacent_to_the_start_is_absent_until_the_agent_is_adjacent()
             // not a case this contract can speak to.
             let Some(approach) = probelab_sandbox::orthogonal_coordinates(hazard)
                 .into_iter()
-                .find(|cell| *cell != start && matches!(layout.tile(*cell), TileKind::Safe))
+                .find(|cell| *cell != start && matches!(layout.tile(*cell), Some(TileKind::Safe)))
             else {
                 continue;
             };
@@ -538,6 +539,7 @@ fn b4_the_history_window_is_bounded_and_drops_the_oldest_entries() {
                     // recorder was pid-keyed and inherited a stale database whenever Windows recycled
                     // the identifier, which the gap-free check then refused.
                     probelab_engine::harness::unique_scratch_root("window-probe")
+                        .expect("a unique scratch directory")
                         .join("telemetry.sqlite3"),
                     |_| {},
                 )

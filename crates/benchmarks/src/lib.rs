@@ -285,7 +285,13 @@ impl GridWorldDefinition {
     pub fn max_turns_for(&self, seed: u64) -> u32 {
         let layout = grid_world_layout(seed);
         let scaled = u64::from(layout.shortest_safe_path()) * u64::from(self.turn_budget_numerator);
-        let budget = scaled.div_ceil(u64::from(self.turn_budget_denominator));
+        // `max(1)` rather than trusting the field. `validate_as` rejects a zero denominator, and
+        // `from_json`/`from_definition` always validate, so this is unreachable through the loaded
+        // catalogue -- but `parse_unvalidated` is `pub` and returns a definition on which this `pub fn`
+        // can be called directly, and `div_ceil` by zero is a panic rather than a wrong number. A
+        // denominator of one yields the numerator unchanged, which is the least surprising reading of a
+        // ratio that was supposed to be validated.
+        let budget = scaled.div_ceil(u64::from(self.turn_budget_denominator.max(1)));
         u32::try_from(budget.max(1)).unwrap_or(u32::MAX)
     }
 

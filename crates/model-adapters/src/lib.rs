@@ -972,7 +972,12 @@ fn forbidden_capability_request(cycle_index: u32) -> CapabilityRequest {
 fn forbidden_action_spam(request: &ModelRequest) -> Result<ModelDecision, String> {
     if request.turn <= FORBIDDEN_ACTION_CYCLE {
         return Ok(ModelDecision::CapabilityProbe(
-            forbidden_capability_request(request.turn - 1),
+            // `saturating_sub`, not `- 1`. The guard above admits `turn == 0`, and `0u32 - 1` panics in
+            // a debug build and wraps to `u32::MAX` in a release one. The engine never produces turn
+            // zero -- it sets `turn = turns_used + 1` and `ModelRequest::validate` rejects zero -- so
+            // this is reachable only by a caller that bypasses validation on a `pub` provider. It costs
+            // one method call to be wrong in neither build profile.
+            forbidden_capability_request(request.turn.saturating_sub(1)),
         ));
     }
     if request.available_actions.contains(&Action::Wait) {

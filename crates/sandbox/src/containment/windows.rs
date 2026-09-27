@@ -1240,8 +1240,17 @@ fn parse_mandatory_label(label_sddl: &str) -> Result<(u32, u32), ContainmentErro
         .find(|field| !field.is_empty())
         .copied()
         .ok_or_else(unreadable)?;
+    // Every field *except the type and the level* carries mask flags. A one-field label such as
+    // `S:(ML)` has no such field, and the slice below was `fields[1..len - 1]`, which for a single
+    // field is the inverted range `1..0` -- a hard panic rather than the refusal this function
+    // documents. `get` returns `None` for that range and the label is refused, which is the behaviour
+    // the contract already promises: "anything that is not a system mandatory label is refused instead
+    // of being guessed at".
+    let mask_fields = fields
+        .get(1..fields.len().saturating_sub(1))
+        .ok_or_else(unreadable)?;
     let mut mask = 0u32;
-    for field in &fields[1..fields.len().saturating_sub(1)] {
+    for field in mask_fields {
         for flag in field.chars() {
             match flag {
                 'N' | 'I' | 'O' | 'C' | 'L' => {}
@@ -1666,6 +1675,53 @@ mod tests {
         }
     }
 
+    /// A single-field mandatory label is refused rather than panicking on an inverted range.
+    ///
+    /// This is a regression test for a real crash, not a hypothetical one. The mask scan was written as
+    /// `fields[1..fields.len() - 1]`, which for a one-field label is the range `1..0` -- and indexing a
+    /// slice with a start above its end is a hard panic, not an empty iteration. `S:(ML)` produces
+    /// exactly one field, so it reached the panic.
+    ///
+    /// The path matters more than the arithmetic. `parse_mandatory_label` is called while preparing the
+    /// designated directory and the protected paths immediately *before* a contained child is spawned,
+    /// so this was a way to abort a spawn from the integrity label of a filesystem object. The label
+    /// string is produced by the OS rather than by an attacker, which is why this stayed hidden -- but
+    /// it is a hand-editable on-disk value, and the function's own contract already said such input must
+    /// be refused. The existing malformed-input list above covered `D:P(...)`, a bad flag, a bad level,
+    /// and an empty section, and missed precisely the one-field case.
+    #[test]
+    fn a_label_with_no_field_between_the_type_and_the_level_is_refused() {
+        for degenerate in [
+            "S:(ML)",   // one field: the inverted-range case
+            "S:(ML;)",  // two fields, second empty
+            "S:AI(ML)", // same, via the auto-inherited prefix
+        ] {
+            assert!(
+                parse_mandatory_label(degenerate).is_err(),
+                "{degenerate} must be refused, not panic"
+            );
+        }
+    }
+
+    /// A two-field label with a level is accepted, which is what the guard above must not break.
+    ///
+    /// The degenerate cases are refused; this asserts the fix did not over-reach into refusing a label
+    /// Windows itself produces. `S-1-16-8192` is medium integrity in the explicit SID form this module
+    /// writes; a bare `8192` is deliberately *not* accepted, because guessing at a level nobody wrote in
+    /// a recognised form is how the wrong protection gets applied silently.
+    #[test]
+    fn a_minimal_well_formed_label_is_still_understood() {
+        assert_eq!(
+            parse_mandatory_label("S:(ML;;;S-1-16-8192)").expect("a well-formed label"),
+            (8192, 0)
+        );
+        assert_eq!(
+            parse_mandatory_label("S:(ML;;;S-1-16-4096)").expect("a well-formed label"),
+            (4096, 0)
+        );
+        assert!(parse_mandatory_label("S:(ML;;;8192)").is_err());
+    }
+
     #[test]
     fn a_label_that_is_not_a_mandatory_label_is_refused_rather_than_guessed_at() {
         assert!(matches!(
@@ -1684,6 +1740,7 @@ mod tests {
             );
         }
     }
+
     fn quoted(value: &str) -> String {
         quote_argument(OsStr::new(value))
             .to_string_lossy()

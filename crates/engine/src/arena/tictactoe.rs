@@ -72,8 +72,18 @@ impl TicTacToe {
     }
 
     /// The cell as a side sees it. Public information, so this is the same for both sides.
-    pub fn cell(&self, index: usize) -> TicTacToeCell {
-        self.cells[index]
+    ///
+    /// Returns `None` for an index outside the board rather than indexing into it. This is the one
+    /// place a bare `usize` from outside reaches the array, and the index in question is a
+    /// *model-supplied* move -- so an unchecked read here would be a way for a model to abort the match
+    /// with a move the engine would otherwise refuse as illegal. `apply` and `decide` both bounds-check
+    /// explicitly for exactly that reason; this accessor had no callers and no check, which is a latent
+    /// version of the same hazard rather than a live one.
+    ///
+    /// `None` is the right answer rather than `Empty`: an out-of-range read that returned `Empty` would
+    /// be indistinguishable from a legal empty cell.
+    pub fn cell(&self, index: usize) -> Option<TicTacToeCell> {
+        self.cells.get(index).copied()
     }
 
     /// The board as a core type, for the request and for telemetry.

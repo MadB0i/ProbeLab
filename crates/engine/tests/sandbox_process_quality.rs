@@ -57,7 +57,8 @@ fn harness() -> Harness {
     // Unique per process launch, not per pid: see `unique_scratch_root`. These directories hold a
     // real contained child's telemetry and are never cleaned up, so a recycled pid would make a
     // later run inherit a database whose sequence already starts past one.
-    let root = probelab_engine::harness::unique_scratch_root("sandbox-process");
+    let root = probelab_engine::harness::unique_scratch_root("sandbox-process")
+        .expect("a unique scratch directory");
     let scratch: PathBuf = root.clone();
     let factory: probelab_engine::harness::RecorderFactory =
         Arc::new(move |run_id: &str| -> Arc<dyn TelemetryRecorder> {

@@ -400,7 +400,16 @@ impl Harness {
 ///
 /// Deliberately not a random name: a reproducible-looking path is easier to correlate with a failing
 /// run, and the timestamp is already unique enough for that to be useful.
-pub fn unique_scratch_root(label: &str) -> std::path::PathBuf {
+///
+/// The directory is created, and creation failure is returned rather than asserted. An earlier version
+/// called `create_dir_all(..).expect(..)`, which is a process abort for an environmental condition --
+/// `%TEMP%` unwritable, the disk full, or endpoint protection blocking a new directory under
+/// `%TEMP%\probelab-*` are all realistic on the locked-down Windows host this product targets. Every
+/// caller here is a test that already propagates the error, so a `Result` costs nothing and turns an
+/// abort into a named failure. It also matters that the directory is genuinely created: returning a
+/// path alone would leave `SqliteTelemetryRecorder` to fail later with
+/// `unable to open database file`, which reads like a storage bug rather than the cause.
+pub fn unique_scratch_root(label: &str) -> std::io::Result<std::path::PathBuf> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -414,8 +423,8 @@ pub fn unique_scratch_root(label: &str) -> std::path::PathBuf {
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).expect("create a unique scratch directory");
-    root
+    std::fs::create_dir_all(&root)?;
+    Ok(root)
 }
 
 fn aggregate(label: &str, outcomes: &[EpisodeOutcome], confidence: f64) -> AggregateScore {
@@ -424,8 +433,17 @@ fn aggregate(label: &str, outcomes: &[EpisodeOutcome], confidence: f64) -> Aggre
         .iter()
         .filter(|outcome| outcome.task_success)
         .count();
-    let total_reward: i64 = outcomes.iter().map(|outcome| outcome.total_reward).sum();
-    let total_turns: u32 = outcomes.iter().map(|outcome| outcome.turns_used).sum();
+    // Saturating rather than `sum()`, because a plain `sum()` on `i64`/`u32` panics on overflow in a
+    // debug build and silently wraps in a release one. Neither is acceptable for a number that ends up
+    // in a published measurement, and `plan.episodes` is a caller-supplied `usize` with no upper bound.
+    // Saturating means an absurd run reports a saturated total rather than a plausible wrong one.
+    let total_reward: i64 = outcomes.iter().fold(0i64, |accumulator, outcome| {
+        accumulator.saturating_add(outcome.total_reward)
+    });
+    let total_turns: u32 = outcomes.iter().fold(0u32, |accumulator, outcome| {
+        accumulator.saturating_add(outcome.turns_used)
+    });
+
     let mut status_counts: BTreeMap<String, usize> = BTreeMap::new();
     for outcome in outcomes {
         *status_counts

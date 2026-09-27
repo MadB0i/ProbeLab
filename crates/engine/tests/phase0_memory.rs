@@ -33,7 +33,8 @@ fn benchmark() -> GridWorldBenchmark {
 }
 
 fn harness() -> Harness {
-    let root = probelab_engine::harness::unique_scratch_root("phase0");
+    let root = probelab_engine::harness::unique_scratch_root("phase0")
+        .expect("a unique scratch directory");
     let scratch = root.clone();
     let factory: probelab_engine::harness::RecorderFactory = Arc::new(
         move |run_id: &str| -> Arc<dyn probelab_core::TelemetryRecorder> {
@@ -213,6 +214,7 @@ fn p0_the_history_window_is_delivered_to_the_model() {
             // Unique per process *launch*, not per pid: see `unique_scratch_root` for why a
             // pid-keyed path fails intermittently once Windows recycles an identifier.
             probelab_engine::harness::unique_scratch_root("phase0-history")
+                .expect("a unique scratch directory")
                 .join("telemetry.sqlite3"),
             |_| {},
         )

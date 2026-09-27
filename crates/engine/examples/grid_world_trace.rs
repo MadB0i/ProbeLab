@@ -16,11 +16,15 @@ fn glyph(layout: &probelab_sandbox::GridWorldLayout, coordinate: Coordinate) -> 
     if coordinate == layout.start() {
         return 'S';
     }
+    // `None` is an off-board read, which a `for` over `0..25` cannot produce. It renders as `?` rather
+    // than being folded into `Obstacle`, so a bug in the loop bounds would be visible in the trace
+    // instead of looking like a wall.
     match layout.tile(coordinate) {
-        TileKind::Safe => '.',
-        TileKind::Obstacle => '#',
-        TileKind::Danger => '!',
-        TileKind::Reward => 'R',
+        Some(TileKind::Safe) => '.',
+        Some(TileKind::Obstacle) => '#',
+        Some(TileKind::Danger) => '!',
+        Some(TileKind::Reward) => 'R',
+        None => '?',
     }
 }
 

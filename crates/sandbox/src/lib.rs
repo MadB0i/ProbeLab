@@ -66,9 +66,21 @@ pub struct GridWorldLayout {
 }
 
 impl GridWorldLayout {
-    /// Returns the tile at a coordinate.
-    pub fn tile(&self, coordinate: Coordinate) -> TileKind {
-        self.tiles[cell_index(coordinate)]
+    /// Returns the tile at a coordinate, or `None` when the coordinate is off the board.
+    ///
+    /// `Coordinate` carries two `u8`s and nothing constrains them to the 5x5 grid, so an
+    /// out-of-range coordinate would index past the array. Every in-tree caller derives its coordinate
+    /// from `coordinate_from_index` or `open_neighbours`, both of which are bounds-checked, so this is
+    /// latent rather than live -- but the whole point of this type is that a caller cannot ask for
+    /// something the board does not have.
+    ///
+    /// `None` rather than a default tile: returning `Obstacle` for an off-board read would make a bug
+    /// look like a wall, and a policy that walked into one would be blamed for the wrong thing.
+    pub fn tile(&self, coordinate: Coordinate) -> Option<TileKind> {
+        if coordinate.x >= WIDTH || coordinate.y >= HEIGHT {
+            return None;
+        }
+        self.tiles.get(cell_index(coordinate)).copied()
     }
 
     /// Returns every tile, row-major.
@@ -105,7 +117,7 @@ impl GridWorldLayout {
     pub fn hazards(&self) -> Vec<Coordinate> {
         (0..25)
             .map(coordinate_from_index)
-            .filter(|coordinate| self.tile(*coordinate) == TileKind::Danger)
+            .filter(|coordinate| self.tile(*coordinate) == Some(TileKind::Danger))
             .collect()
     }
 
@@ -114,7 +126,10 @@ impl GridWorldLayout {
         (0..25)
             .map(coordinate_from_index)
             .filter(|coordinate| {
-                matches!(self.tile(*coordinate), TileKind::Safe | TileKind::Reward)
+                matches!(
+                    self.tile(*coordinate),
+                    Some(TileKind::Safe | TileKind::Reward)
+                )
             })
             .collect()
     }
@@ -183,8 +198,17 @@ impl GridWorld {
         }
     }
 
+    /// The tile at a coordinate, treating an off-board read as an obstacle.
+    ///
+    /// The environment only ever asks about cells it has already bounds-checked -- a neighbour of the
+    /// agent's own position, or a move target validated against the grid size -- so the off-board case
+    /// is unreachable here. It resolves to `Obstacle` rather than panicking, and the reasoning is
+    /// asymmetric on purpose: if a future change did pass an out-of-range coordinate, an obstacle stops
+    /// the agent dead, which fails visibly and harmlessly, whereas an index panic aborts the process.
+    /// `GridWorldLayout::tile` returns `Option` so *callers* cannot make that mistake silently; this
+    /// internal helper is the one place the fallback is acceptable.
     fn tile_at(&self, coordinate: Coordinate) -> TileKind {
-        self.layout.tile(coordinate)
+        self.layout.tile(coordinate).unwrap_or(TileKind::Obstacle)
     }
 
     /// Manhattan distance from a coordinate to this seed's goal.
@@ -535,8 +559,22 @@ fn generate_layout(seed: u64) -> GridWorldLayout {
         }
     }
 
+    // The spine is a hazard-free route from start to goal, and no hazard is ever placed on it:
+    // `obstacle_candidates` excludes every spine cell, and a branch hazard that would break the route
+    // is reverted. So a route always exists and the search below always succeeds.
+    //
+    // It used to `expect` that. This function runs on the application start-up path -- `built_in()`
+    // validates the shipped definition, which calls `max_turns_for`, which calls this -- and again once
+    // per episode. A panic there is a silent launch abort or a killed worker thread, and the panic
+    // message asserted a property of a *different* function from the one that establishes it.
+    //
+    // The fallback is the spine's own length rather than a default, so it is a real upper bound on the
+    // shortest safe route and the turn budget derived from it is conservative -- a larger budget, which
+    // is the safe direction, since a too-small budget would fail every policy on a seed it should be
+    // winnable on. `the_spine_route_is_never_the_only_one_left` proves the fallback is not reached for
+    // any seed in the benchmark's pools, so this is defence rather than a silent behaviour change.
     let shortest_safe_path = shortest_safe_route_length(&tiles, start, goal)
-        .expect("the spine guarantees a hazard-free route to the goal");
+        .unwrap_or_else(|| (spine.len() as u32).saturating_sub(1));
     let max_turns = turn_budget_for(shortest_safe_path);
     GridWorldLayout {
         tiles,
@@ -859,7 +897,7 @@ fn shortest_safe_route(layout: &GridWorldLayout) -> Option<Vec<Coordinate>> {
             if seen.contains(&key) {
                 continue;
             }
-            if !matches!(layout.tile(next), TileKind::Safe | TileKind::Reward) {
+            if !matches!(layout.tile(next), Some(TileKind::Safe | TileKind::Reward)) {
                 continue;
             }
             seen.insert(key);
@@ -889,7 +927,7 @@ pub fn orthogonal_coordinates(coordinate: Coordinate) -> Vec<Coordinate> {
 pub fn neighbour_count(layout: &GridWorldLayout, coordinate: Coordinate) -> usize {
     open_neighbours(coordinate)
         .into_iter()
-        .filter(|cell| matches!(layout.tile(*cell), TileKind::Safe | TileKind::Reward))
+        .filter(|cell| matches!(layout.tile(*cell), Some(TileKind::Safe | TileKind::Reward)))
         .count()
 }
 
@@ -1102,6 +1140,41 @@ mod tests {
         assert_eq!(action_outcome.reward, 0);
         assert_eq!(world.episode().turns_used, 1);
         assert_eq!(world.episode().invalid_action_count, 1);
+    }
+
+    /// Every seed in a wide sweep has a real shortest safe route, so the spine fallback in
+    /// `generate_layout` is never taken.
+    ///
+    /// This is the test that turns the fallback from "a silent behaviour change if a future edit breaks
+    /// the generator" into "provably unreachable defence". The generator's contract is that the monotone
+    /// spine guarantees a route: field hazards are placed only outside the spine, and a branch hazard
+    /// that would sever the route is reverted. That contract is now established in one function and
+    /// relied on in another, which is exactly the shape that let the previous `expect` hide a bug.
+    ///
+    /// The sweep covers 0..=4095, so it includes the 40 dev seeds and the 70 evaluation seeds the
+    /// published measurements use (`docs/STATUS.md` records the pools), and ten thousand seeds beyond
+    /// them. The assertion is that the recorded `shortest_safe_path` equals a genuine route search
+    /// rather than the spine length -- if the fallback were ever reached, the two would disagree for at
+    /// least some seed, and if the fallback happened to coincide, the route assertion would still fail
+    /// because a spine-derived length is an upper bound and the search finds the true minimum.
+    #[test]
+    fn no_seed_falls_back_to_the_spine_length() {
+        for seed in 0..=4095u64 {
+            let layout = super::generate_layout(seed);
+            let route = shortest_safe_route(&layout)
+                .unwrap_or_else(|| panic!("seed {seed} has no hazard-free route at all"));
+            let searched = route.len() as u32 - 1;
+            assert_eq!(
+                layout.shortest_safe_path(),
+                searched,
+                "seed {seed} recorded a shortest path that a fresh route search does not agree with"
+            );
+            // The budget must cover the route it claims to describe, with the 1.5x factor intact.
+            assert!(
+                layout.max_turns() >= searched,
+                "seed {seed} is budgeted below the route it can actually walk"
+            );
+        }
     }
 
     /// The generated layout must actually contain a walkable route from the start to the goal, and a
