@@ -401,3 +401,34 @@ export async function runSecuritySweep(request: {
 }): Promise<SecurityLabReport> {
   return invoke<SecurityLabReport>("run_security_sweep", { request });
 }
+/**
+ * A deterministic reconstruction of a recorded run.
+ *
+ * `capability` is the field to read first. "re-executable" means every intermediate state was
+ * recorded; "inspection only" means the recording is an event log and the intermediate states were
+ * never captured. Presenting the second as the first would let someone trust a projection as a re-run.
+ */
+export type ReplayCapability = "full" | "projected_only";
+
+export type ReplayFrame = {
+  index: number;
+  source: "start" | "arena_ply" | "experiment_event" | "terminal";
+  label: string;
+  /** Absent rather than a placeholder, so a corrupted replay cannot look intact. */
+  digest: string | null;
+};
+
+export type Replay = {
+  recordingId: string;
+  kind: "arena_match" | "experiment";
+  capability: ReplayCapability;
+  frames: ReplayFrame[];
+  /** Stable digest of the recording; a tampered one differs. */
+  digest: string;
+  /** What could not be reconstructed, stated rather than hidden. */
+  limitations: string[];
+};
+
+export async function replayArenaMatch(matchId: string): Promise<Replay> {
+  return invoke<Replay>("replay_arena_match", { matchId });
+}

@@ -17,6 +17,8 @@ import {
 import { BrainPanel } from "./BrainPanel";
 import { ArenaPanel } from "./ArenaPanel";
 import { SecurityPanel } from "./SecurityPanel";
+import { ReplayPanel } from "./ReplayPanel";
+import { replayArenaMatch, type Replay } from "./api";
 import {
   latestSecurityReport,
   listSecurityProbes,
@@ -568,6 +570,10 @@ const App = () => {
   const [securityError, setSecurityError] = useState<string | null>(null);
   const [securityRunning, setSecurityRunning] = useState(false);
   const [securityBenchmark, setSecurityBenchmark] = useState("grid-world");
+  // The replay reconstruction. Loaded on demand from a recorded match.
+  const [replay, setReplay] = useState<Replay | null>(null);
+  const [replayError, setReplayError] = useState<string | null>(null);
+  const [replayLoading, setReplayLoading] = useState(false);
 
 
   const [benchmarksError, setBenchmarksError] = useState<string | null>(null);
@@ -849,6 +855,26 @@ const App = () => {
       setBrainError(`The experiment could not start: ${formatError(error)}`);
     }
   }, [benchmark, selectedStrategy]);
+  /**
+   * Loads a deterministic replay of the current arena match.
+   *
+   * The reconstruction is done by the backend from recorded frames, so this call fetches a result rather
+   * than triggering a run. Stepping between frames afterwards is local view state and contacts nothing.
+   */
+  const loadReplay = useCallback(async () => {
+    if (!arenaMatch) {
+      return;
+    }
+    setReplayLoading(true);
+    setReplayError(null);
+    try {
+      setReplay(await replayArenaMatch(arenaMatch.matchId));
+    } catch (error) {
+      setReplayError(`The recording could not be replayed: ${formatError(error)}`);
+    } finally {
+      setReplayLoading(false);
+    }
+  }, [arenaMatch]);
   /**
    * Loads the registered security probes and the most recent sweep.
    *
@@ -1151,6 +1177,14 @@ const App = () => {
           canRun={benchmark !== null}
         />
 
+        <ReplayPanel
+          replay={replay}
+          error={replayError}
+          onLoad={() => void loadReplay()}
+          loading={replayLoading}
+          canLoad={arenaMatch !== null}
+          matchId={arenaMatch?.matchId ?? ""}
+        />
         <SecurityPanel
           probes={securityProbes}
           report={securityReport}

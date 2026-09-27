@@ -233,6 +233,36 @@ impl ArenaMatchView {
     pub fn illegal_move_count(&self) -> usize {
         self.illegal_moves.len()
     }
+
+    /// A stable digest of the recorded match.
+    ///
+    /// Computed from the recorded ply boards rather than stored, so it cannot drift from the history
+    /// it describes: a tampered history produces a different digest. This is what the replay
+    /// subsystem checks a reconstruction against, so it is a change detector rather than a security
+    /// primitive — the security-relevant digests in this lab are the engine's own replay digests,
+    /// which are SHA-256.
+    pub fn replay_digest(&self) -> String {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut absorb = |text: &str| {
+            for byte in text.as_bytes() {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        absorb(self.game.as_str());
+        absorb(&self.seed.to_string());
+        absorb(self.tested_agent.as_str());
+        absorb(self.opponent_agent.as_str());
+        for ply in &self.history {
+            absorb(&ply.ply.to_string());
+            absorb(
+                serde_json::to_string(&ply.board)
+                    .unwrap_or_default()
+                    .as_str(),
+            );
+        }
+        format!("{hash:016x}")
+    }
 }
 
 /// Captures the telemetry the engine records during a match, in memory, and tees it onward.

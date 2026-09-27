@@ -197,6 +197,23 @@ pub fn latest_arena_match(surface: State<'_, ArenaSurface>) -> Option<ArenaMatch
     surface.latest()
 }
 
+/// Reconstructs a stored match as a deterministic replay.
+///
+/// The reconstruction reads recorded data and nothing else: no engine, no provider, no broker. It
+/// therefore cannot produce a different result than the recording, and cannot call a model even by
+/// accident — which is what makes it a replay rather than a second run.
+#[tauri::command(rename_all = "snake_case")]
+pub fn replay_arena_match(
+    surface: State<'_, ArenaSurface>,
+    match_id: String,
+) -> Result<probelab_lab::Replay, ArenaCommandError> {
+    let view = surface.get(&match_id).ok_or_else(|| ArenaCommandError {
+        code: "not_found".to_owned(),
+        message: format!("no match named {match_id:?}"),
+    })?;
+    Ok(probelab_lab::replay_match(&view))
+}
+
 /// One stored match by identifier.
 #[tauri::command(rename_all = "snake_case")]
 pub fn get_arena_match(

@@ -25,6 +25,7 @@ mod brain;
 mod events;
 mod experiment;
 mod probes;
+mod replay;
 mod runner;
 mod security;
 mod view;
@@ -53,6 +54,10 @@ pub use experiment::{
 pub use probes::{
     probe_request, ProbeAgent, ProbeCategory, ProbeContext, ProbeObservation, ProbeOutcome,
     ProbeRegistry, ProbeReport, ProbeSpec,
+};
+pub use replay::{
+    frame_at, replay_experiment, replay_match, Replay, ReplayCapability, ReplayFrame, ReplayKind,
+    ReplaySource,
 };
 pub use runner::{
     EpisodeFailure, ExperimentObserver, ExperimentRun, LabRunner, RunnerError, SilentObserver,

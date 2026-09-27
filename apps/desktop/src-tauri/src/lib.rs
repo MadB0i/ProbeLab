@@ -21,7 +21,8 @@ mod security;
 
 pub use arena::{
     get_arena_match, latest_arena_match, list_arena_agents, list_arena_games, play_arena_match,
-    ArenaAgentSummary, ArenaCommandError, ArenaGameSummary, ArenaMatchRequest, ArenaSurface,
+    replay_arena_match, ArenaAgentSummary, ArenaCommandError, ArenaGameSummary, ArenaMatchRequest,
+    ArenaSurface,
 };
 pub use brain::{
     brain_panel, get_experiment, list_experiments, run_experiment, BrainCommandError, BrainSurface,
