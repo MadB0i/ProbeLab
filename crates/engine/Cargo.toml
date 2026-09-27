@@ -15,6 +15,9 @@ probelab-broker = { path = "../broker" }
 probelab-core = { path = "../core" }
 probelab-sandbox = { path = "../sandbox" }
 probelab-telemetry = { path = "../telemetry" }
+# `Interval` reaches result bundles and the lab's read model, so the harness types are serialised in
+# production rather than only in tests.
+serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

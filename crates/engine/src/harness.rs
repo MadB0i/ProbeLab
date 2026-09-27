@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use probelab_core::{Agent, Benchmark, CompletionStatus, Evaluator};
+use serde::{Deserialize, Serialize};
 
 use crate::BenchmarkRunner;
 
@@ -177,7 +178,12 @@ pub struct EpisodeOutcome {
 }
 
 /// A single scalar with a confidence interval.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// `Default` and the serde derives are here because an interval reaches result bundles and read
+/// models, and a type that cannot be serialised cannot be reported. The default is a degenerate
+/// zero-width interval at zero, which is why a caller should treat an interval from a run with no
+/// episodes as absent rather than as a measurement.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct Interval {
     /// The point estimate.
     pub point: f64,

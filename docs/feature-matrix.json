@@ -229,10 +229,11 @@
     {
       "id": "experiment-harness",
       "area": "orchestration",
-      "status": "partial",
-      "command": null,
-      "summary": "The multi-episode Harness with disjoint seed pools and Wilson intervals exists and is used by benchmark quality tests, but the Runner does not use it. The Runner's own loop is what the product runs.",
+      "status": "complete",
+      "command": "run_experiment",
+      "summary": "One authoritative product execution path. The Runner draws episode seeds from the benchmark own declared evaluation pool, disjoint from its development seeds, and reports a Wilson interval via the engine function rather than its own. A failed episode is recorded and skipped, each episode gets a fresh RunContext, and mean_success_fraction() is None when nothing completed. The separate Harness remains for offline benchmark discrimination measurement, where fail-fast is correct.",
       "tests": [
+        "crates/lab/tests/harness_integration.rs",
         "crates/engine/tests/benchmark_quality.rs"
       ]
     },

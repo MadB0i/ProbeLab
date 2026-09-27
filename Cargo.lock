@@ -2608,6 +2608,7 @@ dependencies = [
  "probelab-sandbox",
  "probelab-telemetry",
  "rusqlite",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",

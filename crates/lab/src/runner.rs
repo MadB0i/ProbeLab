@@ -37,6 +37,7 @@
 //! breaks the harness score as "no data" rather than as a failure, which is the one thing a lab must
 //! never do.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -75,6 +76,113 @@ pub struct SilentObserver;
 
 impl ExperimentObserver for SilentObserver {
     fn on_event(&self, _event: &LabEvent) {}
+}
+
+/// The outcome of a whole experiment, aggregated over its episodes.
+///
+/// # Why the Runner aggregates rather than delegating to `Harness::measure`
+///
+/// There were two execution loops in the repository: the `Harness`'s `measure`, and this one. Two loops
+/// is one too many — they disagreed, and the disagreement was not obvious.
+///
+/// Resolving it by inlining `measure` would have made the product *worse*, and the reason is in that
+/// function rather than in this comment: `measure` returns `Err(HarnessError::EpisodeFailed)` on the
+/// **first** failing episode, discarding every valid one. It also runs every episode against a single
+/// shared `&dyn Benchmark` and without a per-episode `RunContext`, so episodes would share environment
+/// state and no episode would get its own sandbox root.
+///
+/// So the Harness's *methodological* strengths are adopted and its *execution* semantics are not:
+///
+/// * seeds come from the benchmark's own declared evaluation pool, disjoint from its development
+///   seeds, instead of a linear `root_seed + index` sequence that could land on a tuned seed;
+/// * the reported success rate carries a Wilson interval, so a small sample is visibly uncertain;
+/// * per-episode run identifiers name the pool, so a stored record says which pool produced it.
+///
+/// What the Runner keeps, because it is stronger: a failed episode is recorded and skipped, every
+/// episode gets a fresh `RunContext`, and every episode emits lifecycle events.
+///
+/// The Harness remains what it is genuinely for — measuring a *benchmark's* discrimination and
+/// calibration offline, where fail-fast is the right behaviour because a broken benchmark should stop
+/// the measurement rather than quietly produce a smaller sample.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentAggregate {
+    /// Episodes that produced a result.
+    pub episodes: usize,
+    /// Episodes that reached the goal.
+    pub successes: usize,
+    /// The success rate as a plain fraction.
+    ///
+    /// Always a real number even when nothing completed, so the `Option` on
+    /// [`ExperimentRun::mean_success_fraction`] is the honest one to read. This field is a ratio of
+    /// zero, not a claim that the model scored zero.
+    pub success_rate: f64,
+    /// The Wilson interval for `success_rate`, so a small sample is visibly uncertain.
+    pub success_interval: WilsonInterval,
+    /// Mean shaped reward across completed episodes.
+    pub mean_reward: f64,
+    /// Mean turns consumed across completed episodes.
+    pub mean_turns: f64,
+    /// Counts per terminal status, so a failure mode is visible rather than lumped together.
+    pub status_counts: BTreeMap<String, usize>,
+    /// Which seed pool the episodes were drawn from, or `None` when the plan pinned single seeds.
+    pub seed_pool: Option<String>,
+}
+
+impl ExperimentAggregate {
+    /// Aggregates completed episode results.
+    ///
+    /// Built from the results alone, so it cannot disagree with the per-episode list it summarises.
+    pub fn from_results(
+        results: &[TestResult],
+        confidence: f64,
+        seed_pool: Option<String>,
+    ) -> Self {
+        let episodes = results.len();
+        let successes = results
+            .iter()
+            .filter(|result| result.capability.task_success)
+            .count();
+        let mut status_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut total_reward = 0i64;
+        let mut total_turns = 0i64;
+        for result in results {
+            let status = format!("{:?}", result.capability.completion_status);
+            *status_counts.entry(status).or_default() += 1;
+            total_reward += result.capability.total_reward;
+            total_turns += i64::from(result.capability.turns_used);
+        }
+        let divisor = episodes.max(1) as f64;
+        Self {
+            episodes,
+            successes,
+            success_rate: successes as f64 / divisor,
+            success_interval: wilson_interval(successes, episodes, confidence),
+            mean_reward: total_reward as f64 / divisor,
+            mean_turns: total_turns as f64 / divisor,
+            status_counts,
+            seed_pool,
+        }
+    }
+
+    /// Whether any episode completed.
+    ///
+    /// A caller must check this before reading the rate. An aggregate over zero episodes has a rate of
+    /// zero, which is arithmetically true and evidentially meaningless.
+    pub fn has_data(&self) -> bool {
+        self.episodes > 0
+    }
+}
+
+/// A Wilson score interval for a proportion.
+///
+/// Carried here rather than re-derived so the Runner and the Harness report uncertainty identically.
+/// The harness type is reused directly, which is what makes the two paths impossible to drift.
+pub type WilsonInterval = probelab_engine::harness::Interval;
+
+/// Builds an experiment aggregate from completed results, using the Harness's interval function.
+pub fn wilson_interval(successes: usize, trials: usize, confidence: f64) -> WilsonInterval {
+    probelab_engine::harness::wilson_interval(successes, trials, confidence)
 }
 
 /// A failure that prevents an experiment from running at all.
@@ -135,6 +243,11 @@ pub struct ExperimentRun {
     pub brain_panel: crate::brain::BrainPanel,
     /// Whether the experiment reached a terminal state.
     pub terminal_reason: Option<TerminalReason>,
+    /// The aggregate over the completed episodes.
+    ///
+    /// Carried rather than computed on demand so the summary a panel renders and the per-episode list
+    /// it summarises cannot disagree.
+    pub aggregate: ExperimentAggregate,
 }
 
 impl ExperimentRun {
@@ -168,6 +281,14 @@ impl ExperimentRun {
             .map(|result| f64::from(u8::from(result.capability.task_success)))
             .sum();
         Some(total / self.results.len() as f64)
+    }
+
+    /// The aggregate over the completed episodes, with a Wilson interval.
+    ///
+    /// The honest field is still [`Self::mean_success_fraction`]; this one always carries a rate, so a
+    /// caller must check [`ExperimentAggregate::has_data`] before reading it.
+    pub fn aggregate(&self) -> &ExperimentAggregate {
+        &self.aggregate
     }
 
     /// Total integrity events across completed episodes.
@@ -292,6 +413,26 @@ impl LabRunner {
             )));
         }
 
+        // The measurement seeds come from the benchmark itself, so they are disjoint from the ones it
+        // was developed against. Resolved once here rather than per episode, and an empty pool falls
+        // back to the plan's own derivation rather than dividing by zero in the loop.
+        let pool: Vec<u64> = match self.benchmarks.build(&plan.benchmark_id) {
+            Ok(benchmark) => benchmark.eval_seeds(),
+            Err(error) => {
+                return Err(RunnerError::Plan(format!(
+                    "the benchmark could not be built for its seed pool: {error}"
+                )))
+            }
+        };
+        let pool_name = if pool.is_empty() { "pinned" } else { "eval" };
+        let pool: Vec<u64> = if pool.is_empty() {
+            (0..plan.episodes)
+                .map(|index| plan.seed_for_episode(index))
+                .collect()
+        } else {
+            pool
+        };
+
         // The ExperimentManager owns the lifecycle and, critically, the cleanup. It is created before
         // anything is allocated so a failure during preparation still unwinds.
         let context = RunContext::ephemeral("probelab-experiment")
@@ -340,8 +481,15 @@ impl LabRunner {
             }
 
             manager.episode_started();
-            let seed = plan.seed_for_episode(index);
-            let run_id = format!("{experiment_id}-e{index}");
+            // Seeds come from the benchmark's own declared evaluation pool rather than a linear
+            // `root_seed + index` sequence. A linear sequence can land on a seed the benchmark was
+            // tuned against, which would make "held-out" untrue in a way no assertion would catch. The
+            // pool name is in the run id so a stored record says where its seeds came from.
+            let seed = match pool.get(index % pool.len()) {
+                Some(seed) => *seed,
+                None => plan.seed_for_episode(index),
+            };
+            let run_id = format!("{experiment_id}-{pool_name}-e{index}");
             match self.run_episode(&plan, seed, &run_id, evaluator, recorder.clone()) {
                 Ok(result) => {
                     manager.episode_completed();
@@ -398,6 +546,11 @@ impl LabRunner {
 
         Ok(ExperimentRun {
             experiment_id: experiment_id.to_owned(),
+            aggregate: ExperimentAggregate::from_results(
+                &results,
+                0.95,
+                (pool_name != "pinned").then(|| pool_name.to_owned()),
+            ),
             plan,
             results,
             failures,

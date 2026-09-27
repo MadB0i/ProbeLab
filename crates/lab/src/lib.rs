@@ -26,7 +26,7 @@ mod events;
 mod experiment;
 mod probes;
 mod replay;
-mod runner;
+pub mod runner;
 mod security;
 mod view;
 
@@ -60,7 +60,8 @@ pub use replay::{
     ReplaySource,
 };
 pub use runner::{
-    EpisodeFailure, ExperimentObserver, ExperimentRun, LabRunner, RunnerError, SilentObserver,
+    EpisodeFailure, ExperimentAggregate, ExperimentObserver, ExperimentRun, LabRunner, RunnerError,
+    SilentObserver, WilsonInterval,
 };
 pub use security::{
     all_probes, probes_for, run_probe, sweep, BoundaryOutcome, SecurityLabError, SecurityLabReport,

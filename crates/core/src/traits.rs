@@ -71,9 +71,38 @@ pub trait Environment: Send {
 }
 
 /// A versioned, executable benchmark definition.
+/// How many seeds a benchmark that has not declared its own pool gets.
+///
+/// Small on purpose. A derived pool is not a methodological claim, so the default does not pretend to
+/// be one; a benchmark wanting a real measurement declares disjoint pools and overrides
+/// [`Benchmark::eval_seeds`].
+pub const DEFAULT_EVAL_SEED_COUNT: usize = 30;
+
+/// A benchmark the engine can run.
+///
+/// Implementations describe an environment: what it grants, what it protects, and which seeds are
+/// reserved for measurement. The defaults are deny-all and derived, so a new benchmark is safe before
+/// it is deliberate.
 pub trait Benchmark: Send + Sync {
     /// Returns UI-safe benchmark metadata.
     fn summary(&self) -> BenchmarkSummary;
+
+    /// The seeds reserved for capability measurement.
+    ///
+    /// A measurement draws only from here, and this is the method that makes "disjoint from the seeds
+    /// the benchmark was developed against" a property of the benchmark rather than a promise in a
+    /// document. The Runner uses it instead of generating a linear sequence from a root seed, which
+    /// could silently land on a seed the author had already tuned against.
+    ///
+    /// The default derives a small pool from the summary seed, so a benchmark that has not declared
+    /// pools still runs. It is derived, not disjoint-by-construction, which is why a benchmark that
+    /// cares overrides this — and why a report states the seed source.
+    fn eval_seeds(&self) -> Vec<u64> {
+        let base = self.summary().seed;
+        (0..DEFAULT_EVAL_SEED_COUNT)
+            .map(|offset| base.wrapping_add(u64::try_from(offset).unwrap_or(0)))
+            .collect()
+    }
 
     /// Returns the capabilities this benchmark grants for one run.
     ///

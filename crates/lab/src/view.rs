@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::brain::{Anomaly, BrainState};
 use crate::events::{EventSource, LabEvent, Severity};
 use crate::experiment::{ExperimentState, TerminalReason};
-use crate::runner::{EpisodeFailure, ExperimentRun};
+use crate::runner::{EpisodeFailure, ExperimentAggregate, ExperimentRun};
 
 /// The Brain's state, as the command center renders it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -351,6 +351,9 @@ pub struct ExperimentView {
     ///
     /// The `None` is load-bearing and reaches the UI intact.
     pub mean_success_fraction: Option<f64>,
+    /// The aggregate with its Wilson interval, so a small sample is visibly uncertain rather than
+    /// presented as a bare point estimate.
+    pub aggregate: ExperimentAggregate,
     /// The lifecycle state the run reached.
     pub lifecycle: ExperimentState,
     /// Why, once terminal.
@@ -402,6 +405,7 @@ impl ExperimentView {
             episodes_completed: run.completed(),
             episodes_failed: run.failed(),
             mean_success_fraction: run.mean_success_fraction(),
+            aggregate: run.aggregate().clone(),
             lifecycle: ExperimentState::Completed,
             terminal_reason: run.terminal_reason.clone(),
             elapsed_ms: None,

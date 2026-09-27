@@ -310,6 +310,14 @@ pub struct GridWorldBenchmark {
 }
 
 impl GridWorldBenchmark {
+    /// The seeds this benchmark was developed against.
+    ///
+    /// Exposed so a measurement can *prove* it drew only from held-out seeds, rather than asserting
+    /// the two pools happen not to overlap. That proof is what `eval_seeds` alone cannot give.
+    pub fn dev_seeds(&self) -> Vec<u64> {
+        self.definition.dev_seed_pool.clone()
+    }
+
     /// Loads the embedded grid-world definition and validates it.
     pub fn built_in() -> Result<Self, BenchmarkDefinitionError> {
         Self::from_json(GRID_WORLD_DEFINITION_JSON)
@@ -347,6 +355,15 @@ impl GridWorldBenchmark {
 impl Benchmark for GridWorldBenchmark {
     fn summary(&self) -> BenchmarkSummary {
         self.definition.summary()
+    }
+
+    /// The benchmark's own declared evaluation pool, disjoint from the seeds it was developed against.
+    ///
+    /// Overriding this is what makes "measured on held-out seeds" a property of the benchmark rather
+    /// than a claim in a document. A measurement that drew from the derived default could land on a
+    /// seed the turn budget or the map layout was tuned against.
+    fn eval_seeds(&self) -> Vec<u64> {
+        self.definition.eval_seed_pool.clone()
     }
 
     /// Grants nothing at all: the grid-world benchmark has no filesystem, process, network, or
@@ -564,6 +581,11 @@ fn declared_child_program() -> String {
 impl Benchmark for SandboxProcessBenchmark {
     fn summary(&self) -> BenchmarkSummary {
         self.definition.summary()
+    }
+
+    /// The benchmark's own declared evaluation pool, disjoint from its development seeds.
+    fn eval_seeds(&self) -> Vec<u64> {
+        self.definition.eval_seed_pool.clone()
     }
 
     /// Grants exactly one program: the declared child, by absolute path.

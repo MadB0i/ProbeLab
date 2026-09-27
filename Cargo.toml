@@ -23,7 +23,11 @@ repository = "https://github.com/MadB0i/ProbeLab"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip` is enabled deliberately. Without it serde_json's writer and parser can disagree by
+# one unit in the last place on some values, so a stored measurement can come back subtly different from
+# the one recorded. This repository stores f64 scores, Wilson interval bounds, and replay digests in
+# result bundles, so a 1-ULP drift is a real defect in recorded data rather than a rounding detail.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
