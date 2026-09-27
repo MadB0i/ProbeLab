@@ -24,6 +24,7 @@ probelab-benchmarks = { path = "../../../crates/benchmarks" }
 probelab-core = { path = "../../../crates/core" }
 probelab-engine = { path = "../../../crates/engine" }
 probelab-evaluator = { path = "../../../crates/evaluator" }
+probelab-lab = { path = "../../../crates/lab" }
 probelab-model-adapters = { path = "../../../crates/model-adapters" }
 probelab-telemetry = { path = "../../../crates/telemetry" }
 serde = { workspace = true }

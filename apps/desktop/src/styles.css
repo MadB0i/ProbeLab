@@ -1342,3 +1342,256 @@ select:disabled {
     transition-duration: 0.01ms !important;
   }
 }
+/* ---------------------------------------------------------------------------
+ * Catalog panels
+ *
+ * The tone classes encode what a number *measures*, not how it looks. A model
+ * result and a sandbox-probe result are not comparable, so they are not allowed
+ * to share a colour: `--violet` is reserved for target-model measurements and the
+ * infrastructure tones are deliberately cooler. Someone glancing at a wall of
+ * results should be able to tell which numbers are claims about a model and which
+ * are claims about the lab, without reading a label.
+ * ------------------------------------------------------------------------- */
+.catalog-panel {
+  margin-bottom: 18px;
+}
+
+.catalog-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 20px;
+  margin-top: 14px;
+}
+
+.catalog-column {
+  min-width: 0;
+}
+
+.catalog-column-title {
+  margin: 0 0 10px;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.panel-note {
+  margin: 0 0 14px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--faint);
+  border-left: 2px solid var(--line-strong);
+  padding-left: 10px;
+}
+
+.agent-group + .agent-group {
+  margin-top: 18px;
+}
+
+.agent-group-title {
+  margin: 0 0 8px;
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.agent-list,
+.benchmark-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-row,
+.benchmark-row {
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.agent-row-head,
+.benchmark-row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.agent-name,
+.benchmark-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.agent-category {
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.agent-description,
+.benchmark-description {
+  margin: 5px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+
+.agent-facts,
+.benchmark-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 6px 14px;
+  margin: 9px 0 0;
+}
+
+.agent-facts div,
+.benchmark-facts div {
+  min-width: 0;
+}
+
+.agent-facts dt,
+.benchmark-facts dt {
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.agent-facts dd,
+.benchmark-facts dd {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  color: var(--faint);
+  overflow-wrap: anywhere;
+}
+
+.benchmark-scoring,
+.benchmark-execution-note {
+  margin: 9px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+
+.benchmark-execution-note {
+  border-left: 2px solid var(--amber);
+  padding-left: 9px;
+  color: var(--amber);
+}
+
+.benchmark-limits {
+  list-style: none;
+  margin: 9px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+}
+
+.benchmark-limits li {
+  display: flex;
+  gap: 5px;
+  font-size: 10.5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 2px 6px;
+}
+
+.limit-key {
+  color: var(--muted);
+}
+
+.limit-value {
+  color: var(--faint);
+}
+
+.benchmark-item {
+  position: relative;
+}
+
+.benchmark-select {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 3px 9px;
+  border-radius: 3px;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.benchmark-select:hover {
+  color: var(--cyan);
+  border-color: var(--cyan-dim);
+}
+
+.badge {
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+
+.field-description-quiet {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* Tone palette. See the note above: these encode epistemic status. */
+.tone-model {
+  border-left-color: var(--violet);
+}
+.tone-model .badge {
+  color: var(--violet);
+}
+
+.tone-ceiling {
+  border-left-color: var(--cyan);
+}
+
+.tone-baseline,
+.tone-policy {
+  border-left-color: var(--cyan-dim);
+}
+
+.tone-probe {
+  border-left-color: var(--amber);
+}
+
+.tone-neutral {
+  border-left-color: var(--line-strong);
+}
+
+.tone-ok {
+  color: var(--green);
+}
+
+.tone-deferred {
+  color: var(--amber);
+}

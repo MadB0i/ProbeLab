@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AgentCatalog } from "./AgentCatalog";
+import { BenchmarkCatalog as BenchmarkCatalogPanel } from "./BenchmarkCatalog";
+import { listAgents, listBenchmarkDetails, type AgentSummary, type BenchmarkDetail } from "./api";
 
 type BenchmarkSummary = {
   benchmark_id: string;
@@ -298,6 +301,9 @@ type StrategyOption = {
   value: Strategy;
   label: string;
   description: string;
+  /** What the agent's number measures, straight from the registry's category. */
+  categoryLabel: string;
+  measuresAModel: boolean;
 };
 
 type GridCell = {
@@ -308,58 +314,31 @@ type GridCell = {
   agent: boolean;
 };
 
-const strategies: StrategyOption[] = [
-  {
-    value: "optimal",
-    label: "Optimal route",
-    description: "Use only local safe and reward observations.",
-  },
-  {
-    value: "greedy_mistake",
-    label: "Greedy mistake",
-    description: "Pause once, then follow the local safe route.",
-  },
-  {
-    value: "random",
-    label: "Seeded random",
-    description: "Select a valid local action with a fixed seed.",
-  },
-  {
-    value: "invalid_action_spam",
-    label: "Boundary probe",
-    description: "Repeatedly test an invalid boundary transition.",
-  },
-  {
-    value: "security_probe_unauthorized_access",
-    label: "Evaluator access probe",
-    description: "Request denied evaluator access.",
-  },
-  {
-    value: "security_probe_policy_violation",
-    label: "Tool policy probe",
-    description: "Request a disallowed tool.",
-  },
-  {
-    value: "security_probe_sandbox_violation",
-    label: "Sandbox escape probe",
-    description: "Request an escape from the sandbox.",
-  },
-  {
-    value: "security_probe_environment_tampering",
-    label: "Environment tamper probe",
-    description: "Request direct environment mutation.",
-  },
-  {
-    value: "security_probe_network_violation",
-    label: "Network access probe",
-    description: "Request network access.",
-  },
-  {
-    value: "forbidden_action_spam",
-    label: "Forbidden action spam",
-    description: "Cycle every forbidden capability request until the broker refuses each one.",
-  },
-];
+/**
+ * Strategy labels, keyed by the id the registry uses.
+ *
+ * The list of *choices* is no longer written here. It used to be an array literal in this file, which
+ * had to be kept in step by hand with the Rust mock enum, the IPC allowlist, and the reference
+ * policies — and nothing made that obligation enforceable. The failure mode was concrete: a dropdown
+ * entry the backend then refused, discovered at run time.
+ *
+ * So the options come from the authoritative registry and this map only supplies display names for
+ * the mock strategies the run command accepts. `Strategy` remains a closed union because
+ * `ModelRunConfig` is a tagged Rust enum; the registry supplies the list, the type still supplies the
+ * safety.
+ */
+const strategyLabels: Record<Strategy, string> = {
+  optimal: "Optimal route",
+  greedy_mistake: "Greedy mistake",
+  random: "Seeded random",
+  invalid_action_spam: "Boundary probe",
+  security_probe_unauthorized_access: "Evaluator access probe",
+  security_probe_policy_violation: "Tool policy probe",
+  security_probe_sandbox_violation: "Sandbox escape probe",
+  security_probe_environment_tampering: "Environment tamper probe",
+  security_probe_network_violation: "Network access probe",
+  forbidden_action_spam: "Forbidden action spam",
+};
 
 /** Defaults mirror `OpenAiCompatibleConfig::default` on the Rust side. */
 const DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
@@ -526,6 +505,11 @@ const eventDescription = (event: TelemetryEvent): string => {
 const App = () => {
   const [benchmarks, setBenchmarks] = useState<BenchmarkSummary[]>([]);
   const [benchmarksLoading, setBenchmarksLoading] = useState(true);
+  // The authoritative registries, fetched once at start-up. Everything the pickers and the catalog
+  // panels render comes from these rather than from constants in this file.
+  const [registryAgents, setRegistryAgents] = useState<AgentSummary[]>([]);
+  const [registryBenchmarks, setRegistryBenchmarks] = useState<BenchmarkDetail[]>([]);
+  const [registryError, setRegistryError] = useState<string | null>(null);
   const [benchmarksError, setBenchmarksError] = useState<string | null>(null);
   const [selectedStrategy, setSelectedStrategy] = useState<Strategy>("optimal");
   const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE_URL);
@@ -551,7 +535,30 @@ const App = () => {
   const benchmark = benchmarks[0] ?? null;
   const latestEvent = telemetry.at(-1) ?? null;
   const gridSize = latestEvent?.observation.grid_size ?? { width: 5, height: 5 };
-  const strategy = strategies.find((item) => item.value === selectedStrategy) ?? strategies[0];
+
+  /**
+   * The picker options, derived from the registry rather than declared here.
+   *
+   * The filter is the closed `Strategy` union, not a string prefix: the run command takes a tagged
+   * Rust enum, so offering an id the union does not contain would fail at run time. Intersecting the
+   * two means an agent can only appear if the registry has it *and* the command can accept it, which
+   * is the property the old hand-written list did not have.
+   */
+  const strategies = useMemo<StrategyOption[]>(() => {
+    return (Object.keys(strategyLabels) as Strategy[])
+      .map((value) => registryAgents.find((agent) => agent.id === value))
+      .filter((agent): agent is AgentSummary => agent !== undefined)
+      .map((agent) => ({
+        value: agent.id as Strategy,
+        label: strategyLabels[agent.id as Strategy],
+        description: agent.description,
+        categoryLabel: agent.categoryLabel,
+        measuresAModel: agent.measuresAModel,
+      }));
+  }, [registryAgents]);
+
+  const strategy =
+    strategies.find((item) => item.value === selectedStrategy) ?? strategies[0] ?? null;
   const maxTurns = benchmark?.max_turns ?? 30;
   const progress = latestEvent
     ? Math.min(100, Math.round((latestEvent.turn / maxTurns) * 100))
@@ -713,6 +720,50 @@ const App = () => {
     };
   }, []);
 
+  /**
+   * Load the authoritative registries.
+   *
+   * Both are fetched together and a failure in either is surfaced rather than swallowed, because a
+   * command center showing an empty agent list with no error reads as "this lab has no agents" — a
+   * claim about the product that is both wrong and worse than a visible fault.
+   */
+  useEffect(() => {
+    let active = true;
+    Promise.all([listAgents(), listBenchmarkDetails()])
+      .then(([agents, benchmarkDetails]) => {
+        if (!active) {
+          return;
+        }
+        setRegistryAgents(agents);
+        setRegistryBenchmarks(benchmarkDetails);
+        setRegistryError(null);
+      })
+      .catch((error) => {
+        if (active) {
+          setRegistryError(`Registries unavailable: ${formatError(error)}`);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  /**
+   * Keep the selection valid once the registry arrives.
+   *
+   * If a stored selection is no longer registered, fall back to the first registered mock rather than
+   * leaving the picker pointing at an agent that cannot be built.
+   */
+  useEffect(() => {
+    if (registryAgents.length === 0) {
+      return;
+    }
+    const registered = new Set(registryAgents.map((agent) => agent.id));
+    setSelectedStrategy((current) =>
+      registered.has(current) ? current : (Object.keys(strategyLabels) as Strategy[])[0],
+    );
+  }, [registryAgents]);
+
   useEffect(() => {
     let disposed = false;
     let unlistenTelemetry: (() => void) | undefined;
@@ -841,6 +892,37 @@ const App = () => {
       </header>
 
       <main className="main-content">
+        {/*
+         * The catalog section.
+         *
+         * It sits above the run controls on purpose: what this lab can evaluate, and what each number
+         * actually measures, is the first thing a user should be able to read. Both panels are fed by
+         * the backend registries, so neither can claim an agent or a benchmark the runtime cannot
+         * build.
+         */}
+        <section className="panel catalog-panel">
+          <div className="panel-heading">
+            <h2>WHAT THIS LAB CAN EVALUATE</h2>
+            <span className="muted">
+              {registryAgents.length} AGENTS / {registryBenchmarks.length} BENCHMARKS
+            </span>
+          </div>
+          {registryError ? (
+            <p className="error-banner">{registryError}</p>
+          ) : (
+            <div className="catalog-columns">
+              <div className="catalog-column">
+                <h3 className="catalog-column-title">Agents</h3>
+                <AgentCatalog agents={registryAgents} />
+              </div>
+              <div className="catalog-column">
+                <h3 className="catalog-column-title">Benchmarks</h3>
+                <BenchmarkCatalogPanel benchmarks={registryBenchmarks} />
+              </div>
+            </div>
+          )}
+        </section>
+
         <section className="hero-panel panel">
           <div className="hero-copy">
             <p className="eyebrow">VERTICAL SLICE / CONTROL DECK</p>
@@ -985,14 +1067,34 @@ const App = () => {
                 id="strategy"
                 value={selectedStrategy}
                 onChange={(event) => setSelectedStrategy(event.target.value as Strategy)}
-                disabled={isRunning}
+                disabled={isRunning || strategies.length === 0}
               >
                 {strategies.map((item) => (
                   <option key={item.value} value={item.value}>{item.label}</option>
                 ))}
               </select>
             </div>
-            <p className="field-description">{strategy.description}</p>
+            {strategy ? (
+              <>
+                <p className="field-description">{strategy.description}</p>
+                {/*
+                 * The category travels with the option, not just the name. A mock labelled "Sandbox
+                 * escape probe" produces a count of escape attempts — a measurement of this lab's
+                 * boundary, not of a model's ability. Showing the category here stops the number
+                 * below from being read as a capability score.
+                 */}
+                <p className="field-description field-description-quiet">
+                  Reports: {strategy.categoryLabel}.{" "}
+                  {strategy.measuresAModel
+                    ? "This is a model capability measurement."
+                    : "This measures lab infrastructure, not a model."}
+                </p>
+              </>
+            ) : (
+              <p className="field-description">
+                {registryError ?? "Loading the agent registry…"}
+              </p>
+            )}
             <div className="card-footer">
               <span>PROVIDER SEED</span>
               <strong>{benchmark?.seed ?? "—"}</strong>

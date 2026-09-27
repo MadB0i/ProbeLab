@@ -17,8 +17,9 @@ mod commands;
 mod provider;
 
 pub use commands::{
-    get_provider_status, get_result, get_run_metadata, list_benchmarks, run_benchmark,
-    subscribe_telemetry,
+    get_provider_status, get_result, get_run_metadata, list_agents, list_benchmark_details,
+    list_benchmarks, list_providers, run_benchmark, subscribe_telemetry, AgentSummary,
+    BenchmarkDetail, ProviderSummary,
 };
 pub use provider::{
     ModelRunConfig, ModelRunConfigError, ProviderConnectionStatus, ProviderStatus,
@@ -146,7 +147,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            list_agents,
+            list_benchmark_details,
             list_benchmarks,
+            list_providers,
             get_provider_status,
             run_benchmark,
             get_result,
@@ -159,7 +163,11 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::new_run_id;
+    use super::{
+        list_agents, list_benchmark_details, list_providers, new_run_id, AgentSummary,
+        BenchmarkDetail, ProviderSummary,
+    };
+    use probelab_lab::{AgentCategory, AgentRegistry};
 
     #[test]
     fn run_ids_include_a_monotonic_counter() {
@@ -168,5 +176,173 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.contains('-'));
         assert!(second.contains('-'));
+    }
+
+    /// The command center's agent list is the registry, not a copy of it.
+    ///
+    /// This is the test that would have caught the original bug. The UI used to hold a hand-written
+    /// array of strategies that drifted from the mock enum and the IPC allowlist, so the dropdown could
+    /// offer an agent the backend refused. Deriving the list makes drift impossible rather than
+    /// merely unlikely, and this asserts the derivation reaches the IPC boundary intact.
+    #[test]
+    fn the_agent_list_the_ui_receives_is_the_registry() {
+        let summaries = list_agents();
+        let specs = AgentRegistry::built_in().specs();
+        assert_eq!(
+            summaries.len(),
+            specs.len(),
+            "the UI saw a different agent count"
+        );
+        for (summary, spec) in summaries.iter().zip(specs.iter()) {
+            assert_eq!(summary.id, spec.id);
+            assert_eq!(summary.name, spec.name);
+        }
+    }
+
+    /// The label rule has to survive the IPC boundary, not just exist in Rust.
+    ///
+    /// A `measures_a_model` flag that were dropped or inverted in serialization would let the command
+    /// center present a sandbox probe's integrity count as a model capability score — precisely the
+    /// claim the category system exists to prevent.
+    #[test]
+    fn the_model_claim_flag_survives_serialization() {
+        for summary in list_agents() {
+            let category: AgentCategory =
+                serde_json::from_value(serde_json::Value::String(summary.category.clone()))
+                    .unwrap_or_else(|_| panic!("{} has an unparseable category", summary.id));
+            assert_eq!(
+                summary.measures_a_model,
+                category == AgentCategory::TargetModel,
+                "{} reports measures_a_model inconsistently with its category",
+                summary.id
+            );
+            assert!(!summary.category_label.is_empty());
+        }
+    }
+
+    /// Agent summaries round-trip, because the UI parses them back.
+    #[test]
+    fn an_agent_summary_round_trips_through_the_ipc_encoding() {
+        for summary in list_agents() {
+            let json = serde_json::to_string(&summary).expect("serialize");
+            let restored: AgentSummary = serde_json::from_str(&json).expect("parse");
+            assert_eq!(restored.id, summary.id);
+            assert_eq!(restored.measures_a_model, summary.measures_a_model);
+            assert_eq!(restored.category_label, summary.category_label);
+        }
+    }
+
+    /// No agent summary may carry anything that looks like a credential.
+    #[test]
+    fn an_agent_summary_never_carries_credential_shaped_text() {
+        for summary in list_agents() {
+            let json = serde_json::to_string(&summary).expect("serialize");
+            for marker in ["sk-", "sk-ant", "AIza", "api_key\":", "token\":"] {
+                assert!(
+                    !json.contains(marker),
+                    "{} leaked something credential-shaped into the IPC payload",
+                    summary.id
+                );
+            }
+        }
+    }
+
+    /// A benchmark's declared capability execution reaches the user verbatim.
+    ///
+    /// The reason this matters: a benchmark that authorizes `filesystem.write` without executing it
+    /// must not be renderable in a way that reads like a working sandbox feature. The field exists so
+    /// the honesty is in the row the user is looking at, not only in a document they may not read.
+    #[test]
+    fn capability_execution_reaches_the_ui_verbatim() {
+        for detail in list_benchmark_details() {
+            assert!(
+                ["executed", "authorized_deferred", "not_applicable"]
+                    .contains(&detail.capability_execution.as_str()),
+                "{} reports an unknown execution mode {}",
+                detail.id,
+                detail.capability_execution
+            );
+            assert!(
+                !detail.scoring.is_empty(),
+                "{} has no scoring text",
+                detail.id
+            );
+        }
+    }
+
+    /// Benchmark details and the catalog must not disagree about what exists.
+    #[test]
+    fn benchmark_details_and_the_catalog_agree() {
+        let details: Vec<BenchmarkDetail> = list_benchmark_details();
+        let catalog = probelab_benchmarks::BenchmarkCatalog::new().expect("built-in catalog");
+        let catalog_ids: Vec<String> = catalog
+            .summaries()
+            .iter()
+            .map(|summary| summary.benchmark_id.clone())
+            .collect();
+        let detail_ids: Vec<String> = details.iter().map(|d| d.id.clone()).collect();
+        assert_eq!(
+            catalog_ids, detail_ids,
+            "the catalog and the registry disagree about which benchmarks exist"
+        );
+    }
+
+    /// Every benchmark's reference agent is named, and the UI is told when there is none.
+    ///
+    /// A missing ceiling is not an error, but it must be visible: a benchmark with no reference cannot
+    /// be compared against anything, and a user should see that before running thirty episodes.
+    #[test]
+    fn a_benchmark_without_a_ceiling_says_so() {
+        for detail in list_benchmark_details() {
+            match &detail.reference_agent {
+                Some(reference) => assert!(!reference.is_empty()),
+                None => assert!(
+                    detail.description.len() > 20,
+                    "{} has neither a reference agent nor a description",
+                    detail.id
+                ),
+            }
+        }
+    }
+
+    /// Provider listings carry variable names, never values.
+    #[test]
+    fn provider_summaries_carry_names_not_credentials() {
+        let providers = list_providers();
+        assert!(providers.iter().any(|p| p.id == "anthropic"));
+        assert!(providers.iter().any(|p| p.id == "gemini"));
+        assert!(providers.iter().any(|p| p.id == "openai-compatible"));
+        for ProviderSummary {
+            id,
+            api_key_env,
+            default_base_url,
+            requires_credential,
+            ..
+        } in providers
+        {
+            assert!(!api_key_env.is_empty(), "{id} names no credential variable");
+            assert!(
+                api_key_env
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                "{id} has a variable name that is not a plain identifier: {api_key_env}"
+            );
+            assert!(
+                !default_base_url.contains('?'),
+                "{id} puts a query in its base URL"
+            );
+            assert!(requires_credential);
+        }
+    }
+
+    /// Round-trip check for the provider payload the settings screen parses.
+    #[test]
+    fn a_provider_summary_round_trips() {
+        for provider in list_providers() {
+            let json = serde_json::to_string(&provider).expect("serialize");
+            let restored: ProviderSummary = serde_json::from_str(&json).expect("parse");
+            assert_eq!(restored.id, provider.id);
+            assert_eq!(restored.api_key_env, provider.api_key_env);
+        }
     }
 }

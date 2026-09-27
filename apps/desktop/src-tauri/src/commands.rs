@@ -9,6 +9,8 @@ use probelab_core::{
 };
 use probelab_engine::BenchmarkRunner;
 use probelab_evaluator::GridWorldEvaluator;
+use probelab_lab::AgentRegistry;
+use probelab_model_adapters::ProviderKind;
 use probelab_telemetry::SqliteResultRepository;
 use tauri::{AppHandle, Emitter, State};
 
@@ -26,6 +28,179 @@ pub fn list_benchmarks(state: State<'_, AppState>) -> Vec<BenchmarkSummary> {
 #[tauri::command(rename_all = "snake_case")]
 pub fn get_provider_status(model_config: ModelRunConfig) -> ProviderStatus {
     model_config.provider_status()
+}
+
+/// Returns every agent the lab can evaluate, from the authoritative registry.
+///
+/// # Why the UI does not keep its own list
+///
+/// It used to. `App.tsx` held a hand-written `strategies` array that had to be edited in step with
+/// the mock enum, the IPC allowlist, and the reference policies — four places to add an agent and
+/// three chances to forget one, which produced a dropdown entry the backend then refused. This command
+/// makes the registry the only list, so adding an agent is a one-line change that cannot half-land.
+#[tauri::command(rename_all = "snake_case")]
+pub fn list_agents() -> Vec<AgentSummary> {
+    AgentRegistry::built_in()
+        .specs()
+        .into_iter()
+        .map(AgentSummary::from)
+        .collect()
+}
+
+/// Returns every benchmark with its full metadata rather than the short catalog summary.
+#[tauri::command(rename_all = "snake_case")]
+pub fn list_benchmark_details() -> Vec<BenchmarkDetail> {
+    probelab_benchmarks::BenchmarkRegistry::built_in()
+        .specs()
+        .into_iter()
+        .map(BenchmarkDetail::from)
+        .collect()
+}
+
+/// Returns every provider vendor, with defaults and credential *names* but no credential values.
+#[tauri::command(rename_all = "snake_case")]
+pub fn list_providers() -> Vec<ProviderSummary> {
+    ProviderKind::all()
+        .into_iter()
+        .map(ProviderSummary::from)
+        .collect()
+}
+
+/// Renders an enum as its canonical wire string.
+///
+/// `format!("{:?}")` would be easier and is wrong. Debug gives `SecurityProbe` while the serde
+/// encoding — the one result bundles, replay digests, and every other stored record use — gives
+/// `security_probe`. A payload carrying the Debug form cannot be parsed back with the same decoder
+/// that reads everything else, and a wire format that changes when someone reformats a struct is not a
+/// wire format. Every enum that crosses into a summary goes through here.
+fn wire<T: serde::Serialize>(value: T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| match value {
+            serde_json::Value::String(text) => Some(text),
+            _ => None,
+        })
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+/// One agent as the command center renders it.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSummary {
+    /// Stable identifier, used to build the agent.
+    pub id: String,
+    /// Name shown in the picker.
+    pub name: String,
+    /// What the agent is, in one sentence.
+    pub description: String,
+    /// Which family it belongs to, which is what determines what its score means.
+    pub category: String,
+    /// The family's display label.
+    pub category_label: String,
+    /// Whether its score is a claim about a model.
+    pub measures_a_model: bool,
+    /// How it decides: `in_process_deterministic` or `remote_model`.
+    pub execution: String,
+    /// Whether deciding needs a network.
+    pub requires_network: bool,
+    /// Benchmarks this agent is scoped to, or empty when it applies to all.
+    pub applicable_benchmarks: Vec<String>,
+}
+
+impl From<probelab_lab::AgentSpec> for AgentSummary {
+    fn from(spec: probelab_lab::AgentSpec) -> Self {
+        Self {
+            id: spec.id,
+            name: spec.name,
+            description: spec.description,
+            category: wire(spec.category),
+            category_label: spec.category.label().to_owned(),
+            measures_a_model: spec.category.measures_a_model(),
+            execution: wire(spec.execution),
+            requires_network: spec.execution.requires_network(),
+            applicable_benchmarks: spec.applicable_benchmarks,
+        }
+    }
+}
+
+/// One benchmark with the metadata a command-center row needs.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkDetail {
+    /// Stable identifier.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// One-line description.
+    pub description: String,
+    /// What family it measures.
+    pub category: String,
+    /// The single capability dimension this benchmark isolates.
+    pub capability_dimension: String,
+    /// Whether the capabilities it declares are actually executed or only authorized.
+    pub capability_execution: String,
+    /// How an episode is scored, in words.
+    pub scoring: String,
+    /// The registered reference agent, when one exists.
+    pub reference_agent: Option<String>,
+    /// What replay means here, which is not always "re-run it".
+    pub replay_support: String,
+    /// The platforms it can run on.
+    pub platform_requirements: String,
+    /// Human-readable limits.
+    pub limits: std::collections::BTreeMap<String, String>,
+    /// The schema version.
+    pub version: String,
+}
+
+impl From<probelab_benchmarks::BenchmarkSpec> for BenchmarkDetail {
+    fn from(spec: probelab_benchmarks::BenchmarkSpec) -> Self {
+        Self {
+            id: spec.id,
+            name: spec.name,
+            description: spec.description,
+            category: wire(spec.category),
+            capability_dimension: spec.capability_dimension,
+            // The whole point of this field reaching the UI: a user must be able to see that a
+            // benchmark declaring `filesystem.write` authorizes it without executing it, rather than
+            // discovering that from a score.
+            capability_execution: wire(spec.capability_execution),
+            scoring: spec.scoring,
+            reference_agent: spec.reference_agent.clone(),
+            replay_support: wire(spec.replay_support),
+            platform_requirements: wire(spec.platform_requirements),
+            limits: spec.limits,
+            version: spec.version,
+        }
+    }
+}
+
+/// One provider vendor, with no credential material.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSummary {
+    /// Stable identifier.
+    pub id: String,
+    /// Name shown in the picker.
+    pub display_name: String,
+    /// The endpoint a new configuration starts from.
+    pub default_base_url: String,
+    /// The environment variable to read the key from. A name, never a value.
+    pub api_key_env: String,
+    /// Whether a call needs a credential.
+    pub requires_credential: bool,
+}
+
+impl From<ProviderKind> for ProviderSummary {
+    fn from(kind: ProviderKind) -> Self {
+        Self {
+            id: kind.id().to_owned(),
+            display_name: kind.display_name().to_owned(),
+            default_base_url: kind.default_base_url().to_owned(),
+            api_key_env: kind.default_api_key_env().to_owned(),
+            requires_credential: kind.requires_credential(),
+        }
+    }
 }
 
 /// Validates a tagged model configuration and starts one benchmark run.
