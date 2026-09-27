@@ -32,6 +32,7 @@ export type RouteId =
   | "agents"
   | "benchmarks"
   | "comparison"
+  | "settings"
   | "providers"
   | "arena"
   | "security"
@@ -78,6 +79,13 @@ const ROUTES: { id: RouteId; label: string; title: string; purpose: string }[] =
     title: "Comparison",
     purpose:
       "Stored experiments, compared. Two runs are only ranked when they measured the same thing; where that does not hold, the panel says which dimension differs instead of putting a number on it.",
+  },
+  {
+    id: "settings",
+    label: "SETTINGS",
+    title: "Settings",
+    purpose:
+      "The defaults future experiments and runs start from. Every value here is validated and stored by the backend; read-only facts are shown with the reason they cannot be changed.",
   },
   {
     id: "providers",

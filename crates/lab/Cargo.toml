@@ -24,8 +24,9 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# A real dependency, not a dev-dependency: the settings store persists to SQLite at run time.
+rusqlite.workspace = true
 
 [dev-dependencies]
-rusqlite.workspace = true
 tokio.workspace = true
 wiremock.workspace = true

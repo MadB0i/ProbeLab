@@ -320,6 +320,124 @@ export async function compareExperiments(
   });
 }
 
+// # Settings
+//
+// The settings document is a backend store, not a mirror of frontend state. Every read comes from
+// SQLite and every write is validated in the core crate before it is persisted, so a value typed into
+// a field here has no effect until the backend has accepted it. There is deliberately no local
+// "apply" that skips the round trip.
+
+export type SeedBehaviour = "planner_chosen" | "fixed";
+export type ConnectedProvider = "openai_compatible";
+export type DefaultRunMode = "mock" | "connected";
+export type SettingScope = "editable" | "read_only";
+
+export type ExperimentDefaults = {
+  episodes: number;
+  seedBehaviour: SeedBehaviour;
+  rootSeed: number;
+};
+
+export type ProviderDefaults = {
+  provider: ConnectedProvider;
+  baseUrl: string;
+  apiKeyEnv: string;
+  model: string;
+  timeoutSeconds: number;
+};
+
+/**
+ * The stored settings.
+ *
+ * There is no field here that could hold a credential, and there is not going to be one: the backend
+ * type is built so that a key has nowhere to go. `apiKeyEnv` is the *name* of an environment variable
+ * — a label an operator needs in order to fix a missing credential — not its value.
+ */
+export type LabSettings = {
+  schemaVersion: number;
+  experimentDefaults: ExperimentDefaults;
+  providerDefaults: ProviderDefaults;
+  defaultRunMode: DefaultRunMode;
+};
+
+export type SettingEntry<T> = {
+  id: string;
+  value: T;
+  scope: SettingScope;
+  readOnlyReason: string | null;
+};
+
+export type ProviderState = {
+  provider: string;
+  model: string;
+  configured: boolean;
+  status: string;
+  message: string;
+  credentialSource: string;
+  /** Whether a credential is present in the environment. A fact, never the credential. */
+  credentialPresent: boolean;
+};
+
+export type ExperimentDefaultsView = {
+  episodes: SettingEntry<number>;
+  seedBehaviour: SettingEntry<SeedBehaviour>;
+  rootSeed: SettingEntry<number>;
+  maxEpisodes: number;
+  /** The seed that will actually be sent, or null when the planner chooses. */
+  effectiveRootSeed: number | null;
+};
+
+export type ProviderDefaultsView = {
+  provider: SettingEntry<ConnectedProvider>;
+  baseUrl: SettingEntry<string>;
+  apiKeyEnv: SettingEntry<string>;
+  model: SettingEntry<string>;
+  timeoutSeconds: SettingEntry<number>;
+  state: ProviderState;
+  secretPolicy: string;
+};
+
+export type ReadOnlyFact = {
+  id: string;
+  label: string;
+  value: string;
+  reason: string;
+};
+
+export type SettingsView = {
+  settings: LabSettings;
+  experimentDefaults: ExperimentDefaultsView;
+  providerDefaults: ProviderDefaultsView;
+  defaultRunMode: SettingEntry<DefaultRunMode>;
+  readOnlyFacts: ReadOnlyFact[];
+  isDefault: boolean;
+};
+
+/**
+ * A structured settings error.
+ *
+ * A tagged shape rather than a string, so the panel can point at the control that produced it.
+ * `field` is the dotted identifier of a setting, matching the `id` of a `SettingEntry`.
+ */
+export type SettingsCommandError = {
+  kind: "invalid" | "storage";
+  detail:
+    | { field: string | null; reason: string }
+    | { reason: string };
+};
+
+export async function readSettings(): Promise<SettingsView> {
+  return invoke<SettingsView>("read_settings");
+}
+
+export async function applySettings(settings: LabSettings): Promise<SettingsView> {
+  return invoke<SettingsView>("apply_settings", { request: { settings } });
+}
+
+export async function resetSettings(): Promise<SettingsView> {
+  return invoke<SettingsView>("reset_settings");
+}
+
 export async function runExperiment(request: {
   benchmarkId: string;
   agentId: string;

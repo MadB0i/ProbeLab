@@ -156,10 +156,14 @@
     {
       "id": "settings",
       "area": "ui",
-      "status": "not-implemented",
-      "command": null,
-      "summary": "No settings panel. Provider configuration is currently per-run.",
-      "tests": []
+      "status": "complete",
+      "command": "read_settings",
+      "summary": "Real settings, stored in their own SQLite file and validated in the core crate before anything is written. Editable: default episode count, seed behaviour (planner-chosen or fixed) and its value, provider protocol, base URL, model, request timeout, the name of the environment variable holding the API key, and which provider the command center offers first. The command center starts from these values, so a change genuinely affects future experiments and connected runs -- previously these were hard-coded in React and lost on every launch. Read-only and shown with the reason: results and settings storage paths, the credential policy, log verbosity (RUST_LOG, read at start-up), and platform containment support. Deliberately not configurable: sampling temperature and max completion tokens, which are fixed at 0 and 200 so a run stays comparable with another. There is no credential field anywhere in the document -- the key is read from the process environment at run time, and the type has nowhere to put one. Reset replaces one settings row and cannot reach results, telemetry, or replay data, which is asserted by storing a result in the same file and checking it afterwards.",
+      "tests": [
+        "crates/lab/tests/settings.rs",
+        "apps/desktop/src/SettingsPanel.test.tsx",
+        "apps/desktop/src-tauri/src/settings.rs"
+      ]
     },
     {
       "id": "provider-openai-compatible",

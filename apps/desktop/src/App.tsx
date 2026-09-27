@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AppShell } from "./AppShell";
 import { ComparisonPanel } from "./ComparisonPanel";
+import { SettingsPanel } from "./SettingsPanel";
 import { AgentCatalog } from "./AgentCatalog";
 import { BenchmarkCatalog as BenchmarkCatalogPanel } from "./BenchmarkCatalog";
 import {
@@ -20,7 +21,7 @@ import { BrainPanel } from "./BrainPanel";
 import { ArenaPanel } from "./ArenaPanel";
 import { SecurityPanel } from "./SecurityPanel";
 import { ReplayPanel } from "./ReplayPanel";
-import { replayArenaMatch, type Replay } from "./api";
+import { readSettings, replayArenaMatch, type Replay } from "./api";
 import {
   latestSecurityReport,
   listSecurityProbes,
@@ -373,13 +374,40 @@ const strategyLabels: Record<Strategy, string> = {
   forbidden_action_spam: "Forbidden action spam",
 };
 
-/** Defaults mirror `OpenAiCompatibleConfig::default` on the Rust side. */
-const DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
-const DEFAULT_API_KEY_ENV = "OPENAI_COMPATIBLE_API_KEY";
-const DEFAULT_MODEL_NAME = "local-model";
-const DEFAULT_TIMEOUT_SECONDS = 30;
-const DEFAULT_TEMPERATURE = 0;
-const DEFAULT_MAX_TOKENS = 200;
+/**
+ * Provider field placeholders, not defaults.
+ *
+ * These used to be the defaults — the values a run started with — and that was the bug this milestone
+ * fixed. They were React state, so they were lost on every launch, and they were a second copy of
+ * `ProviderDefaults::default()` in Rust, so the two could disagree about what the lab's own defaults
+ * were. Now the real values come from the backend at start-up and these strings are only what an
+ * empty field shows before that arrives.
+ */
+const BASE_URL_PLACEHOLDER = "http://127.0.0.1:11434/v1";
+const API_KEY_ENV_PLACEHOLDER = "OPENAI_COMPATIBLE_API_KEY";
+const MODEL_NAME_PLACEHOLDER = "local-model";
+
+/**
+ * A security sweep's own fixed shape.
+ *
+ * Named rather than left as bare numbers at the call site, because a bare `2` next to a stored episode
+ * count invites someone to "fix" it by pointing it at the setting — which would be wrong, as the
+ * comment there explains.
+ */
+const SECURITY_SWEEP_EPISODES = 2;
+const SECURITY_SWEEP_SEED = 11;
+
+/**
+ * Sampling parameters, fixed for every connected run.
+ *
+ * These are real values the transport layer honours and the settings page does not expose. That is a
+ * deliberate omission rather than an oversight: a temperature of 0 with a fixed token ceiling is what
+ * makes a run reproducible, and making either editable would let someone produce a result that cannot
+ * be compared with another without being told why. A value that must not vary does not belong in a
+ * settings form.
+ */
+const SAMPLING_TEMPERATURE = 0;
+const MAX_COMPLETION_TOKENS = 200;
 
 const formatError = (error: unknown): string => {
   if (error instanceof Error) {
@@ -616,10 +644,15 @@ const App = () => {
 
   const [benchmarksError, setBenchmarksError] = useState<string | null>(null);
   const [selectedStrategy, setSelectedStrategy] = useState<Strategy>("optimal");
-  const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE_URL);
-  const [apiKeyEnv, setApiKeyEnv] = useState(DEFAULT_API_KEY_ENV);
-  const [connectedModel, setConnectedModel] = useState(DEFAULT_MODEL_NAME);
-  const [timeoutSeconds, setTimeoutSeconds] = useState(DEFAULT_TIMEOUT_SECONDS);
+  // Seeded empty, then filled from the backend's stored settings. These are the values a *run* will
+  // use, which is deliberately separate from the settings a *page* shows: someone may change the
+  // default on the settings page and still want to override it for the run in front of them. What
+  // the settings page must never be is the only place these can come from — hence the load below.
+  const [baseUrl, setBaseUrl] = useState("");
+  const [apiKeyEnv, setApiKeyEnv] = useState("");
+  const [connectedModel, setConnectedModel] = useState("");
+  const [timeoutSeconds, setTimeoutSeconds] = useState(30);
+  const [defaultEpisodes, setDefaultEpisodes] = useState(5);
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
   const [providerStatusError, setProviderStatusError] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
@@ -695,8 +728,8 @@ const App = () => {
       api_key_env: apiKeyEnv.trim(),
       model: connectedModel.trim(),
       timeout_seconds: timeoutSeconds,
-      temperature: DEFAULT_TEMPERATURE,
-      max_tokens: DEFAULT_MAX_TOKENS,
+      temperature: SAMPLING_TEMPERATURE,
+      max_tokens: MAX_COMPLETION_TOKENS,
     }),
     [baseUrl, apiKeyEnv, connectedModel, timeoutSeconds],
   );
@@ -884,7 +917,9 @@ const App = () => {
       const model = await runExperiment({
         benchmarkId: benchmark.benchmark_id,
         agentId: selectedStrategy,
-        episodes: 5,
+        // From the stored settings rather than a constant, so the episode count a person set on the
+        // settings page is the one a run actually uses.
+        episodes: defaultEpisodes,
         rootSeed: null,
       });
       setBrain(model);
@@ -952,8 +987,12 @@ const App = () => {
     try {
       const report = await runSecuritySweep({
         benchmarkId: securityBenchmark,
-        seed: 11,
-        episodes: 2,
+        seed: SECURITY_SWEEP_SEED,
+        // Deliberately not the stored episode default. A probe's episodes are not a statistical
+        // sample — a sweep asks "does the boundary hold", and running it a hundred times does not make
+        // the answer more true, it just takes a hundred times as long. Exposing this as an experiment
+        // setting would invite someone to tune a number that has no meaning to tune.
+        episodes: SECURITY_SWEEP_EPISODES,
       });
       setSecurityReport(report);
     } catch (error) {
@@ -1037,6 +1076,45 @@ const App = () => {
    * command center showing an empty agent list with no error reads as "this lab has no agents" — a
    * claim about the product that is both wrong and worse than a visible fault.
    */
+  /**
+   * Load the stored settings, and start from them.
+   *
+   * This is the point of the settings milestone. The provider fields and the episode count used to be
+   * constants in this file, which meant they were lost on every launch and were a second copy of the
+   * Rust defaults that could drift from them. Now the backend owns them and this component starts from
+   * whatever was stored.
+   *
+   * A failure here is not fatal and not silent: the fields keep their placeholders and the connected
+   * run button stays disabled, because a run sent with an empty base URL would be refused anyway. The
+   * alternative — falling back to a hardcoded copy — would reintroduce exactly the drift this removed.
+   */
+  useEffect(() => {
+    let active = true;
+    readSettings()
+      .then((view) => {
+        if (!active) {
+          return;
+        }
+        setBaseUrl(view.settings.providerDefaults.baseUrl);
+        setApiKeyEnv(view.settings.providerDefaults.apiKeyEnv);
+        setConnectedModel(view.settings.providerDefaults.model);
+        setTimeoutSeconds(view.settings.providerDefaults.timeoutSeconds);
+        setDefaultEpisodes(view.settings.experimentDefaults.episodes);
+      })
+      .catch(() => {
+        if (active) {
+          // Deliberately no fallback values: an empty field the user can see and correct is better
+          // than a plausible-looking default that silently disagrees with the stored settings.
+          setBaseUrl("");
+          setApiKeyEnv("");
+          setConnectedModel("");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   useEffect(() => {
     let active = true;
     Promise.all([listAgents(), listBenchmarkDetails()])
@@ -1807,6 +1885,11 @@ const App = () => {
           comparison: (
             <div className="route-stack">
               <ComparisonPanel />
+            </div>
+          ),
+          settings: (
+            <div className="route-stack">
+              <SettingsPanel />
             </div>
           ),
           providers: (

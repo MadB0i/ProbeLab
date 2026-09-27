@@ -29,6 +29,9 @@ mod probes;
 mod replay;
 pub mod runner;
 mod security;
+pub mod settings;
+pub mod settings_store;
+pub mod settings_view;
 mod view;
 
 pub use agents::{
@@ -71,6 +74,15 @@ pub use runner::{
 pub use security::{
     all_probes, probes_for, run_probe, sweep, BoundaryOutcome, SecurityLabError, SecurityLabReport,
     SecurityProbeReport, SecurityProbeSpec,
+};
+pub use settings::{
+    ConnectedProvider, DefaultRunMode, ExperimentDefaults, LabSettings, ProviderDefaults,
+    ReadOnlyFact, SeedBehaviour, SettingScope, SettingsError, MAX_DEFAULT_EPISODES,
+    MAX_TIMEOUT_SECONDS, MIN_TIMEOUT_SECONDS, SETTINGS_SCHEMA_VERSION,
+};
+pub use settings_store::SqliteSettingsStore;
+pub use settings_view::{
+    ExperimentDefaultsView, ProviderDefaultsView, ProviderState, SettingEntry, SettingsView,
 };
 pub use view::{
     BrainReadModel, DecisionView, EpisodeFailureView, EpisodeView, ExperimentView, SecuritySummary,

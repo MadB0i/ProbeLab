@@ -78,6 +78,7 @@ question instead of stacking all of them into one long page:
 | Agents | Every agent from the authoritative registry, with what each one's number measures. |
 | Benchmarks | Every registered benchmark, and the selected one. |
 | Providers | The provider protocols the lab speaks. Credentials are read from the environment by the backend and never reach this page. |
+| Settings | The defaults future experiments and runs start from, stored and validated by the backend. |
 | Arena | Real matches through the engine. The board shown is the position the engine recorded. |
 | Security | Registered probes run through the real broker and sandbox path. |
 | Replay | Deterministic reconstruction of recorded runs. |
@@ -187,7 +188,14 @@ Stated plainly, because a laboratory that hides its limits is not one you can re
   evaluation seed pools and Wilson interval, and keeps the per-episode failure handling the Harness
   lacks, because a real run must survive a failed episode.
 - **External model nondeterminism** is not reproducible, by anyone.
-- **No comparison or settings panel exists yet.**
+- **Settings cannot move stored data or hold a credential.** The storage paths, the credential policy,
+  log verbosity, and platform containment support are shown read-only with the reason they are fixed.
+  Sampling temperature and completion ceiling are not configurable at all, because fixing them is what
+  makes two runs comparable. There is no field anywhere in the settings document that could hold an
+  API key — the key is read from the process environment at run time.
+- **A settings change affects future runs, not recorded ones.** A result already stored is immutable
+  and nothing on the settings page can reach it; reset replaces one row in the settings store, which is
+  a separate file from the results database.
 - **No human seat in the arena**, and no LLM-powered Brain. The Brain is deterministic
   orchestration — it has no model behind it and does not pretend to.
 

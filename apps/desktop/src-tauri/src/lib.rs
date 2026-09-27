@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use probelab_benchmarks::BenchmarkCatalog;
 use probelab_core::{TelemetryEvent, TestResult};
+use probelab_lab::SqliteSettingsStore;
 use probelab_telemetry::{SqliteResultRepository, SqliteTelemetryRecorder};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -17,9 +18,11 @@ mod arena;
 mod brain;
 mod comparison;
 use comparison::{compare_experiments, list_comparable_experiments};
+use settings::{apply_settings, read_settings, reset_settings};
 mod commands;
 mod provider;
 mod security;
+mod settings;
 
 pub use arena::{
     get_arena_match, latest_arena_match, list_arena_agents, list_arena_games, play_arena_match,
@@ -46,6 +49,12 @@ pub use security::{
 };
 
 const DATABASE_FILE_NAME: &str = "probelab.sqlite3";
+/// Settings live in their own file rather than in the results database.
+///
+/// Not tidiness: a settings reset must be incapable of touching a recorded result, and the clearest
+/// way to guarantee that is for the two to have no shared file to write to. It also means a corrupt
+/// settings row cannot be read through the results API at all.
+const SETTINGS_FILE_NAME: &str = "probelab-settings.sqlite3";
 const RECENT_EVENT_LIMIT: usize = 256;
 static RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -94,6 +103,16 @@ pub struct AppState {
     recorder: Arc<SqliteTelemetryRecorder>,
     results: Arc<SqliteResultRepository>,
     recent_events: RecentEventBuffer,
+    /// The durable settings store.
+    ///
+    /// A separate store, in a separate file, from `results`. Separate because results carry an
+    /// immutability trigger and settings do not, and because a settings reset must be structurally
+    /// incapable of reaching a measurement.
+    pub settings: Arc<SqliteSettingsStore>,
+    /// Where the settings are stored, so the settings page can report the real path.
+    pub settings_path: std::path::PathBuf,
+    /// Where results are stored, so the settings page can report the real path.
+    pub results_path: std::path::PathBuf,
 }
 
 #[derive(Clone, Serialize)]
@@ -166,7 +185,18 @@ pub fn run() {
                 },
             )?);
             let results = Arc::new(SqliteResultRepository::new(&database_path)?);
-            // Crash recovery, once, before anything else can read a lifecycle.
+            // Settings live in their own file. Opened here so a failure to read them is a start-up
+            // error rather than a surprise the first time someone opens the settings page, and so the
+            // real path can be reported on that page as a read-only fact.
+            let settings_path = app_data_dir.join(SETTINGS_FILE_NAME);
+            let settings = Arc::new(
+                SqliteSettingsStore::open(&settings_path).map_err(|error| {
+                    format!(
+                        "could not open the settings store at {}: {error}",
+                        settings_path.display()
+                    )
+                })?,
+            );
             //
             // A row still saying `running` at start-up is provably wrong: nothing is running. Left
             // alone it would make a crashed run indistinguishable from a completed one, which is the
@@ -202,15 +232,21 @@ pub fn run() {
                 recorder,
                 results,
                 recent_events,
+                settings,
+                settings_path: settings_path.clone(),
+                results_path: database_path,
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            apply_settings,
             brain_panel,
             compare_experiments,
             get_experiment,
             list_comparable_experiments,
             list_experiments,
+            read_settings,
+            reset_settings,
             run_experiment,
             list_agents,
             list_benchmark_details,
@@ -232,7 +268,8 @@ mod tests {
         list_agents, list_benchmark_details, list_providers, new_run_id, AgentSummary,
         BenchmarkDetail, ProviderSummary,
     };
-    use probelab_lab::{AgentCategory, AgentRegistry};
+    use probelab_lab::AgentCategory;
+    use probelab_lab::AgentRegistry;
 
     #[test]
     fn run_ids_include_a_monotonic_counter() {
