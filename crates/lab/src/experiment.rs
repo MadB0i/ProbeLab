@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::events::{EventSource, LabEvent, LabTimeline, Severity};
+
 use probelab_core::ContainmentFailureKind;
 
 /// The lifecycle of one experiment.
@@ -194,6 +196,12 @@ pub struct ExperimentManager {
     started: Instant,
     /// Registered cleanup steps, run in reverse order so nested resources unwind properly.
     cleanups: Vec<CleanupStep>,
+    /// The run's unified event timeline.
+    ///
+    /// Owned by the manager rather than by the caller so that a run which ends in an early return or
+    /// a panic still has its history, and so that a summary can never quote a lifecycle event the
+    /// timeline does not contain.
+    pub timeline: LabTimeline,
 }
 
 /// One registered cleanup action.
@@ -226,10 +234,12 @@ impl ExperimentManager {
         sandbox_root: std::path::PathBuf,
     ) -> Self {
         let experiment_id = experiment_id.into();
+        let agent_id = target_agent.into();
+        let benchmark_id = benchmark_id.into();
         let record = ExperimentRecord {
             experiment_id: experiment_id.clone(),
-            benchmark_id: benchmark_id.into(),
-            target_agent: target_agent.into(),
+            benchmark_id,
+            target_agent: agent_id.clone(),
             probes,
             episodes_requested: episodes,
             root_seed,
@@ -242,7 +252,18 @@ impl ExperimentManager {
             record,
             started: Instant::now(),
             cleanups: Vec::new(),
+            timeline: LabTimeline::new(),
         };
+        manager.timeline.push(LabEvent::new(
+            0,
+            "experiment.created",
+            EventSource::Experiment,
+            Severity::Info,
+            &format!(
+                "experiment {experiment_id}: benchmark {} agent {agent_id} episodes {episodes} seed {root_seed}",
+                manager.record.benchmark_id
+            ),
+        ));
 
         let root = sandbox_root.clone();
         manager.register_cleanup("remove_sandbox_root", move || {
@@ -292,6 +313,13 @@ impl ExperimentManager {
                     state: self.record.state,
                 })?;
         self.record.state = next;
+        self.timeline.push(LabEvent::new(
+            0,
+            "experiment.advanced",
+            EventSource::Experiment,
+            Severity::Info,
+            &format!("now {}", next.label()),
+        ));
         self.sync_elapsed();
         Ok(next)
     }
@@ -300,12 +328,28 @@ impl ExperimentManager {
     pub fn episode_started(&mut self) {
         self.record.summary.episodes_started =
             self.record.summary.episodes_started.saturating_add(1);
+        let started = self.record.summary.episodes_started;
+        self.timeline.push(LabEvent::new(
+            0,
+            "experiment.episode_started",
+            EventSource::Experiment,
+            Severity::Info,
+            &format!("episode {started}"),
+        ));
     }
 
     /// Records that an episode finished.
     pub fn episode_completed(&mut self) {
         self.record.summary.episodes_completed =
             self.record.summary.episodes_completed.saturating_add(1);
+        let completed = self.record.summary.episodes_completed;
+        self.timeline.push(LabEvent::new(
+            0,
+            "experiment.episode_completed",
+            EventSource::Experiment,
+            Severity::Info,
+            &format!("episode {completed}"),
+        ));
     }
 
     /// Moves to a terminal state with a reason.
@@ -318,12 +362,28 @@ impl ExperimentManager {
                 state: self.record.state,
             });
         }
+        let label = reason.label();
         self.record.state = match reason {
             TerminalReason::Completed => ExperimentState::Completed,
             TerminalReason::Cancelled => ExperimentState::Cancelled,
             _ => ExperimentState::Failed,
         };
         self.record.terminal_reason = Some(reason);
+        // Severity is derived from the reason rather than chosen, so a failed run cannot be recorded
+        // as a clean one. A containment failure is Critical and therefore halting; everything else is
+        // an Error, because a run that did not complete is an error but not a boundary crossing.
+        let severity = match self.record.terminal_reason {
+            Some(TerminalReason::Completed) => Severity::Info,
+            Some(TerminalReason::ContainmentFailure { .. }) => Severity::Critical,
+            _ => Severity::Error,
+        };
+        self.timeline.push(LabEvent::new(
+            0,
+            "experiment.finished",
+            EventSource::Experiment,
+            severity,
+            label,
+        ));
         self.sync_elapsed();
         Ok(())
     }
@@ -351,11 +411,29 @@ impl ExperimentManager {
         while let Some(step) = self.cleanups.pop() {
             self.record.summary.cleanup_steps = self.record.summary.cleanup_steps.saturating_add(1);
             let label = step.label.clone();
-            if let Err(error) = (step.action)() {
-                self.record
-                    .summary
-                    .cleanup_failures
-                    .push(format!("{label}: {error}"));
+            match (step.action)() {
+                Ok(()) => {
+                    self.timeline.push(LabEvent::new(
+                        0,
+                        "experiment.cleanup_step",
+                        EventSource::Experiment,
+                        Severity::Info,
+                        &format!("{label}: released"),
+                    ));
+                }
+                Err(error) => {
+                    // A failed cleanup is an error and is recorded as one. Reporting it as a warning
+                    // would let a leaked sandbox root pass as routine.
+                    let detail = format!("{label}: {error}");
+                    self.record.summary.cleanup_failures.push(detail.clone());
+                    self.timeline.push(LabEvent::new(
+                        0,
+                        "experiment.cleanup_failed",
+                        EventSource::Experiment,
+                        Severity::Error,
+                        &detail,
+                    ));
+                }
             }
         }
     }

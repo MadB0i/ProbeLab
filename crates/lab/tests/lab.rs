@@ -11,10 +11,10 @@ use std::time::Duration;
 
 use probelab_core::Action;
 use probelab_lab::{
-    category_label, probe_request, AnomalyDetector, BrainEvent, BrainState, ExperimentArchive,
-    ExperimentManager, ExperimentPlanError, ExperimentState, LabBrain, PlanRequest, ProbeAgent,
-    ProbeCategory, ProbeContext, ProbeObservation, ProbeOutcome, ProbeRegistry, TerminalReason,
-    MAX_EPISODES,
+    category_label, probe_request, AnomalyDetector, BrainEvent, BrainState, EventSource,
+    ExperimentArchive, ExperimentManager, ExperimentPlanError, ExperimentState, LabBrain, LabEvent,
+    PlanRequest, ProbeAgent, ProbeCategory, ProbeContext, ProbeObservation, ProbeOutcome,
+    ProbeRegistry, Severity, TerminalReason, MAX_EPISODES,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -858,4 +858,65 @@ fn a_probe_request_helper_produces_a_valid_request() {
         .validate()
         .expect("the probe helper must build a valid request");
     assert!(request.game.is_none(), "a probe helper is a grid request");
+}
+/// The timeline is owned by the manager, so a run that ended badly still has its history and the
+/// summary cannot quote something the timeline does not contain.
+#[test]
+fn the_experiment_timeline_records_its_own_lifecycle() {
+    let root = temp_root("lifecycle_timeline");
+    let mut manager = ExperimentManager::create(
+        "exp-1",
+        "grid-world",
+        "optimal",
+        vec!["prompt_injection_basic".to_owned()],
+        2,
+        7,
+        root,
+    );
+    manager.advance().expect("advance");
+    manager.episode_started();
+    manager.episode_completed();
+    manager.finish(TerminalReason::Completed).expect("finish");
+    let summary = manager.cleanup_now().clone();
+
+    let codes: Vec<&str> = manager
+        .timeline
+        .events()
+        .iter()
+        .map(|event| event.code.as_str())
+        .collect();
+    assert!(codes.contains(&"experiment.created"));
+    assert!(codes.contains(&"experiment.episode_started"));
+    assert!(codes.contains(&"experiment.episode_completed"));
+    assert!(codes.contains(&"experiment.finished"));
+    assert!(codes.contains(&"experiment.cleanup_step"));
+
+    // The summary's counters and the timeline's events are two views of one history, so they cannot
+    // drift apart the way two independently-maintained records would.
+    let started = codes
+        .iter()
+        .filter(|code| **code == "experiment.episode_started")
+        .count() as u32;
+    assert_eq!(started, summary.episodes_started);
+    let cleaned = codes
+        .iter()
+        .filter(|code| **code == "experiment.cleanup_step")
+        .count() as u32;
+    assert_eq!(cleaned, summary.cleanup_steps);
+    assert!(summary.cleanup_failures.is_empty());
+}
+
+/// A containment failure is Critical and therefore halting; a timeout is an Error and is not.
+///
+/// The distinction matters because a halting event ends a run early. A timed-out run and a
+/// contained one are different facts, and reporting both as the same thing would let a run be
+/// summarised as a clean failure.
+#[test]
+fn a_containment_failure_halts_but_a_timeout_does_not() {
+    let halting = LabEvent::new(0, "x", EventSource::Experiment, Severity::Critical, "");
+    assert!(halting.severity.halts_run());
+    let error = LabEvent::new(0, "x", EventSource::Experiment, Severity::Error, "");
+    assert!(!error.severity.halts_run());
+    let info = LabEvent::new(0, "x", EventSource::Experiment, Severity::Info, "");
+    assert!(!info.severity.halts_run());
 }
