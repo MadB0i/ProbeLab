@@ -1,0 +1,31 @@
+[package]
+name = "probelab-lab"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ProbeLab orchestration layer: the agent registry, Lab Brain, probe agents, and the experiment manager"
+
+[dependencies]
+# The orchestration layer sits above the engine and the adapters, and below the desktop app. It
+# depends on the broker and the sandbox so it can *reason* about boundaries, and it holds no
+# implementation of its own for any of them -- see `SECURITY.md` for why that direction matters.
+probelab-agent = { path = "../agent" }
+probelab-benchmarks = { path = "../benchmarks" }
+probelab-broker = { path = "../broker" }
+probelab-core = { path = "../core" }
+probelab-engine = { path = "../engine" }
+probelab-evaluator = { path = "../evaluator" }
+probelab-model-adapters = { path = "../model-adapters" }
+probelab-sandbox = { path = "../sandbox" }
+probelab-telemetry = { path = "../telemetry" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rusqlite.workspace = true
+tokio.workspace = true
+wiremock.workspace = true

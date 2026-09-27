@@ -2624,6 +2624,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "probelab-lab"
+version = "0.4.1"
+dependencies = [
+ "probelab-agent",
+ "probelab-benchmarks",
+ "probelab-broker",
+ "probelab-core",
+ "probelab-engine",
+ "probelab-evaluator",
+ "probelab-model-adapters",
+ "probelab-sandbox",
+ "probelab-telemetry",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "probelab-model-adapters"
 version = "0.4.1"
 dependencies = [
