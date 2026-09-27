@@ -152,7 +152,12 @@ pub async fn run_experiment(
         episodes: Some(request.episodes),
         root_seed: request.root_seed,
     };
-    surface.set_active(experiment_id.clone());
+    // A failure here means the panel cannot show the run in progress. It does *not* mean the run
+    // cannot happen: the durable record below is what recovery depends on, and the surface is only a
+    // cache. Refusing to run would trade a real measurement for a cosmetic one.
+    if let Err(error) = surface.set_active(experiment_id.clone()) {
+        tracing::error!(error = %error.message, "the command center could not show this run as active");
+    }
 
     // Persist `running` *before* the first episode. This row is what makes crash recovery possible: if
     // the process dies mid-run, this is the evidence the next start uses to conclude the run is
@@ -211,7 +216,12 @@ pub async fn run_experiment(
     })?
     .map_err(|error| BrainCommandError::planning(error.to_string()))?;
 
-    surface.store(run_id.clone(), result.clone());
+    // The experiment is finished and durable by this point. If the in-memory panel cannot be updated,
+    // say so and return the real result: discarding a completed measurement because a cache was
+    // poisoned would be the wrong trade in both directions.
+    if let Err(error) = surface.store(run_id.clone(), result.clone()) {
+        tracing::error!(error = %error.message, "the command center could not retain the finished experiment");
+    }
 
     // Persist the terminal state. A run that reached here is genuinely finished, so this is the one
     // place `completed` is written -- and it is written from the runner's own terminal reason rather
@@ -268,11 +278,16 @@ pub struct BrainSurface {
 
 impl BrainSurface {
     /// The current model, or idle.
+    ///
+    /// Degrades to idle on a poisoned lock. `brain_panel` is the most frequently called command in the
+    /// application, so panicking here on a fault that some other thread caused would take down the
+    /// command center permanently. Idle is the honest state to report when the model cannot be read,
+    /// and the panel already renders it.
     pub fn panel(&self) -> BrainReadModel {
         self.current
             .lock()
-            .expect("brain surface lock")
-            .clone()
+            .ok()
+            .and_then(|current| current.clone())
             .unwrap_or_else(BrainReadModel::idle)
     }
 
@@ -280,7 +295,7 @@ impl BrainSurface {
     pub fn experiment(&self, experiment_id: &str) -> Option<BrainReadModel> {
         self.history
             .lock()
-            .expect("brain surface lock")
+            .ok()?
             .iter()
             .find(|(id, _)| id == experiment_id)
             .map(|(_, model)| model.clone())
@@ -290,28 +305,45 @@ impl BrainSurface {
     pub fn experiment_ids(&self) -> Vec<String> {
         self.history
             .lock()
-            .expect("brain surface lock")
-            .iter()
-            .rev()
-            .map(|(id, _)| id.clone())
-            .collect()
+            .map(|history| history.iter().rev().map(|(id, _)| id.clone()).collect())
+            .unwrap_or_default()
     }
 
     /// Records a finished experiment as the current one.
-    pub fn store(&self, experiment_id: String, model: BrainReadModel) {
-        *self.current.lock().expect("brain surface lock") = Some(model.clone());
-        let mut history = self.history.lock().expect("brain surface lock");
+    ///
+    /// Reports on failure instead of panicking. A run that completed is real work with a real result;
+    /// losing the ability to show it in the panel is an availability problem, not a reason to abort the
+    /// process. The durable store is unaffected either way -- this surface is a cache, not the record.
+    pub fn store(
+        &self,
+        experiment_id: String,
+        model: BrainReadModel,
+    ) -> Result<(), BrainCommandError> {
+        let surface_unavailable = || {
+            BrainCommandError::execution(
+            "the command center's state was left locked by an earlier fault and cannot be updated; \
+             the experiment finished and is still stored durably, but this panel will not show it",
+        )
+        };
+        *self.current.lock().map_err(|_| surface_unavailable())? = Some(model.clone());
+        let mut history = self.history.lock().map_err(|_| surface_unavailable())?;
         // Bounded so a long session cannot grow without limit. Twenty is far more than anyone scrolls
         // back through, and a forgotten experiment is better than a slow UI.
         if history.len() >= 20 {
             history.remove(0);
         }
         history.push((experiment_id, model));
+        Ok(())
     }
 
     /// Marks an experiment as in progress so the panel is not idle while it runs.
-    pub fn set_active(&self, experiment_id: String) {
-        let mut current = self.current.lock().expect("brain surface lock");
+    pub fn set_active(&self, experiment_id: String) -> Result<(), BrainCommandError> {
+        let mut current = self.current.lock().map_err(|_| {
+            BrainCommandError::execution(
+                "the command center's state was left locked by an earlier fault; the run can start \
+                 but this panel will not show it in progress",
+            )
+        })?;
         let mut model = current.clone().unwrap_or_else(BrainReadModel::idle);
         model.brain_state = BrainState::Running;
         model.next_intent = format!("executing {experiment_id}");
@@ -319,22 +351,34 @@ impl BrainSurface {
         // run in progress has no results, and a panel that showed zero episodes completed and a
         // fabricated 0% would be lying during exactly the window a user is most likely to look.
         *current = Some(model);
+        Ok(())
     }
 
     /// Installs the recorder the runner should use.
-    pub fn set_recorder(&self, recorder: Arc<dyn probelab_core::TelemetryRecorder>) {
-        *self.recorder.lock().expect("brain surface lock") = Some(recorder);
+    pub fn set_recorder(
+        &self,
+        recorder: Arc<dyn probelab_core::TelemetryRecorder>,
+    ) -> Result<(), BrainCommandError> {
+        *self.recorder.lock().map_err(|_| {
+            BrainCommandError::execution(
+                "the command center's recorder slot was left locked by an earlier fault; telemetry \
+                 cannot be recorded for this session",
+            )
+        })? = Some(recorder);
+        Ok(())
     }
 
     /// The installed recorder, or a no-op one.
     ///
     /// A no-op rather than an error, because a command center with no telemetry sink should still be
-    /// able to run an experiment; the observer's own event stream is what the panel reads.
+    /// able to run an experiment; the observer's own event stream is what the panel reads. This is
+    /// also the path that protects a poisoned recorder slot from crashing a run that has otherwise
+    /// succeeded -- losing telemetry degrades the record, aborting the process loses everything.
     fn recorder(&self) -> Arc<dyn probelab_core::TelemetryRecorder> {
         self.recorder
             .lock()
-            .expect("brain surface lock")
-            .clone()
+            .ok()
+            .and_then(|recorder| recorder.clone())
             .unwrap_or_else(|| Arc::new(DiscardingRecorder))
     }
 }
@@ -421,7 +465,7 @@ mod tests {
         let surface = BrainSurface::default();
         let mut model = BrainReadModel::idle();
         model.brain_state = BrainState::Completed;
-        surface.store("exp-1".to_owned(), model);
+        surface.store("exp-1".to_owned(), model).expect("store");
         assert!(surface.experiment("exp-1").is_some());
         assert_eq!(surface.experiment_ids(), vec!["exp-1".to_owned()]);
         assert_eq!(surface.panel().brain_state, BrainState::Completed);
@@ -431,7 +475,9 @@ mod tests {
     fn the_history_is_bounded_so_a_session_cannot_grow_without_limit() {
         let surface = BrainSurface::default();
         for index in 0..25 {
-            surface.store(format!("exp-{index}"), BrainReadModel::idle());
+            surface
+                .store(format!("exp-{index}"), BrainReadModel::idle())
+                .expect("store");
         }
         let ids = surface.experiment_ids();
         assert!(
@@ -444,8 +490,12 @@ mod tests {
     #[test]
     fn a_newest_first_listing_puts_the_latest_run_first() {
         let surface = BrainSurface::default();
-        surface.store("first".to_owned(), BrainReadModel::idle());
-        surface.store("second".to_owned(), BrainReadModel::idle());
+        surface
+            .store("first".to_owned(), BrainReadModel::idle())
+            .expect("store");
+        surface
+            .store("second".to_owned(), BrainReadModel::idle())
+            .expect("store");
         assert_eq!(
             surface.experiment_ids(),
             vec!["second".to_owned(), "first".to_owned()]
@@ -455,7 +505,9 @@ mod tests {
     #[test]
     fn an_active_experiment_does_not_invent_a_partial_result() {
         let surface = BrainSurface::default();
-        surface.set_active("exp-active".to_owned());
+        surface
+            .set_active("exp-active".to_owned())
+            .expect("activate");
         let panel = surface.panel();
         assert_eq!(panel.brain_state, BrainState::Running);
         assert_eq!(
@@ -479,5 +531,136 @@ mod tests {
         for marker in ["sk-", "AIza", "api_key\":", "password"] {
             assert!(!json.contains(marker), "an event leaked {marker}");
         }
+    }
+
+    /// A poisoned lock is a runtime condition, and the command center must survive it.
+    ///
+    /// This is the most consequential of the three surfaces, because `brain_panel` is the most
+    /// frequently polled command in the application and `recorder()` is read on the path that starts
+    /// every experiment. Panicking on either would mean one fault anywhere in the process takes the
+    /// whole command center down permanently, with every later acquisition panicking too.
+    ///
+    /// The chosen degradations are the honest ones: reads report idle, writes refuse with a typed
+    /// error, and a lost telemetry slot becomes a discarding recorder rather than a dead run. A
+    /// measurement that completed must not be thrown away because a display cache was poisoned.
+    #[test]
+    fn a_poisoned_brain_surface_returns_errors_instead_of_crashing() {
+        use std::sync::Mutex;
+
+        let surface = BrainSurface::default();
+        // The guard must be acquired inside the unwinding closure. A mutex is poisoned when a guard is
+        // dropped during unwinding, so a guard held in the enclosing scope is released normally and the
+        // lock is never poisoned -- a test that looks like it exercises poisoning and does not is worse
+        // than no test.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = surface.current.lock().expect("lock to poison");
+            panic!("a thread that panicked while holding the brain surface lock");
+        }));
+        assert!(outcome.is_err(), "the poisoning panic did not unwind");
+        assert!(
+            surface.current.lock().is_err(),
+            "the lock should be poisoned; the test is not exercising what it claims"
+        );
+
+        // A read degrades to the idle model rather than panicking. The idle model is
+        // `BrainState::Planning`, which is what the panel already shows before any run.
+        let panel = surface.panel();
+        assert_eq!(panel.brain_state, BrainState::Planning);
+        assert!(panel.experiment.is_none());
+        // A write is a typed refusal. `store` writes `current` first, so this is the path that fails.
+        let error = surface
+            .store("exp-1".to_owned(), BrainReadModel::idle())
+            .expect_err("a write must be a typed refusal, not a panic");
+        assert!(!error.code.is_empty());
+        assert!(!error.message.is_empty());
+        // And the surface is still answering, which is the whole point.
+        assert_eq!(surface.panel().brain_state, BrainState::Planning);
+        let _ = Mutex::new(());
+    }
+
+    /// A poisoned recorder slot degrades to discarding telemetry rather than failing a run.
+    ///
+    /// The alternative -- refusing to run because the telemetry slot is stuck -- would trade a
+    /// degraded record for no record at all, and the observer's own event stream is what the panel
+    /// actually reads.
+    #[test]
+    fn a_poisoned_recorder_slot_degrades_instead_of_failing_a_run() {
+        let surface = BrainSurface::default();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = surface.recorder.lock().expect("lock to poison");
+            panic!("a thread that panicked while holding the recorder slot");
+        }));
+        assert!(outcome.is_err(), "the poisoning panic did not unwind");
+        assert!(
+            surface.recorder.lock().is_err(),
+            "the slot should be poisoned"
+        );
+
+        let recorder = surface.recorder();
+        // Usable: recording a real event through it succeeds rather than panicking. The event is one the
+
+        // engine genuinely produced, captured through a recorder installed in the runner, rather than a
+        // hand-built literal -- this test is about lock behaviour, and an assembled event would be a
+        // second thing to keep in sync with the wire format.
+        let event = a_real_telemetry_event();
+        recorder
+            .record(&event)
+            .expect("a discarding recorder accepts events");
+
+        let error = surface
+            .set_recorder(Arc::new(DiscardingRecorder))
+            .expect_err("installing over a poisoned slot must be a typed refusal");
+        assert!(!error.message.is_empty());
+    }
+
+    /// One genuine telemetry event, captured from a real run.
+    ///
+    /// `TelemetryEvent` has no public constructor and no `Default`, deliberately: its field set is a
+    /// wire format that `crates/lab/tests/wire_format.rs` pins. Writing a literal here would create a
+    /// second copy of that field list, free to drift. So this runs an actual experiment through the same
+    /// `LabRunner` the product uses and keeps the first event recorded.
+    fn a_real_telemetry_event() -> probelab_core::TelemetryEvent {
+        use std::sync::Mutex as StdMutex;
+
+        /// Keeps the first event it is handed.
+        #[derive(Clone)]
+        struct CaptureOnce(Arc<StdMutex<Option<probelab_core::TelemetryEvent>>>);
+        impl probelab_core::TelemetryRecorder for CaptureOnce {
+            fn record(&self, event: &probelab_core::TelemetryEvent) -> Result<(), String> {
+                let mut slot = self
+                    .0
+                    .lock()
+                    .map_err(|_| "capture lock poisoned".to_owned())?;
+                if slot.is_none() {
+                    *slot = Some(event.clone());
+                }
+                Ok(())
+            }
+        }
+
+        let slot = Arc::new(StdMutex::new(None));
+        let mut brain = probelab_lab::LabBrain::new();
+        let plan = probelab_lab::PlanRequest {
+            benchmark_id: Some("grid-world".to_owned()),
+            target_agent: Some("optimal".to_owned()),
+            probe_agents: Vec::new(),
+            episodes: Some(1),
+            root_seed: Some(1),
+        };
+        probelab_lab::LabRunner::new()
+            .run(
+                &mut brain,
+                &plan,
+                "capture-run",
+                &probelab_evaluator::GridWorldEvaluator::new(),
+                Arc::new(CaptureOnce(slot.clone())),
+            )
+            .expect("one episode through the real runner");
+        let captured = slot
+            .lock()
+            .expect("read back")
+            .take()
+            .expect("the engine recorded at least one event");
+        captured
     }
 }

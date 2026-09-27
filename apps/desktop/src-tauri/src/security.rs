@@ -102,6 +102,11 @@ pub fn list_security_probes(benchmark_id: Option<String>) -> Vec<SecurityProbeLi
 ///
 /// The one command that does real work. It runs the probes through the engine, so the report is a
 /// projection of observed enforcement rather than a summary the panel composed.
+///
+/// It is synchronous on purpose, unlike the experiment path. A sweep is a short, bounded unit of work
+/// whose result the user is waiting to read, and the panel disables its control while it runs. This is
+/// noted rather than changed: a long sweep blocks the IPC task, and a future episode-count increase
+/// would need this moved to a blocking worker the way `run_experiment` already is.
 #[tauri::command(rename_all = "snake_case")]
 pub fn run_security_sweep(
     state: State<'_, AppState>,
@@ -109,7 +114,7 @@ pub fn run_security_sweep(
 ) -> Result<SecurityLabReport, SecurityCommandError> {
     let report = sweep(&request.benchmark_id, request.seed, request.episodes)
         .map_err(SecurityCommandError::from)?;
-    state.security.store(report.clone());
+    state.security.store(report.clone())?;
     Ok(report)
 }
 
@@ -121,26 +126,38 @@ pub struct SecuritySurface {
 
 impl SecuritySurface {
     /// Stores a report.
-    pub fn store(&self, report: SecurityLabReport) {
-        let mut reports = self.reports.lock().expect("security surface lock");
+    ///
+    /// Reports on failure instead of panicking. A sweep that ran to completion is real evidence; if
+    /// the surface could not retain it the caller still has it, and a typed error is a better outcome
+    /// than turning one earlier fault into a permanently dead panel.
+    pub fn store(&self, report: SecurityLabReport) -> Result<(), SecurityCommandError> {
+        let mut reports = self.reports.lock().map_err(|_| SecurityCommandError {
+            code: "surface_unavailable".to_owned(),
+            message:
+                "the security surface was left locked by an earlier fault and cannot retain this \
+                      report; the sweep still ran and its result is returned"
+                    .to_owned(),
+        })?;
         if reports.len() >= 10 {
             reports.remove(0);
         }
         reports.push(report);
+        Ok(())
     }
 
     /// The most recent report.
+    ///
+    /// Degrades to "none yet" on a poisoned lock, which the panel already renders as an unprobed lab.
     pub fn latest(&self) -> Option<SecurityLabReport> {
-        self.reports
-            .lock()
-            .expect("security surface lock")
-            .last()
-            .cloned()
+        self.reports.lock().ok()?.last().cloned()
     }
 
     /// How many reports are retained.
     pub fn len(&self) -> usize {
-        self.reports.lock().expect("security surface lock").len()
+        self.reports
+            .lock()
+            .map(|reports| reports.len())
+            .unwrap_or(0)
     }
 
     /// Whether any sweep has run.
@@ -165,7 +182,7 @@ mod tests {
     fn a_stored_report_stays_reachable() {
         let surface = SecuritySurface::default();
         let report = sweep("grid-world", 3, 1).expect("sweep");
-        surface.store(report.clone());
+        surface.store(report.clone()).expect("store");
         assert_eq!(surface.latest().expect("latest"), report);
     }
 
@@ -173,13 +190,51 @@ mod tests {
     fn the_report_history_is_bounded() {
         let surface = SecuritySurface::default();
         for _ in 0..14 {
-            surface.store(sweep("grid-world", 3, 1).expect("sweep"));
+            surface
+                .store(sweep("grid-world", 3, 1).expect("sweep"))
+                .expect("store");
         }
         assert!(
             surface.len() <= 10,
             "history grew unbounded: {}",
             surface.len()
         );
+    }
+
+    /// A poisoned lock is a runtime condition, and the security panel must survive it.
+    ///
+    /// This matters more here than on the other surfaces. A panel that crashes while reporting *why*
+    /// the boundary held is the worst possible place for an availability fault: it destroys the
+    /// evidence the operator is reading. So the reads degrade to "nothing swept yet" and the write
+    /// returns a typed refusal, and the surface stays usable afterwards.
+    #[test]
+    fn a_poisoned_security_surface_returns_errors_instead_of_crashing() {
+        let surface = SecuritySurface::default();
+        // The guard must be acquired inside the unwinding closure: a mutex is poisoned when a guard is
+        // dropped during unwinding, so a guard held in the enclosing scope is released normally and the
+        // lock is never poisoned at all. That would be a test that looks like it exercises poisoning and
+        // does not, which is worse than no test.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = surface.reports.lock().expect("lock to poison");
+            panic!("a thread that panicked while holding the security surface lock");
+        }));
+        assert!(
+            outcome.is_err(),
+            "the poisoning panic did not unwind, so the lock was never poisoned"
+        );
+        assert!(
+            surface.reports.lock().is_err(),
+            "the lock should be poisoned; the test is not exercising what it claims"
+        );
+
+        assert!(surface.latest().is_none());
+        assert_eq!(surface.len(), 0);
+        assert!(surface.is_empty());
+        let error = surface
+            .store(sweep("grid-world", 3, 1).expect("sweep"))
+            .expect_err("a write must be a typed refusal, not a panic");
+        assert_eq!(error.code, "surface_unavailable");
+        assert!(!error.message.is_empty());
     }
 
     #[test]

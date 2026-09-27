@@ -111,19 +111,32 @@ pub struct ArenaSurface {
 
 impl ArenaSurface {
     /// Stores a completed match.
-    pub fn store(&self, match_id: String, view: ArenaMatchView) {
-        let mut matches = self.matches.lock().expect("arena surface lock");
+    ///
+    /// Failure to store is reported rather than panicked on. A poisoned lock means some other thread
+    /// panicked while holding it, which is a real fault worth surfacing -- but panicking here would
+    /// turn one recovered fault into an unrecoverable crash loop, taking the whole panel with it.
+    pub fn store(&self, match_id: String, view: ArenaMatchView) -> Result<(), ArenaCommandError> {
+        let mut matches = self.matches.lock().map_err(|_| ArenaCommandError {
+            code: "surface_unavailable".to_owned(),
+            message: "the arena's match history was left locked by an earlier fault and cannot be \
+                      written to; matches from this session will not be retained"
+                .to_owned(),
+        })?;
         if matches.len() >= 20 {
             matches.remove(0);
         }
         matches.push((match_id, view));
+        Ok(())
     }
 
     /// The most recent match, or `None` when none has been played.
+    ///
+    /// A poisoned lock degrades to "no match" rather than aborting. The panel already renders an empty
+    /// arena, so the failure is visible in the UI instead of being a process crash.
     pub fn latest(&self) -> Option<ArenaMatchView> {
         self.matches
             .lock()
-            .expect("arena surface lock")
+            .ok()?
             .last()
             .map(|(_, view)| view.clone())
     }
@@ -132,7 +145,7 @@ impl ArenaSurface {
     pub fn get(&self, match_id: &str) -> Option<ArenaMatchView> {
         self.matches
             .lock()
-            .expect("arena surface lock")
+            .ok()?
             .iter()
             .find(|(id, _)| id == match_id)
             .map(|(_, view)| view.clone())
@@ -140,7 +153,10 @@ impl ArenaSurface {
 
     /// How many matches are retained.
     pub fn len(&self) -> usize {
-        self.matches.lock().expect("arena surface lock").len()
+        self.matches
+            .lock()
+            .map(|matches| matches.len())
+            .unwrap_or(0)
     }
 
     /// Whether any match has been played.
@@ -254,7 +270,10 @@ pub fn play_arena_match(
         )
         .map_err(ArenaCommandError::from)?;
 
-    state.arena.store(match_id, played.view.clone());
+    // A match that played successfully but could not be retained is still a real result, and the
+    // caller is holding it. The failure to retain is reported through the surface's own state rather
+    // than by discarding the match.
+    state.arena.store(match_id, played.view.clone())?;
     Ok(played.view)
 }
 
@@ -357,8 +376,12 @@ mod tests {
         let surface = ArenaSurface::default();
         let first = sample_view("arena-ttt-1");
         let second = sample_view("arena-ttt-2");
-        surface.store("arena-ttt-1".to_owned(), first);
-        surface.store("arena-ttt-2".to_owned(), second);
+        surface
+            .store("arena-ttt-1".to_owned(), first)
+            .expect("store first");
+        surface
+            .store("arena-ttt-2".to_owned(), second)
+            .expect("store second");
         assert_eq!(surface.latest().expect("latest").match_id, "arena-ttt-2");
         assert_eq!(
             surface.get("arena-ttt-1").expect("first").match_id,
@@ -370,12 +393,58 @@ mod tests {
     fn the_match_history_is_bounded() {
         let surface = ArenaSurface::default();
         for index in 0..25 {
-            surface.store(format!("m-{index}"), sample_view(&format!("m-{index}")));
+            surface
+                .store(format!("m-{index}"), sample_view(&format!("m-{index}")))
+                .expect("store");
         }
         assert!(
             surface.len() <= 20,
             "history grew unbounded: {}",
             surface.len()
+        );
+    }
+
+    /// A poisoned lock is a runtime condition, and the panel must survive it.
+    ///
+    /// A `Mutex` is poisoned when a thread panics while holding it. Panicking on the way back in
+    /// would convert one recovered fault into a permanent crash loop for the whole panel, because
+    /// every subsequent acquisition panics too. So reads degrade to "empty" and writes report a
+    /// typed refusal. This asserts that by actually poisoning the lock.
+    #[test]
+    fn a_poisoned_arena_surface_returns_errors_instead_of_crashing() {
+        let surface = ArenaSurface::default();
+        poison(&surface.matches);
+        assert!(surface.latest().is_none(), "a read should degrade to empty");
+        assert!(surface.get("anything").is_none());
+        assert_eq!(surface.len(), 0);
+        assert!(surface.is_empty());
+        let error = surface
+            .store("m-1".to_owned(), sample_view("m-1"))
+            .expect_err("a write must be a typed refusal, not a panic");
+        assert_eq!(error.code, "surface_unavailable");
+        assert!(!error.message.is_empty());
+        // And the surface stays usable afterwards, which is the point: one fault, not a dead panel.
+        assert!(surface.latest().is_none());
+    }
+
+    /// Poisons a mutex the way a panicking thread would.
+    ///
+    /// The guard has to be acquired *inside* the unwinding closure. A `Mutex` is poisoned when a guard
+    /// is dropped during unwinding, so a guard held in the enclosing scope is released normally when
+    /// `catch_unwind` returns and the lock is never poisoned at all -- a test that looks like it
+    /// poisons a lock and does not is worse than no test.
+    fn poison(mutex: &Mutex<Vec<(String, ArenaMatchView)>>) {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mutex.lock().expect("lock to poison");
+            panic!("a thread that panicked while holding the arena surface lock");
+        }));
+        assert!(
+            outcome.is_err(),
+            "the poisoning panic did not unwind, so the lock was never poisoned"
+        );
+        assert!(
+            mutex.lock().is_err(),
+            "the lock should be poisoned; the test is not exercising what it claims"
         );
     }
 

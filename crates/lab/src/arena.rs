@@ -282,16 +282,39 @@ struct MatchCapture {
 
 impl MatchCapture {
     /// Installs the durable recorder this capture forwards to.
-    fn tee_to(&self, sink: Arc<dyn TelemetryRecorder>) {
-        *self.sink.lock().expect("match capture lock") = Some(sink);
+    fn tee_to(&self, sink: Arc<dyn TelemetryRecorder>) -> Result<(), String> {
+        *self
+            .sink
+            .lock()
+            .map_err(|_| CAPTURE_LOCK_POISONED.to_owned())? = Some(sink);
+        Ok(())
     }
 }
+
+/// The message a poisoned capture lock reports.
+///
+/// The capture is written from inside the engine's step loop, so a panic on these locks would abort a
+/// live match -- and because it is called once per ply, a single early fault would poison it for the
+/// rest of the match. Reporting an error instead means the match ends with a stated reason rather than
+/// taking the process with it.
+const CAPTURE_LOCK_POISONED: &str =
+    "the arena match capture was left locked by an earlier fault; this match cannot be recorded";
 
 impl TelemetryRecorder for MatchCapture {
     fn record(&self, event: &TelemetryEvent) -> Result<(), String> {
         // Forward first, so a sink failure is reported as a failure rather than silently dropped while
         // the in-memory copy succeeds.
-        if let Some(sink) = self.sink.lock().expect("match capture lock").clone() {
+        //
+        // The clone is bound to a local *before* the `if let`. Leaving it in the scrutinee would hold
+        // the guard for the whole block under edition 2021 temporary-lifetime rules, which means the
+        // lock would still be held across the `sink.record(..)` call below -- a foreign call that
+        // writes to SQLite and, in the desktop wiring, emits a Tauri event.
+        let sink = self
+            .sink
+            .lock()
+            .map_err(|_| CAPTURE_LOCK_POISONED.to_owned())?
+            .clone();
+        if let Some(sink) = sink {
             sink.record(event)?;
         }
         // Integrity is recorded from the event itself, because that is the only place the environment
@@ -299,7 +322,7 @@ impl TelemetryRecorder for MatchCapture {
         if let Some(kind) = event.integrity_event {
             self.integrity
                 .lock()
-                .expect("match capture lock")
+                .map_err(|_| CAPTURE_LOCK_POISONED.to_owned())?
                 .push(kind);
             let lab_event = LabEvent::integrity(
                 0,
@@ -309,17 +332,17 @@ impl TelemetryRecorder for MatchCapture {
             );
             self.timeline
                 .lock()
-                .expect("match capture lock")
+                .map_err(|_| CAPTURE_LOCK_POISONED.to_owned())?
                 .push(lab_event);
         }
         if let Some(game) = event.game.as_ref() {
             self.plies
                 .lock()
-                .expect("match capture lock")
+                .map_err(|_| CAPTURE_LOCK_POISONED.to_owned())?
                 .push(game.clone());
             self.timeline
                 .lock()
-                .expect("match capture lock")
+                .map_err(|_| CAPTURE_LOCK_POISONED.to_owned())?
                 .push(LabEvent::new(
                     0,
                     "arena.ply_recorded",
@@ -437,6 +460,29 @@ impl ArenaRunner {
         Ok(())
     }
 
+    /// The plies recorded during a match.
+    ///
+    /// Read after the match has already finished, so a poisoned lock is a fault in something else
+    /// rather than a failure of this match. Panicking here would discard a completed match because a
+    /// cache could not be read, so the failure travels through the existing `ArenaRunError::Engine`
+    /// rather than introducing a variant that means nothing outside this file.
+    fn capture_plies(&self, capture: &MatchCapture) -> Result<Vec<GameTelemetry>, String> {
+        capture
+            .plies
+            .lock()
+            .map(|plies| plies.clone())
+            .map_err(|_| CAPTURE_LOCK_POISONED.to_owned())
+    }
+
+    /// The timeline recorded during a match.
+    fn capture_timeline(&self, capture: &MatchCapture) -> Result<LabTimeline, String> {
+        capture
+            .timeline
+            .lock()
+            .map(|timeline| timeline.clone())
+            .map_err(|_| CAPTURE_LOCK_POISONED.to_owned())
+    }
+
     /// Plays one match and projects it.
     ///
     /// Takes both seats as registry identifiers. A caller cannot hand the arena a policy that is not
@@ -474,7 +520,7 @@ impl ArenaRunner {
         // first event rather than being attached part-way through and leaving a gap in the stored
         // record that the panel's copy does not have.
         if let Some(sink) = sink {
-            capture.tee_to(sink);
+            capture.tee_to(sink).map_err(ArenaRunError::Engine)?;
         }
         let config = MatchConfig::new(
             &spec.tested_agent,
@@ -508,12 +554,16 @@ impl ArenaRunner {
         };
         match played {
             Ok(result) => {
-                let plies = capture.plies.lock().expect("match capture lock").clone();
+                let plies = self
+                    .capture_plies(&capture)
+                    .map_err(ArenaRunError::Engine)?;
                 let final_board = plies
                     .last()
                     .map(|ply| ply.board.clone())
                     .unwrap_or_else(empty_tictactoe_board);
-                let mut timeline = capture.timeline.lock().expect("match capture lock").clone();
+                let mut timeline = self
+                    .capture_timeline(&capture)
+                    .map_err(ArenaRunError::Engine)?;
                 timeline.push(LabEvent::new(
                     0,
                     "arena.match_completed",
@@ -562,8 +612,12 @@ impl ArenaRunner {
             Err(error) => {
                 // A failed match is a real outcome with its own record. It is reported as "no result"
                 // and never as a loss, and the illegal move the engine refused is kept if it named one.
-                let plies = capture.plies.lock().expect("match capture lock").clone();
-                let mut timeline = capture.timeline.lock().expect("match capture lock").clone();
+                let plies = self
+                    .capture_plies(&capture)
+                    .map_err(ArenaRunError::Engine)?;
+                let mut timeline = self
+                    .capture_timeline(&capture)
+                    .map_err(ArenaRunError::Engine)?;
                 timeline.push(LabEvent::new(
                     0,
                     "arena.match_failed",
