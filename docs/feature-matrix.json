@@ -145,10 +145,13 @@
     {
       "id": "comparison",
       "area": "ui",
-      "status": "not-implemented",
-      "command": null,
-      "summary": "No comparison panel. Would need stored per-experiment results first.",
-      "tests": []
+      "status": "complete",
+      "command": "compare_experiments",
+      "summary": "Stored experiments can be compared, ranked by success fraction, mean reward, mean turns, and mean invalid actions. A run with no completed episode has no score, no rank, and a stated reason -- it is never shown as 0%. Equal measurements share a rank, and every success fraction carries its Wilson interval, so a one-episode run is visibly weaker evidence rather than a better agent. Two runs are refused outright when their benchmark or root seed differ, because they are not measuring the same thing. Differing agent, adapter, or strategy is a confound rather than a blocker -- refusing that would make the feature useless -- so the comparison is produced and every unheld identity is declared above the rankings. The panel renders the backend decision and computes nothing itself.",
+      "tests": [
+        "crates/lab/tests/comparison.rs",
+        "apps/desktop/src/ComparisonPanel.test.tsx"
+      ]
     },
     {
       "id": "settings",

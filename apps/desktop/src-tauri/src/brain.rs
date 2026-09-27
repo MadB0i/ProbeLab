@@ -160,7 +160,12 @@ pub async fn run_experiment(
     let results = state.results.clone();
     let running_id = run_id.clone();
     let running_benchmark = request.benchmark_id.clone();
+    let running_agent = request.agent_id.clone();
     let running_episodes = request.episodes;
+    // The plan's seed, kept for the comparison feature: a comparison can only hold two runs
+    // constant if it knows what was held constant, and the result bundle records the model seed
+    // rather than the plan's root seed.
+    let request_root_seed = request.root_seed;
     if let Err(error) = results.put_experiment(&probelab_telemetry::ExperimentRecord {
         experiment_id: running_id,
         benchmark_id: running_benchmark,
@@ -173,6 +178,8 @@ pub async fn run_experiment(
         score: None,
         result_json: None,
         updated_unix_ms: 0,
+        target_agent: Some(running_agent.clone()),
+        root_seed: request_root_seed,
     }) {
         // Failing to record the running state does not stop the run; it does mean a crash during it
         // cannot be detected, which is worth saying out loud rather than only in a log.
@@ -232,6 +239,11 @@ pub async fn run_experiment(
             score: experiment.mean_success_fraction,
             result_json: None,
             updated_unix_ms: 0,
+            // Re-stated rather than re-read: the running row wrote them, and carrying the same
+            // values forward keeps the terminal write from blanking the identity the comparison
+            // needs. A terminal row with a null agent would refuse every comparison it took part in.
+            target_agent: Some(running_agent),
+            root_seed: request_root_seed,
         }) {
             tracing::error!(error = %error, "could not persist the terminal experiment state");
         }

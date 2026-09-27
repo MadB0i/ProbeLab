@@ -31,6 +31,7 @@ export type RouteId =
   | "lab"
   | "agents"
   | "benchmarks"
+  | "comparison"
   | "providers"
   | "arena"
   | "security"
@@ -70,6 +71,13 @@ const ROUTES: { id: RouteId; label: string; title: string; purpose: string }[] =
     title: "Benchmarks",
     purpose:
       "Every registered benchmark with its capability-execution mode stated in the row. A benchmark that authorizes a capability without executing it says so here rather than looking like a working feature.",
+  },
+  {
+    id: "comparison",
+    label: "COMPARE",
+    title: "Comparison",
+    purpose:
+      "Stored experiments, compared. Two runs are only ranked when they measured the same thing; where that does not hold, the panel says which dimension differs instead of putting a number on it.",
   },
   {
     id: "providers",

@@ -68,6 +68,11 @@ jobs:
         # it reads as coverage. The target name is used instead, so deleting the file fails the step
         # rather than quietly emptying it.
         run: cargo test --locked --workspace --all-features --test wire_format
+      - name: Audit comparison honesty
+        # The comparison feature's risk is not a wrong number, it is a confident number about runs
+        # that were never comparable. These tests assert the refusals and the absence handling
+        # directly, so a change that makes the comparison more permissive fails visibly.
+        run: cargo test --locked -p probelab-lab --all-features --test comparison
       - name: Audit structural security guarantees
         # The architectural tests that assert the Brain, Runner, Arena, and Replay cannot authorize,
         # execute, or bypass enforcement. Run as a named step so a failure reads as a security

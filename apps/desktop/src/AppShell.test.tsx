@@ -18,6 +18,7 @@ const PAGES: Record<RouteId, string> = {
   lab: "COMMAND CENTER CONTENT",
   agents: "AGENTS CONTENT",
   benchmarks: "BENCHMARKS CONTENT",
+  comparison: "COMPARISON CONTENT",
   providers: "PROVIDERS CONTENT",
   arena: "ARENA CONTENT",
   security: "SECURITY CONTENT",

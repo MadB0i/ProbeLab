@@ -354,6 +354,213 @@ input:focus-visible {
   top: 8px;
 }
 
+/*
+ * Comparison.
+ *
+ * Three elements are visually distinct on purpose: the confound banner, the refusal, and the
+ * "no measurement" marker. Each is a case where the product is declining to say something it could
+ * say, and a reader who confuses it with ordinary content will draw the wrong conclusion.
+ */
+.compare-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.compare-picker {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.compare-pick {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: rgba(10, 15, 25, 0.5);
+  cursor: pointer;
+}
+
+.compare-pick--disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+}
+
+.compare-pick-id {
+  font-size: 0.72rem;
+}
+
+.compare-pick-meta,
+.compare-pick-note {
+  grid-column: 2;
+  font-size: 0.64rem;
+  color: var(--muted);
+}
+
+.compare-pick-lifecycle {
+  color: var(--cyan);
+  letter-spacing: 0.08em;
+}
+
+.compare-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.compare-result {
+  display: grid;
+  gap: 16px;
+}
+
+/*
+ * The confound banner sits above every table and is the loudest thing in the panel. A reader who sees
+ * the numbers first will not scroll back up to read the caveat, which is the failure this styling
+ * exists to prevent.
+ */
+.compare-confound {
+  padding: 11px 13px;
+  border: 1px solid rgba(240, 178, 74, 0.5);
+  border-left: 3px solid #f0b24a;
+  background: rgba(240, 178, 74, 0.08);
+  font-size: 0.7rem;
+  line-height: 1.55;
+  color: #f0c987;
+}
+
+.compare-confound-item {
+  margin: 0 6px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+.compare-refusal {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid #f0b24a;
+  background: rgba(240, 178, 74, 0.06);
+}
+
+.compare-refusal-head {
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.compare-refusal-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 5px;
+  font-size: 0.7rem;
+}
+
+.compare-refusal-note,
+.compare-refusal-ids {
+  margin: 0;
+  font-size: 0.66rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.compare-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.compare-facts div {
+  display: grid;
+  gap: 4px;
+}
+
+.compare-facts dt {
+  font-size: 0.58rem;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+
+.compare-facts dd {
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.compare-finding {
+  color: #f0b24a;
+  font-weight: 600;
+}
+
+.compare-block {
+  display: grid;
+  gap: 8px;
+}
+
+.compare-block-title {
+  margin: 0;
+  font-size: 0.66rem;
+  letter-spacing: 0.14em;
+  color: var(--cyan);
+}
+
+.compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.7rem;
+}
+
+.compare-table th {
+  padding: 6px 8px;
+  text-align: left;
+  font-size: 0.58rem;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  font-weight: 500;
+}
+
+.compare-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid rgba(140, 170, 204, 0.08);
+}
+
+.compare-value {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.compare-direction {
+  margin-left: 5px;
+  font-size: 0.62rem;
+  color: var(--muted);
+}
+
+/*
+ * The absent marker. Never a bare dash: a dash is ambiguous between "zero" and "unknown", and this is
+ * the one place where confusing those two produces a false measurement.
+ */
+.compare-absent {
+  color: #f0b24a;
+  font-style: italic;
+}
+
+.compare-runs summary {
+  cursor: pointer;
+  font-size: 0.66rem;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+
+.compare-runs[open] {
+  margin-top: 10px;
+}
+
 @media (max-width: 1120px) {
   .shell-frame {
     grid-template-columns: 1fr;

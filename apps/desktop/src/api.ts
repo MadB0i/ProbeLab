@@ -215,6 +215,111 @@ export async function listExperiments(): Promise<string[]> {
   return invoke<string[]>("list_experiments");
 }
 
+/**
+ * One stored experiment, as the durable repository holds it.
+ *
+ * `targetAgent` and `rootSeed` are `null` for a row written before the plan's identity was stored.
+ * That is a truthful absence rather than a missing value: a comparison over such rows refuses
+ * instead of guessing what was held constant, so the panel must render the absence rather than
+ * substitute a placeholder.
+ */
+export type StoredExperiment = {
+  experimentId: string;
+  benchmarkId: string;
+  lifecycle: "planned" | "running" | "completed" | "failed" | "interrupted";
+  terminalReason: string | null;
+  episodesRequested: number;
+  episodesCompleted: number;
+  episodesFailed: number;
+  hasScore: boolean;
+  score: number | null;
+  resultJson: string | null;
+  updatedUnixMs: number;
+  targetAgent: string | null;
+  rootSeed: number | null;
+};
+
+export type ComparisonDimension = {
+  dimension: string;
+  values: string[];
+};
+
+export type ComparableRun = {
+  experimentId: string;
+  benchmarkId: string;
+  targetAgent: string;
+  adapter: string;
+  strategy: string;
+  rootSeed: number;
+  episodesCompleted: number;
+  episodesFailed: number;
+  /** null when no episode completed. Not zero: no episodes means no score exists. */
+  successFraction: number | null;
+  successInterval: { point: number; lower: number; upper: number; confidence: number } | null;
+  integrityEvents: number;
+  brokerRefusals: number;
+  isSecurityFinding: boolean;
+  meanReward: number;
+  meanTurns: number;
+  meanInvalidActions: number;
+};
+
+export type Standing = {
+  experimentId: string;
+  /** null when the run has no value to rank, with the reason in `unrankedReason`. */
+  rank: number | null;
+  value: number | null;
+  interval: { point: number; lower: number; upper: number; confidence: number } | null;
+  unrankedReason: string | null;
+};
+
+export type Comparison = {
+  runs: ComparableRun[];
+  benchmarkId: string;
+  targetAgent: string;
+  adapter: string;
+  strategy: string;
+  rootSeed: number;
+  bySuccess: Standing[];
+  byReward: Standing[];
+  byTurns: Standing[];
+  byInvalidActions: Standing[];
+  integrityEventTotal: number;
+  brokerRefusalTotal: number;
+  anySecurityFinding: boolean;
+  /**
+   * Identities that were not held constant. Non-empty means the ranking is qualified, and the panel
+   * must show this above the numbers rather than below them.
+   */
+  variesAcross: ComparisonDimension[];
+};
+
+/**
+ * The outcome of asking for a comparison.
+ *
+ * A tagged union rather than a nullable comparison, so "these runs cannot be compared" is a state
+ * the panel has to handle. Collapsing it to `null` would make a refusal indistinguishable from an
+ * empty result, and a panel that renders both as blank looks broken rather than correct.
+ */
+export type ComparisonResponse =
+  | { kind: "comparable"; detail: Comparison }
+  | {
+      kind: "not_comparable";
+      detail: { experimentIds: string[]; dimensions: ComparisonDimension[] };
+    };
+
+export async function listComparableExperiments(): Promise<StoredExperiment[]> {
+  return invoke<StoredExperiment[]>("list_comparable_experiments");
+}
+
+export async function compareExperiments(
+  experimentIds: string[],
+): Promise<ComparisonResponse> {
+  return invoke<ComparisonResponse>("compare_experiments", {
+    request: { experimentIds },
+  });
+}
+
 export async function runExperiment(request: {
   benchmarkId: string;
   agentId: string;

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AppShell } from "./AppShell";
+import { ComparisonPanel } from "./ComparisonPanel";
 import { AgentCatalog } from "./AgentCatalog";
 import { BenchmarkCatalog as BenchmarkCatalogPanel } from "./BenchmarkCatalog";
 import {
@@ -1801,6 +1802,11 @@ const App = () => {
               <section className="route-single" aria-label="Selected benchmark">
                 {viewsuiteCard}
               </section>
+            </div>
+          ),
+          comparison: (
+            <div className="route-stack">
+              <ComparisonPanel />
             </div>
           ),
           providers: (

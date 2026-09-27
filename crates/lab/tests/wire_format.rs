@@ -480,7 +480,9 @@ fn a_stored_experiment_record_keeps_its_columns() {
             "hasScore": true,
             "score": 0.6666666666666666,
             "resultJson": null,
-            "updatedUnixMs": 1_700_000_000_000i64
+            "updatedUnixMs": 1_700_000_000_000i64,
+            "targetAgent": "optimal",
+            "rootSeed": 4242
         }),
         "ExperimentRecord",
     );
@@ -505,7 +507,9 @@ fn a_record_without_a_score_keeps_both_the_flag_and_the_absence() {
             "hasScore": false,
             "score": null,
             "resultJson": null,
-            "updatedUnixMs": 1_700_000_000_001i64
+            "updatedUnixMs": 1_700_000_000_001i64,
+            "targetAgent": "optimal",
+            "rootSeed": 4242
         }),
         "ExperimentRecord without a score",
     );

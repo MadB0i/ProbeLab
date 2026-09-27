@@ -15,6 +15,8 @@ use tauri::{AppHandle, Emitter, Manager};
 
 mod arena;
 mod brain;
+mod comparison;
+use comparison::{compare_experiments, list_comparable_experiments};
 mod commands;
 mod provider;
 mod security;
@@ -205,7 +207,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             brain_panel,
+            compare_experiments,
             get_experiment,
+            list_comparable_experiments,
             list_experiments,
             run_experiment,
             list_agents,

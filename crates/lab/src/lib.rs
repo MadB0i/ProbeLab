@@ -22,6 +22,7 @@
 mod agents;
 mod arena;
 mod brain;
+pub mod comparison;
 mod events;
 mod experiment;
 mod probes;
@@ -42,6 +43,10 @@ pub use brain::{
     category_label, label_for, Anomaly, AnomalyDetector, BrainEvent, BrainPanel, BrainState,
     ExperimentPlan, ExperimentPlanError, LabBrain, ObservedCategory, PlanRequest, MAX_EPISODES,
     MAX_PROBES, MAX_WALL_CLOCK_SECONDS,
+};
+pub use comparison::{
+    compare, ComparableRun, Comparison, ComparisonOutcome, Incomparable, IncomparableDimension,
+    Standing,
 };
 pub use events::{
     decision_event, integrity_code, model_failure_code, model_failure_event, EventSource, LabEvent,

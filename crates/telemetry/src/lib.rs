@@ -887,6 +887,39 @@ impl SqliteResultRepository {
             .map_err(Into::into)
     }
 
+    /// Every stored result, newest last, for the identifiers given.
+    ///
+    /// # Why this takes identifiers rather than returning everything
+    ///
+    /// A comparison is over a chosen set of runs, not over the whole history, so the caller decides
+    /// the set. Returning everything would make an accidental "compare all" both possible and
+    /// unbounded, and the number of stored results grows without limit.
+    ///
+    /// Results are returned in the order the identifiers were given, and an identifier with no stored
+    /// result is simply absent rather than an error: a run can be listed before its result lands,
+    /// and a comparison that refused to render because one run had not finished writing would be
+    /// reporting a race as a failure.
+    pub fn list(&self, run_ids: &[String]) -> Result<Vec<TestResult>, ResultRepositoryError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| ResultRepositoryError::LockPoisoned)?;
+        let mut found = Vec::with_capacity(run_ids.len());
+        for run_id in run_ids {
+            let result_json: Option<String> = connection
+                .query_row(
+                    "SELECT result_json FROM results WHERE run_id = ?1",
+                    params![run_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(json) = result_json {
+                found.push(serde_json::from_str(&json)?);
+            }
+        }
+        Ok(found)
+    }
+
     /// Records an experiment's lifecycle state.
     ///
     /// Separate from `put`, because a result is immutable evidence while this is a mutable status. A
@@ -902,8 +935,9 @@ impl SqliteResultRepository {
                 "INSERT INTO experiments (
                     experiment_id, benchmark_id, lifecycle, terminal_reason,
                     episodes_requested, episodes_completed, episodes_failed,
-                    has_score, score, result_json, updated_unix_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                    has_score, score, result_json, updated_unix_ms,
+                    target_agent, root_seed
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(experiment_id) DO UPDATE SET
                     lifecycle = excluded.lifecycle,
                     terminal_reason = excluded.terminal_reason,
@@ -912,7 +946,9 @@ impl SqliteResultRepository {
                     has_score = excluded.has_score,
                     score = excluded.score,
                     result_json = excluded.result_json,
-                    updated_unix_ms = excluded.updated_unix_ms",
+                    updated_unix_ms = excluded.updated_unix_ms,
+                    target_agent = excluded.target_agent,
+                    root_seed = excluded.root_seed",
                 rusqlite::params![
                     record.experiment_id,
                     record.benchmark_id,
@@ -925,6 +961,12 @@ impl SqliteResultRepository {
                     record.score,
                     record.result_json,
                     record.updated_unix_ms,
+                    record.target_agent,
+                    // SQLite has no unsigned integer, so a `u64` seed is stored as its bit pattern
+                    // reinterpreted as `i64` and read back the same way. A plain `as i64` cast would
+                    // wrap above `i64::MAX`, and a seed that read back as a different number is
+                    // exactly the property a comparison relies on to decide what it may compare.
+                    record.root_seed.map(|seed| seed as i64),
                 ],
             )
             .map_err(ResultRepositoryError::Sqlite)?;
@@ -944,7 +986,8 @@ impl SqliteResultRepository {
             .prepare(
                 "SELECT experiment_id, benchmark_id, lifecycle, terminal_reason,
                         episodes_requested, episodes_completed, episodes_failed,
-                        has_score, score, result_json, updated_unix_ms
+                        has_score, score, result_json, updated_unix_ms,
+                        target_agent, root_seed
                  FROM experiments WHERE experiment_id = ?1",
             )
             .map_err(ResultRepositoryError::Sqlite)?;
@@ -967,7 +1010,8 @@ impl SqliteResultRepository {
             .prepare(
                 "SELECT experiment_id, benchmark_id, lifecycle, terminal_reason,
                         episodes_requested, episodes_completed, episodes_failed,
-                        has_score, score, result_json, updated_unix_ms
+                        has_score, score, result_json, updated_unix_ms,
+                        target_agent, root_seed
                  FROM experiments ORDER BY updated_unix_ms DESC, experiment_id DESC",
             )
             .map_err(ResultRepositoryError::Sqlite)?;
@@ -1166,6 +1210,17 @@ pub struct ExperimentRecord {
     pub result_json: Option<String>,
     /// When this row was last written, in Unix milliseconds.
     pub updated_unix_ms: i64,
+    /// The agent the plan measured.
+    ///
+    /// Part of the experiment's *identity*, not its outcome: two runs of different agents are not
+    /// measuring the same thing, and a comparison that could not see this would rank them as though
+    /// it could. `None` for a row written before this was stored, which is a truthful answer rather
+    /// than a missing one -- a comparison over such rows refuses instead of assuming.
+    pub target_agent: Option<String>,
+    /// The plan's root seed.
+    ///
+    /// `None` under the same condition and for the same reason as [`Self::target_agent`].
+    pub root_seed: Option<u64>,
 }
 
 /// Reads one experiment row into a typed record.
@@ -1198,7 +1253,34 @@ fn read_experiment_row(row: &rusqlite::Row<'_>) -> Result<ExperimentRecord, Resu
         score: row.get(8).map_err(ResultRepositoryError::Sqlite)?,
         result_json: row.get(9).map_err(ResultRepositoryError::Sqlite)?,
         updated_unix_ms: row.get(10).map_err(ResultRepositoryError::Sqlite)?,
+        // Named by column rather than by position: the identity columns were added by a migration
+        // and are the last two, but a select that lists them by name keeps working if another
+        // column is ever added between them and the end.
+        target_agent: column_by_name(row, "target_agent")?,
+        // Reinterpreted rather than cast, undoing the `u64` to `i64` bit-pattern conversion on the
+        // way in, so a seed above `i64::MAX` round-trips to the same number.
+        root_seed: column_by_name::<i64>(row, "root_seed")?.map(|seed| seed as u64),
     })
+}
+
+/// Reads a column by name, for columns a migration may not have added to an older database.
+///
+/// `row.as_ref().column_index(name)` is what makes this work across schema versions: a database
+/// written before the identity columns existed has no such column, and asking for a `NULL` from a
+/// column that is not there would fail rather than report the absence.
+fn column_by_name<T: rusqlite::types::FromSql>(
+    row: &rusqlite::Row<'_>,
+    name: &str,
+) -> Result<Option<T>, ResultRepositoryError> {
+    let index = match row.as_ref().column_index(name) {
+        Ok(index) => index,
+        Err(_) => return Ok(None),
+    };
+    // Written as an explicit match rather than `map_err` because the error conversion is what needs
+    // the type annotation: `Sqlite` is a tuple variant holding a `rusqlite::Error`, and inferring it
+    // through a closure leaves the compiler unable to name the parameter type.
+    row.get::<_, Option<T>>(index)
+        .map_err(ResultRepositoryError::from)
 }
 
 fn initialize_result_schema(connection: &Connection) -> Result<(), rusqlite::Error> {
@@ -1253,7 +1335,8 @@ fn initialize_result_schema(connection: &Connection) -> Result<(), rusqlite::Err
             ON experiments (lifecycle, updated_unix_ms);
         "#,
     )?;
-    add_result_metadata_column(connection)
+    add_result_metadata_column(connection)?;
+    add_experiment_identity_columns(connection)
 }
 
 fn add_result_metadata_column(connection: &Connection) -> Result<(), rusqlite::Error> {
@@ -1265,6 +1348,31 @@ fn add_result_metadata_column(connection: &Connection) -> Result<(), rusqlite::E
         .any(|column| column == "metadata_json");
     if !has_metadata_column {
         connection.execute_batch("ALTER TABLE results ADD COLUMN metadata_json TEXT")?;
+    }
+    Ok(())
+}
+
+/// Adds the columns that make an experiment's identity queryable.
+///
+/// # Why these are nullable
+///
+/// A comparison can only be made between runs that measured the same thing, and that requires the
+/// agent and the seed — the plan, not the result. Adding them as nullable columns with no default
+/// means an existing database keeps its rows and reports the truth it has: these runs predate
+/// identity, so a comparison over them will refuse rather than assume. Backfilling a seed would
+/// fabricate the exact property the comparison exists to check.
+fn add_experiment_identity_columns(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let mut statement = connection.prepare("PRAGMA table_info(experiments)")?;
+    let columns: Vec<String> = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (column, definition) in [("target_agent", "TEXT"), ("root_seed", "INTEGER")] {
+        if !columns.iter().any(|existing| existing == column) {
+            connection.execute_batch(&format!(
+                "ALTER TABLE experiments ADD COLUMN {column} {definition}"
+            ))?;
+        }
     }
     Ok(())
 }

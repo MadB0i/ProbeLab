@@ -55,6 +55,9 @@ fn record(
         score: has_score.then_some(0.8),
         result_json: None,
         updated_unix_ms: 1_700_000_000_000,
+        // The plan's identity, which a comparison needs in order to hold anything constant.
+        target_agent: Some("optimal".to_owned()),
+        root_seed: Some(4_242),
     }
 }
 
@@ -331,6 +334,137 @@ fn lifecycle_updates_do_not_disturb_stored_results() {
     let stored = repository.get("run-1").expect("read").expect("present");
     assert_eq!(stored.replay_digest, "digest", "the result was disturbed");
     assert!(stored.capability.task_success);
+    let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
+}
+
+/// The plan's identity round-trips, because a comparison cannot hold constant something it cannot
+/// read.
+#[test]
+fn the_experiment_identity_is_stored_and_read_back() {
+    let path = temp_database("identity");
+    let repository = SqliteResultRepository::new(&path).expect("repository");
+    let entry = record("exp-identity", ExperimentLifecycle::Completed, 2, 0, true);
+    repository.put_experiment(&entry).expect("write");
+    let stored = repository
+        .get_experiment("exp-identity")
+        .expect("read")
+        .expect("present");
+    assert_eq!(stored.target_agent.as_deref(), Some("optimal"));
+    assert_eq!(stored.root_seed, Some(4_242));
+    let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
+}
+
+/// A record written without an identity must keep reporting that absence.
+///
+/// Backfilling a seed would fabricate the exact property a comparison uses to decide what it may
+/// compare, and `None` is the truthful answer for a row that predates the column.
+#[test]
+fn a_record_without_an_identity_keeps_reporting_the_absence() {
+    let path = temp_database("no-identity");
+    let repository = SqliteResultRepository::new(&path).expect("repository");
+    let mut entry = record("exp-anon", ExperimentLifecycle::Completed, 1, 0, true);
+    entry.target_agent = None;
+    entry.root_seed = None;
+    repository.put_experiment(&entry).expect("write");
+    let stored = repository
+        .get_experiment("exp-anon")
+        .expect("read")
+        .expect("present");
+    assert_eq!(
+        stored.target_agent, None,
+        "a missing agent must not be invented"
+    );
+    assert_eq!(
+        stored.root_seed, None,
+        "a missing seed must not be invented"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
+}
+
+/// A `u64` seed above `i64::MAX` must survive storage unchanged.
+///
+/// SQLite has no unsigned integer, so the seed is stored as a bit pattern. A plain signed cast would
+/// wrap it to a negative number, and a seed that reads back as a different value is precisely what
+/// would let a comparison decide two runs were the same experiment when they were not.
+#[test]
+fn a_seed_above_the_signed_range_round_trips() {
+    let path = temp_database("big-seed");
+    let repository = SqliteResultRepository::new(&path).expect("repository");
+    let mut entry = record("exp-big", ExperimentLifecycle::Completed, 1, 0, true);
+    entry.root_seed = Some(u64::MAX);
+    repository.put_experiment(&entry).expect("write");
+    let stored = repository
+        .get_experiment("exp-big")
+        .expect("read")
+        .expect("present");
+    assert_eq!(
+        stored.root_seed,
+        Some(u64::MAX),
+        "the seed was altered in storage"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
+}
+
+/// A database written before the identity columns existed must open, keep its rows, and report the
+/// absence rather than failing to read.
+///
+/// This is the case a migration is actually for: not a new database, but an existing one.
+#[test]
+fn a_database_without_the_identity_columns_still_opens() {
+    let path = temp_database("pre-identity");
+    {
+        // Create the older schema by hand, with the identity columns absent.
+        let connection = rusqlite::Connection::open(&path).expect("open");
+        connection
+            .execute_batch(
+                "CREATE TABLE experiments (
+                    experiment_id TEXT PRIMARY KEY,
+                    benchmark_id TEXT NOT NULL,
+                    lifecycle TEXT NOT NULL,
+                    terminal_reason TEXT,
+                    episodes_requested INTEGER NOT NULL,
+                    episodes_completed INTEGER NOT NULL DEFAULT 0,
+                    episodes_failed INTEGER NOT NULL DEFAULT 0,
+                    has_score INTEGER NOT NULL DEFAULT 0,
+                    score REAL,
+                    result_json TEXT,
+                    updated_unix_ms INTEGER NOT NULL
+                );
+                INSERT INTO experiments VALUES
+                    ('exp-old', 'grid-world', 'completed', 'completed', 5, 5, 0, 1, 0.8, NULL, 1);",
+            )
+            .expect("create the older schema");
+    }
+
+    // Opening migrates it, and the existing row survives.
+    let repository = SqliteResultRepository::new(&path).expect("migrate");
+    let stored = repository
+        .get_experiment("exp-old")
+        .expect("read")
+        .expect("the pre-existing row must survive the migration");
+    assert_eq!(stored.lifecycle, ExperimentLifecycle::Completed);
+    assert_eq!(stored.episodes_completed, 5);
+    assert_eq!(
+        stored.target_agent, None,
+        "the old row has no recorded agent"
+    );
+    assert_eq!(stored.root_seed, None, "the old row has no recorded seed");
+
+    // And a new write against the migrated schema fills the columns in.
+    repository
+        .put_experiment(&record(
+            "exp-new",
+            ExperimentLifecycle::Completed,
+            1,
+            0,
+            true,
+        ))
+        .expect("write after migration");
+    let fresh = repository
+        .get_experiment("exp-new")
+        .expect("read")
+        .expect("present");
+    assert_eq!(fresh.root_seed, Some(4_242));
     let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
 }
 
