@@ -26,6 +26,7 @@ mod events;
 mod experiment;
 mod probes;
 mod runner;
+mod security;
 mod view;
 
 pub use agents::{
@@ -55,6 +56,10 @@ pub use probes::{
 };
 pub use runner::{
     EpisodeFailure, ExperimentObserver, ExperimentRun, LabRunner, RunnerError, SilentObserver,
+};
+pub use security::{
+    all_probes, probes_for, run_probe, sweep, BoundaryOutcome, SecurityLabError, SecurityLabReport,
+    SecurityProbeReport, SecurityProbeSpec,
 };
 pub use view::{
     BrainReadModel, DecisionView, EpisodeFailureView, EpisodeView, ExperimentView, SecuritySummary,

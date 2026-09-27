@@ -326,3 +326,78 @@ export async function playArenaMatch(request: {
 }): Promise<ArenaMatchView> {
   return invoke<ArenaMatchView>("play_arena_match", { request });
 }
+/**
+ * The Security Lab's read model.
+ *
+ * The vocabulary is the important part. A security probe is a *test of the boundary*, not a subject
+ * under evaluation, so `isSecurityFinding` is always false: a policy gate recording an attempt and
+ * denying it means the boundary held. The same recorded event is a genuine finding when a model under
+ * test produces it, which is why the Brain panel reports it as a finding and this panel does not.
+ */
+export type BoundaryOutcome =
+  | "broker_refused"
+  | "policy_denied"
+  | "refused_and_denied"
+  | "not_attempted"
+  | "failed";
+
+export type SecurityProbeListing = {
+  id: string;
+  name: string;
+  description: string;
+};
+
+export type SecurityProbeReport = {
+  /** Always false: a probe is a test of the boundary, not a subject under evaluation. */
+  isSecurityFinding: boolean;
+  probeId: string;
+  probeName: string;
+  benchmarkId: string;
+  seed: number;
+  outcome: BoundaryOutcome;
+  /** Snake-case integrity categories with their counts. Empty when nothing was recorded. */
+  integrityEvents: [string, number][];
+  /** Snake-case enforcement categories with their counts. */
+  brokerRefusals: [string, number][];
+  episodes: number;
+  timeline: { sequence: number; code: string; severity: string; detail: string }[];
+  failure: string | null;
+};
+
+export type SecurityLabReport = {
+  outcomes: SecurityProbeReport[];
+  /** Kept separate on purpose; there is no combined total and the panel must not invent one. */
+  summary: {
+    integrityViolations: number;
+    brokerRefusals: number;
+    violationsByCategory: Record<string, number>;
+    refusalsByCategory: Record<string, number>;
+    containmentFailures: number;
+  };
+  benchmarkId: string;
+};
+
+export type SecurityCommandError = {
+  code: string;
+  message: string;
+};
+
+export async function listSecurityProbes(
+  benchmarkId: string,
+): Promise<SecurityProbeListing[]> {
+  return invoke<SecurityProbeListing[]>("list_security_probes", {
+    benchmarkId,
+  });
+}
+
+export async function latestSecurityReport(): Promise<SecurityLabReport | null> {
+  return invoke<SecurityLabReport | null>("latest_security_report");
+}
+
+export async function runSecuritySweep(request: {
+  benchmarkId: string;
+  seed: number;
+  episodes: number;
+}): Promise<SecurityLabReport> {
+  return invoke<SecurityLabReport>("run_security_sweep", { request });
+}

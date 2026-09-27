@@ -17,6 +17,7 @@ mod arena;
 mod brain;
 mod commands;
 mod provider;
+mod security;
 
 pub use arena::{
     get_arena_match, latest_arena_match, list_arena_agents, list_arena_games, play_arena_match,
@@ -35,6 +36,10 @@ pub use provider::{
     ModelRunConfig, ModelRunConfigError, ProviderConnectionStatus, ProviderStatus,
     CREDENTIAL_SOURCE_ENVIRONMENT, MOCK_PROVIDER, MODEL_RUN_CONFIG_SCHEMA_VERSION,
     OPENAI_COMPATIBLE_PROVIDER, PROVIDER_STATUS_SCHEMA_VERSION,
+};
+pub use security::{
+    latest_security_report, list_security_probes, run_security_sweep, SecurityCommandError,
+    SecurityProbeListing, SecuritySurface, SecuritySweepRequest,
 };
 
 const DATABASE_FILE_NAME: &str = "probelab.sqlite3";
@@ -81,6 +86,8 @@ pub struct AppState {
     pub brain: BrainSurface,
     /// Completed arena matches, so a finished match stays inspectable.
     pub arena: ArenaSurface,
+    /// The most recent security sweep, so a completed one stays inspectable.
+    pub security: SecuritySurface,
     recorder: Arc<SqliteTelemetryRecorder>,
     results: Arc<SqliteResultRepository>,
     recent_events: RecentEventBuffer,
@@ -164,6 +171,7 @@ pub fn run() {
                 catalog: BenchmarkCatalog::new()?,
                 brain,
                 arena: ArenaSurface::default(),
+                security: SecuritySurface::default(),
                 recorder,
                 results,
                 recent_events,

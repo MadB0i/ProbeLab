@@ -2443,3 +2443,345 @@ select:disabled {
 .ply-move {
   color: var(--faint);
 }
+/* ---------------------------------------------------------------------------
+ * The Security Lab
+ *
+ * The palette here is the inverse of the arena's: a held boundary is calm and
+ * cool, because a lab that catches every probe is the desired state and should
+ * never look like an incident. Red is reserved for a probe that could not run,
+ * because that is the only genuinely bad outcome in this panel.
+ * ------------------------------------------------------------------------- */
+.security-panel {
+  margin-bottom: 18px;
+  border-left: 2px solid var(--green);
+}
+
+.security-panel .panel-heading h2 {
+  letter-spacing: 0.18em;
+}
+
+.security-status {
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  padding: 2px 9px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+}
+
+.security-status--idle {
+  color: var(--muted);
+}
+
+.security-status--run {
+  color: var(--cyan);
+}
+
+.security-authority {
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--green);
+  border-radius: 4px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--faint);
+  background: rgba(110, 231, 161, 0.03);
+}
+
+.security-authority em {
+  color: var(--text);
+  font-style: italic;
+}
+
+.security-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.security-summary-card {
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line-strong);
+  border-radius: 4px;
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.security-summary-card--held {
+  border-left-color: var(--green);
+}
+
+.security-summary-label {
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.security-summary-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 22px;
+  line-height: 1.1;
+  color: var(--text);
+}
+
+.security-summary-gloss {
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.security-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 14px;
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.security-empty {
+  border: 1px dashed var(--line-strong);
+  border-radius: 4px;
+  padding: 26px 20px;
+  text-align: center;
+}
+
+.security-empty h3 {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  letter-spacing: 0.16em;
+  color: var(--faint);
+  font-weight: 600;
+}
+
+.security-empty p {
+  margin: 0 auto;
+  max-width: 58ch;
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+
+.probe-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.probe-row {
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 4px;
+  padding: 10px 12px;
+}
+
+.tone-held {
+  border-left-color: var(--green);
+}
+
+.tone-untested {
+  border-left-color: var(--amber);
+}
+
+.tone-failed {
+  border-left-color: var(--red);
+}
+
+.probe-row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.probe-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.probe-outcome {
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+
+.probe-outcome.tone-held {
+  color: var(--green);
+}
+
+.probe-outcome.tone-untested {
+  color: var(--amber);
+}
+
+.probe-outcome.tone-failed {
+  color: var(--red);
+}
+
+.probe-id {
+  margin: 3px 0 0;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.probe-explanation {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--faint);
+}
+
+.probe-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 5px 12px;
+  margin: 9px 0 0;
+}
+
+.probe-facts div {
+  min-width: 0;
+}
+
+.probe-facts dt {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.probe-facts dd {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  color: var(--faint);
+  overflow-wrap: anywhere;
+}
+
+.probe-breakdown {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.probe-breakdown h5 {
+  margin: 0 0 5px;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.probe-breakdown ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+}
+
+.probe-breakdown li {
+  display: flex;
+  gap: 6px;
+  font-size: 10.5px;
+}
+
+.probe-category {
+  color: var(--faint);
+}
+
+.probe-count {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+}
+
+.probe-breakdown-empty {
+  margin: 0;
+  font-size: 10.5px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.probe-failure {
+  margin: 9px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--red);
+  overflow-wrap: anywhere;
+}
+
+.security-totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.security-total-block {
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 4px;
+  padding: 10px 12px;
+}
+
+.security-total-block--violations {
+  border-left-color: var(--amber);
+}
+
+.security-total-block--violations h4 {
+  color: var(--amber);
+}
+
+.security-total-block--refusals {
+  border-left-color: var(--green);
+}
+
+.security-total-block--refusals h4 {
+  color: var(--green);
+}
+
+.security-total-block h4 {
+  margin: 0 0 4px;
+  font-size: 10px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.security-total-block .security-count {
+  margin: 0 0 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 20px;
+  line-height: 1.1;
+  color: var(--text);
+}
+
+.security-total-block ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.security-total-block li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 10.5px;
+  color: var(--faint);
+}

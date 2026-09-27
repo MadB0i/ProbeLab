@@ -16,6 +16,14 @@ import {
 } from "./api";
 import { BrainPanel } from "./BrainPanel";
 import { ArenaPanel } from "./ArenaPanel";
+import { SecurityPanel } from "./SecurityPanel";
+import {
+  latestSecurityReport,
+  listSecurityProbes,
+  runSecuritySweep,
+  type SecurityLabReport,
+  type SecurityProbeListing,
+} from "./api";
 import {
   latestArenaMatch,
   listArenaAgents,
@@ -554,6 +562,13 @@ const App = () => {
   const [arenaOpponent, setArenaOpponent] = useState("");
   const [arenaSide, setArenaSide] = useState<"first" | "second">("first");
   const [arenaSeed, setArenaSeed] = useState(7);
+  // The Security Lab. A sweep runs the registered probes through the real enforcement path.
+  const [securityProbes, setSecurityProbes] = useState<SecurityProbeListing[]>([]);
+  const [securityReport, setSecurityReport] = useState<SecurityLabReport | null>(null);
+  const [securityError, setSecurityError] = useState<string | null>(null);
+  const [securityRunning, setSecurityRunning] = useState(false);
+  const [securityBenchmark, setSecurityBenchmark] = useState("grid-world");
+
 
   const [benchmarksError, setBenchmarksError] = useState<string | null>(null);
   const [selectedStrategy, setSelectedStrategy] = useState<Strategy>("optimal");
@@ -835,6 +850,56 @@ const App = () => {
     }
   }, [benchmark, selectedStrategy]);
   /**
+   * Loads the registered security probes and the most recent sweep.
+   *
+   * The probe list is the registry's own security-probe family, filtered in the backend. A panel that
+   * kept its own list could offer a probe the runtime cannot build.
+   */
+  useEffect(() => {
+    let active = true;
+    Promise.all([listSecurityProbes(securityBenchmark), latestSecurityReport()])
+      .then(([probes, latest]) => {
+        if (!active) {
+          return;
+        }
+        setSecurityProbes(probes);
+        setSecurityReport(latest);
+        setSecurityError(null);
+      })
+      .catch((error) => {
+        if (active) {
+          setSecurityError(`The security lab did not report its probes: ${formatError(error)}`);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [securityBenchmark]);
+
+  /**
+   * Runs a security sweep.
+   *
+   * Each probe executes through the same engine, broker, and sandbox path as an ordinary experiment,
+   * so the report is observation rather than something the frontend composed.
+   */
+  const runSecurity = useCallback(async () => {
+    setSecurityRunning(true);
+    setSecurityError(null);
+    try {
+      const report = await runSecuritySweep({
+        benchmarkId: securityBenchmark,
+        seed: 11,
+        episodes: 2,
+      });
+      setSecurityReport(report);
+    } catch (error) {
+      setSecurityError(`The sweep could not run: ${formatError(error)}`);
+    } finally {
+      setSecurityRunning(false);
+    }
+  }, [securityBenchmark]);
+
+  /**
    * Loads the arena catalog and the most recent match.
    *
    * The agent list is fetched per game from the backend, which is where compatibility lives. The
@@ -1086,6 +1151,19 @@ const App = () => {
           canRun={benchmark !== null}
         />
 
+        <SecurityPanel
+          probes={securityProbes}
+          report={securityReport}
+          error={securityError}
+          running={securityRunning}
+          benchmarkId={securityBenchmark}
+          onRun={() => void runSecurity()}
+          onBenchmarkChange={(benchmark) => {
+            setSecurityBenchmark(benchmark);
+            setSecurityReport(null);
+          }}
+          canRun={securityProbes.length > 0}
+        />
         {/*
          * The arena sits under the Brain panel because it is an evaluation environment the orchestrator
          * may later drive, not a game the Brain plays. The panel's own controls start a match; the
