@@ -1,7 +1,20 @@
 # Progress
 
+**A milestone history, not a statement of state.** It records what each phase did and why. For what is
+implemented, verified, and known-broken today, read **[docs/STATUS.md](docs/STATUS.md)** — that file is
+authoritative and this one is not.
+
+Two things in this file are *deliberately* historical and are not to be read as current:
+
+- The test counts under "Verified" were correct for the commit named in the header and have been
+  superseded. The current counts are in STATUS.md §2.
+- The `sandbox-process` measurement table in v0.5 phase 2 was removed in the final audit, because no
+  example binary exists that reproduces it and a number nobody can re-run is not evidence. See STATUS.md
+  §7 for the numbers that *can* be reproduced, with the command that reproduces them.
+
 *Describes workspace version 0.4.1. Test counts below were produced by running the commands on a
-Windows host at `main` `0608e92`; see `docs/AUDIT-2026-09-26.md` for the full audit that produced them.*
+Windows host at `main` `0608e92`; see `docs/AUDIT-2026-09-26.md` for the full audit that produced
+them. That commit is 30 commits behind `main`.*
 
 ## Done
 
@@ -109,18 +122,25 @@ Windows host at `main` `0608e92`; see `docs/AUDIT-2026-09-26.md` for the full au
   request costs a turn out of a budget derived from the seed's own shortest safe route, so a policy
   that spends its budget carelessly still fails. The child's output is verified from containment's own
   captured stream, not the filesystem, because the evaluator is given no sandbox root.
-- **Measured over the 70 held-out eval seeds**, identical solver, identical budget, differing only in
-  whether the one request is made:
+- **A measurement that was recorded here and later removed.** The final audit found that this table:
 
   | policy | task success | 95% CI | mean turns |
   | --- | --- | --- | --- |
   | search, never asks | **0/70 = 0.000** | `[0.000, 0.052]` | 5.93 |
   | search + one process request | **66/70 = 0.943** | `[0.862, 0.978]` | 6.87 |
 
-  The intervals are disjoint. Both policies reached the goal on nearly the same number of episodes
-  (67 and 66 `success` terminations), so the entire gap is the capability and nothing else. The one
-  episode the requesting policy loses is the turn the request costs — the tradeoff the benchmark was
-  built to expose, visible as 6.87 against 5.93 mean turns.
+  could not be reproduced from the repository. There is no example binary for `sandbox-process` —
+  `crates/engine/examples/` holds only the two grid-world ones — and
+  `crates/engine/tests/sandbox_process_quality.rs` asserts only *relational* properties (the requesting
+  policy's success rate is above the never-asking policy's, the intervals are disjoint, a floor and a
+  ceiling hold), never a count. The "67 and 66 `success` terminations" in the prose had the same
+  problem.
+
+  The numbers were therefore **deleted rather than restated**. A measurement nobody can re-run is not
+  evidence, and leaving it in place meant the file asserted something a reader could not check and
+  could not disprove. The benchmark itself is unchanged and the relational tests still hold; only the
+  published figures are gone. The grid-world numbers, which *do* have a reproduction command, are in
+  STATUS.md §7 with that command.
 
 - **The harness was measuring the wrong thing, and this phase caught it.** `AggregateScore::successes`
   counted `CompletionStatus::Success`, not the benchmark's own `task_success`. Those coincide for the
@@ -285,7 +305,7 @@ Windows host at `main` `0608e92`; see `docs/AUDIT-2026-09-26.md` for the full au
 
 The audit in `docs/AUDIT-2026-09-26.md` ordered this milestone ahead of Windows identity isolation,
 and the ordering held: the containment stack is real, well tested, and empirically holds, but it is
-**unreachable from the product** because no shipped benchmark declares a spawn plan. Hardening it
+**unreachable from the product** because no shipped benchmark declared a spawn plan. Hardening it
 further would harden a code path no run can invoke. The benchmark, by contrast, is the project's actual
 output, and it was measuring nothing.
 
@@ -329,9 +349,13 @@ output, and it was measuring nothing.
   observation radius larger than one step, a changing environment, or moving hazards. That would change
   what the benchmark measures, so it was recorded rather than forced. Full analysis and the three
   supporting proof tests are in `ARCHITECTURE.md` and `crates/engine/tests/phase0_memory.rs`.
-- **The multi-episode harness is not wired into the desktop app.** `run_benchmark` still runs one
-  episode against one seed. No success rate, confidence interval, or baseline appears in the UI, and
-  the presence of `crates/engine/src/harness.rs` should not be read otherwise.
+- **The engine's `Harness::measure` loop is not the loop the desktop runs.** `LabRunner` has its own
+  execution loop, and the UI runs that. What *is* shared, and shipped: the evaluation seed pools, the
+  Wilson interval (`LabRunner::wilson_interval` delegates to the harness's), and the success-rate
+  reporting. The command center renders a mean success fraction per experiment and a Wilson interval per
+  comparison, both from the backend. So the *measurement method* is on the product's path; that
+  particular function is not, and `crates/engine/src/harness.rs` should not be read as the product's
+  measurement runner.
 - **No real model has been measured on the v2 benchmark.** The reference solver is a scripted searcher,
   not a model. Beating it is a low bar, and a pass here is a precondition for being interesting rather
   than a result worth reporting.

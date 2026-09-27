@@ -40,30 +40,40 @@ The point of the security model is to keep the **environment** honest while that
 
 - Attacks requiring an attacker who already controls the machine ProbeLab runs on
 - The security of the connected model provider itself
-- Denial of service and resource exhaustion
-- Bypassing the containment layer through a capability no shipped benchmark can currently request.
-  No benchmark in the catalogue declares a `ProcessSpawnPlan` or a spawn grant, so in the desktop
-  product every spawn is refused at the broker and never reaches containment. Reachability is
-  part of severity here, not an afterthought.
+- Denial of service and resource exhaustion beyond the declared episode, wall-clock, output, and
+  process-runtime limits
+- **Container escape on Linux and macOS.** There is no OS-level containment on those platforms: a spawn
+  fails closed with `UnsupportedPlatform` rather than running unconfined, so there is no boundary there
+  to escape. Containment hardening is a Windows-only surface, and `docs/STATUS.md` §3.2 lists what it
+  does and does not do.
+- **Syscall-level or code-level escape on Windows.** The AppContainer identity and job object bound file
+  access and resources. Neither intercepts a syscall, and native code loading is not restricted. This is
+  not a code sandbox and is not claimed to be one.
 
 ## Design notes
 
 - **Deny by default.** The broker authorizes nothing unless a benchmark's own policy grants it, with
   canonicalised path checks and independent read and write roots.
-- **An authorization is not an execution.** Only `process.spawn` has an executor. The other four
-  permissions stop the run with an explicit unsupported error — none of them has a pretend
-  implementation.
+- **An authorization is not an execution.** Only `process.spawn` has an executor. `filesystem.read`,
+  `filesystem.write`, and `network.connect` stop the run with an explicit unsupported error — none of
+  them has a pretend implementation. `environment.inspect` is a fourth case: the broker denies it
+  unconditionally and `grant_permission` for it is a hard error, so it is never authorized at all and
+  the execution-refusal path is unreachable for it.
 - **The model cannot describe the process.** The engine rebuilds the request under review from the
   benchmark's compiled-in plan, discarding the model's framing entirely. No model can name a
-  program, argument, working directory, or environment variable.
-- **The child is contained before it runs.** Suspended, inside a job object with CPU/memory/process
-  limits, at low mandatory integrity, in a directory it alone may write to, with an **empty**
-  environment. Its integrity level is read back and path protection re-verified before it is
-  resumed.
+  program, argument, working directory, or environment variable. `ModelDecision::ProcessSpawnRequest`
+  carries the permission and nothing else.
+- **The child is contained before it runs.** Suspended; inside a job object with CPU, memory, and
+  process-count limits and `KILL_ON_JOB_CLOSE`; under a **derived AppContainer package identity** whose
+  `TokenAppContainerSid` is read back and compared before resume, with a mismatch killing the child;
+  at low mandatory integrity; in a directory it alone may write to, protected by an ACE naming the
+  package SID; with outbound network refused by the OS because the package token carries no
+  capabilities; and with an **empty** environment. Path protection is re-verified before resume.
 - **Fail closed.** A spawn on a non-Windows platform returns `UnsupportedPlatform` rather than
-  running unconfined.
+  running unconfined, and a missing or unverifiable identity kills the child.
 
-`docs/SECURITY-STATUS.md` records exactly what is enforced, what is partial, and what is deferred.
+`docs/STATUS.md` §3 records every guarantee with the test that holds it, and §3.2 records what
+containment does **not** do. `docs/SECURITY-STATUS.md` is the per-boundary implementation record.
 
 ## Safe harbor
 

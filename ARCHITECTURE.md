@@ -126,24 +126,28 @@ or 1 for a weak policy, the normal approximation is at its worst exactly where i
 to zero width at 0 % and runs outside `[0, 1]` at 100 %. Wilson stays inside the unit interval and keeps
 sensible width at both ends.
 
-**Scope, stated plainly: the desktop app does not use this.** `run_benchmark` in the Tauri layer still
-runs exactly one episode against one seed. The UI shows no success rate, no confidence interval, and no
-baseline. `crates/engine/examples/grid_world_harness.rs` is the command-line surface
+**Scope, stated precisely.** This module's *execution loop* is not the loop the desktop app runs.
+`LabRunner` has its own, and the UI runs that. What the product **does** share is the measurement method:
+`LabRunner::wilson_interval` delegates to `harness::wilson_interval`, the same dev/eval seed pools are
+used, and the success-rate reporting is the same. So a command-center experiment shows a mean success
+fraction and a comparison shows a Wilson interval, both computed by this method.
+`crates/engine/examples/grid_world_harness.rs` is the command-line surface
 (`cargo run -p probelab-engine --example grid_world_harness -- --episodes 70`), and the test suite is
-the other consumer. Wiring multi-episode aggregates into the desktop app is follow-on UI work, and the
-existence of this module should not be read as the app having gained a statistics panel.
+the other consumer of `Harness::measure` itself.
 
 ### What the greedy-beats-search proof does and does not show
 
 `crates/engine/tests/benchmark_quality.rs::b6_greedy_is_beaten_by_a_search_policy_with_disjoint_intervals`
 measures a scripted one-step-lookahead baseline and a scripted search-based reference solver over the
-70 evaluation seeds and asserts their Wilson intervals do not overlap. Measured on this build:
+70 evaluation seeds and asserts their Wilson intervals do not overlap. Measured on this build, and
+reproducible with the command above (`docs/STATUS.md` §7 carries the same table with the full result
+including the two memory-reactive policies):
 
 | Policy | Successes | Rate | 95 % CI | Mean reward | Mean turns |
 | --- | --- | --- | --- | --- | --- |
-| random (uniform valid moves) | 0 / 70 | 0.000 | [0.000, 0.052] | −2.79 | 7.60 |
-| greedy (one-step lookahead) | 20 / 70 | 0.286 | [0.193, 0.401] | 4.93 | 7.59 |
-| search (reference solver) | 66 / 70 | 0.943 | [0.862, 0.978] | 14.60 | 5.91 |
+| random (uniform valid moves) | 0 / 70 | 0.000 | [0.000, 0.052] | 1.41 | 8.21 |
+| greedy (one-step lookahead) | 24 / 70 | 0.343 | [0.242, 0.460] | 5.69 | 7.27 |
+| search (reference solver) | 68 / 70 | 0.971 | [0.902, 0.992] | 14.91 | 5.83 |
 
 **What that shows:** the instrument has a measurable range. A trivial heuristic is beatable, and the
 gap is large enough that it is not sampling noise. Whatever a real model scores on this benchmark is

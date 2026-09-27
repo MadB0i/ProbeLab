@@ -1,25 +1,44 @@
 {
   "$comment": [
-    "A machine-readable claim about what the product implements. CI runs",
-    "scripts/check-feature-matrix.py, which verifies that every capability marked 'complete' names a",
-    "Tauri command that exists and test files that exist. A capability is only 'complete' when the",
-    "product can actually reach it and a test actually covers it.",
+    "The machine-readable statement of what ProbeLab implements.",
     "",
-    "Status values are deliberately three-way. 'partial' exists so a half-finished capability is",
-    "visible rather than being rounded up to 'complete' or hidden entirely."
+    "Validated by `scripts/check-feature-matrix.py`, which reads the REAL `generate_handler![]` list",
+    "and the real `invoke` calls in the frontend -- not the `#[tauri::command]` attribute, which marks",
+    "a definition rather than a registration. Nine commands were once defined but never registered,",
+    "which left three panels dead in the built application while this file described them as working",
+    "and the previous version of that script passed, because it read the wrong list.",
+    "",
+    "`status` is one of:",
+    "  complete         -- backend behaviour, UI behaviour, tests, and documentation all agree.",
+    "  partial          -- reachable and tested, but some promised behaviour is absent. Use this",
+    "                      rather than rounding up to `complete`: the point of the distinction is that a",
+    "                      half-finished capability is visible rather than hidden.",
+    "  not-implemented  -- deliberately absent. Names no command and cites no tests, and the checker",
+    "                      enforces both, so a capability cannot accumulate the evidence of an",
+    "                      implementation while claiming its absence.",
+    "",
+    "`command` is the Tauri command that makes the capability reachable, and it must appear in the real",
+    "`generate_handler![]` list. `SHARED_COMMANDS` in the checker names a witness where the driving",
+    "command belongs to another capability. `implementation` is the file holding the behaviour.",
+    "",
+    "This file is authoritative about WHAT EXISTS. `docs/STATUS.md` is authoritative about STATE, what",
+    "is verified, and what is known broken. The two must be updated together; `README.md`,",
+    "`ARCHITECTURE.md`, `SECURITY.md`, and `PROGRESS.md` are design records and are not statements of",
+    "state."
   ],
-  "schemaVersion": 1,
-  "generatedBy": "scripts/check-feature-matrix.py",
+  "schemaVersion": 2,
   "capabilities": [
     {
       "id": "grid-world",
       "area": "benchmark",
       "status": "complete",
       "command": "run_experiment",
-      "summary": "Partially observable grid planning with a replayable seed.",
+      "implementation": "crates/benchmarks/src/registry.rs",
+      "summary": "Partially observable planning on a 5x5 grid. The start, the goal, the branches, and the hazards are all drawn per seed, and the turn budget is ceil(1.5 x that seed's own shortest hazard-free route), so a harder seed gets a proportionally tighter budget. Observation is the agent's own tile, its four neighbours, and a scalar distance-to-goal -- never a direction, and never a map.",
       "tests": [
         "crates/engine/tests/vertical_slice.rs",
-        "crates/lab/tests/runner.rs"
+        "crates/lab/tests/runner.rs",
+        "crates/engine/tests/benchmark_quality.rs"
       ]
     },
     {
@@ -27,7 +46,8 @@
       "area": "benchmark",
       "status": "complete",
       "command": "run_experiment",
-      "summary": "A capability-gated task where the process capability is real and executed; filesystem, network, and environment capabilities are authorized and refused at execution time, not executed.",
+      "implementation": "crates/benchmarks/src/registry.rs",
+      "summary": "A real contained child, gated on both an authorized spawn that ran to completion and the per-seed goal being reached. The request costs a turn from the seed's own budget, so spending it carelessly still fails. Windows only: a non-Windows host is refused at plan time because the spawn would fail closed at the last moment. The child's output is verified from containment's own captured stream, because the evaluator is given no sandbox root.",
       "tests": [
         "crates/engine/tests/sandbox_process_quality.rs",
         "crates/lab/tests/runner.rs"
@@ -38,30 +58,28 @@
       "area": "orchestration",
       "status": "complete",
       "command": "list_agents",
-      "summary": "One authoritative agent description that the UI renders and the runner builds through, with per-agent game compatibility.",
-      "tests": [
-        "crates/lab/tests/agents.rs"
-      ]
+      "implementation": "crates/lab/src/agents.rs",
+      "summary": "Every agent the lab can evaluate, with the category that says whether its number is a claim about a model. The UI's list is derived from this registry rather than hand-written, so a dropdown cannot offer an agent the backend refuses. Two seats are game policies; the rest are grid policies; the security probes are their own category and are never presented as model scores.",
+      "tests": ["crates/lab/tests/agents.rs"]
     },
     {
       "id": "benchmark-registry",
       "area": "orchestration",
       "status": "complete",
       "command": "list_benchmark_details",
-      "summary": "Benchmarks declare their capability-execution mode and replay support in the registry rather than in UI copy.",
-      "tests": [
-        "crates/benchmarks/src/lib.rs"
-      ]
+      "implementation": "crates/benchmarks/src/registry.rs",
+      "summary": "The catalogue, plus the honesty metadata a row needs to be rendered truthfully: the declared capability execution mode, what the score measures, whether a reference agent exists, replay support, and platform requirements. A benchmark that authorizes a capability without executing it reports `authorized_deferred`, so a row cannot read like a working sandbox feature.",
+      "tests": ["crates/benchmarks/src/lib.rs", "crates/benchmarks/tests/registry.rs"]
     },
     {
       "id": "brain-panel",
       "area": "ui",
       "status": "complete",
       "command": "brain_panel",
-      "summary": "A read-only projection of the real orchestrator: phase, plan decisions, monitoring signals, and the experiment's own event timeline.",
+      "implementation": "apps/desktop/src/BrainPanel.tsx",
+      "summary": "The orchestrator's read model, exactly as the library produces it. The panel renders those fields and nothing else, which is what stops a component inventing a metric the backend never computed. Policy violations and broker refusals are shown as two separate counts and never summed, because the sum rises when the sandbox works correctly. A mean success fraction is null when nothing completed, and the null reaches the DOM rather than rendering as 0%.",
       "tests": [
         "crates/lab/tests/view.rs",
-        "apps/desktop/src-tauri/src/brain.rs",
         "apps/desktop/src/BrainPanel.test.tsx"
       ]
     },
@@ -70,17 +88,17 @@
       "area": "orchestration",
       "status": "complete",
       "command": "run_experiment",
-      "summary": "Turns a plan into episodes, results, a timeline, and a terminal state. Holds no broker, no policy, and no containment handle, so it is structurally incapable of authorizing.",
-      "tests": [
-        "crates/lab/tests/runner.rs"
-      ]
+      "implementation": "crates/lab/src/runner.rs",
+      "summary": "The multi-episode execution path: plan, run, observe, evaluate, persist, aggregate. Holds no broker handle, no policy object, and no process launcher, which is asserted structurally rather than by review. Per-episode failures are recorded and the run continues, because a real measurement must survive one bad episode.",
+      "tests": ["crates/lab/tests/runner.rs"]
     },
     {
       "id": "arena-tictactoe",
       "area": "arena",
       "status": "complete",
       "command": "play_arena_match",
-      "summary": "A real match through the engine's play_match, with per-ply board history from the engine's own telemetry. Two policies are registered, one a perfect ceiling.",
+      "implementation": "crates/engine/src/arena/tictactoe.rs",
+      "summary": "Tic-Tac-Toe played end to end, with a perfect exhaustive-minimax reference as the ceiling and a first-legal policy as the floor. Per-ply board history comes from the engine's own telemetry, so the board shown is a recording and the frontend holds no game state. Legal moves can still lose, which is why the headline is the loss rate against the perfect policy rather than a win rate.",
       "tests": [
         "crates/engine/tests/arena_tictactoe.rs",
         "crates/lab/tests/arena.rs",
@@ -92,42 +110,38 @@
       "area": "arena",
       "status": "not-implemented",
       "command": null,
-      "summary": "Schema exists in GameBoard and GameKind; no engine implementation, so it is not offered rather than offered and left to fail.",
-      "tests": []
+      "summary": "Types exist in the core schema and no engine module implements them. Refused with a typed `ArenaRunError::UnknownGame` before a match starts, and the panel states this rather than offering a picker that would fail. The product thesis is the controlled evaluation laboratory, not the number of games."
     },
     {
       "id": "arena-rps",
       "area": "arena",
       "status": "not-implemented",
       "command": null,
-      "summary": "Schema exists; no engine implementation.",
-      "tests": []
+      "summary": "Types exist in the core schema and no engine module implements them. Refused with a typed `ArenaRunError::UnknownGame` before a match starts."
     },
     {
       "id": "arena-battleship",
       "area": "arena",
       "status": "not-implemented",
       "command": null,
-      "summary": "Schema exists; no engine implementation.",
-      "tests": []
+      "summary": "Types exist in the core schema and no engine module implements them. `Position` is deliberately not the grid-world `Coordinate`: that type means where the agent is standing, and reusing it would couple the games' geometry to the grid vocabulary."
     },
     {
       "id": "arena-human-seat",
       "area": "arena",
       "status": "not-implemented",
       "command": null,
-      "summary": "No human-turn path. A human player would be a second execution path with its own state transitions, in a panel whose value is that the environment is the only thing that moves the board.",
-      "tests": []
+      "summary": "There is no human-turn path and none was invented. `play_match` is atomic, so a match runs agent against agent to completion and there is never a turn for a user to take. A submit-move command would mean a second execution path with its own state transitions and its own validation, in a panel whose entire value is that the environment is the only thing that moves the board."
     },
     {
       "id": "security-lab",
       "area": "security",
       "status": "complete",
       "command": "run_security_sweep",
-      "summary": "Runs the registry's six security probes through the real broker and sandbox path and reports which layer acted. A caught attempt is a successful test, not a vulnerability.",
+      "implementation": "crates/lab/src/security.rs",
+      "summary": "Six registered probes, each executed through the same LabRunner path an ordinary experiment takes, so there is no shortcut by which a probe could report a result the engine did not produce. Reports which layer acted, because the distinction is the substance: the gate denied an attempt, the broker refused a request, or nothing was tested -- which is not a pass. No command can declare a breach or reclassify an outcome, and there is no combined security total.",
       "tests": [
         "crates/lab/tests/security.rs",
-        "apps/desktop/src-tauri/src/security.rs",
         "apps/desktop/src/SecurityPanel.test.tsx"
       ]
     },
@@ -136,9 +150,11 @@
       "area": "replay",
       "status": "complete",
       "command": "replay_arena_match",
-      "summary": "Reconstructs recorded frames deterministically. Holds no provider, broker, launcher, or engine, so it cannot call a model or execute anything.",
+      "implementation": "crates/lab/src/replay.rs",
+      "summary": "Reconstructs recorded data and nothing else: no engine, no provider, no broker, so it cannot execute or authorize anything and cannot call a model by accident. An arena recording is re-executable; an experiment recording is an event stream and is labelled inspection-only, because the intermediate environment states were never captured. Limitations are rendered in full, since a replay that quietly filled a gap would be fabricating history.",
       "tests": [
         "crates/lab/tests/replay.rs",
+        "crates/lab/tests/adversarial.rs",
         "apps/desktop/src/ReplayPanel.test.tsx"
       ]
     },
@@ -147,7 +163,8 @@
       "area": "ui",
       "status": "complete",
       "command": "compare_experiments",
-      "summary": "Stored experiments can be compared, ranked by success fraction, mean reward, mean turns, and mean invalid actions. A run with no completed episode has no score, no rank, and a stated reason -- it is never shown as 0%. Equal measurements share a rank, and every success fraction carries its Wilson interval, so a one-episode run is visibly weaker evidence rather than a better agent. Two runs are refused outright when their benchmark or root seed differ, because they are not measuring the same thing. Differing agent, adapter, or strategy is a confound rather than a blocker -- refusing that would make the feature useless -- so the comparison is produced and every unheld identity is declared above the rankings. The panel renders the backend decision and computes nothing itself.",
+      "implementation": "crates/lab/src/comparison.rs",
+      "summary": "Ranks two or more stored experiments, or refuses and names the dimensions that were not held constant. The refusal is a tagged response rather than an absence, so a panel has to handle it. Broker refusals and policy violations are counted separately and only the latter sets the security-finding flag, because a broker refusal is the boundary working. Holds no executor and writes nothing.",
       "tests": [
         "crates/lab/tests/comparison.rs",
         "apps/desktop/src/ComparisonPanel.test.tsx"
@@ -158,11 +175,11 @@
       "area": "ui",
       "status": "complete",
       "command": "read_settings",
-      "summary": "Real settings, stored in their own SQLite file and validated in the core crate before anything is written. Editable: default episode count, seed behaviour (planner-chosen or fixed) and its value, provider protocol, base URL, model, request timeout, the name of the environment variable holding the API key, and which provider the command center offers first. The command center starts from these values, so a change genuinely affects future experiments and connected runs -- previously these were hard-coded in React and lost on every launch. Read-only and shown with the reason: results and settings storage paths, the credential policy, log verbosity (RUST_LOG, read at start-up), and platform containment support. Deliberately not configurable: sampling temperature and max completion tokens, which are fixed at 0 and 200 so a run stays comparable with another. There is no credential field anywhere in the document -- the key is read from the process environment at run time, and the type has nowhere to put one. Reset replaces one settings row and cannot reach results, telemetry, or replay data, which is asserted by storing a result in the same file and checking it afterwards.",
+      "implementation": "crates/lab/src/settings.rs",
+      "summary": "Defaults for future runs, stored in a backend SQLite file separate from the results database, so a settings reset is structurally incapable of reaching a measurement. Every write is validated in the core crate before it is persisted, and the response is the stored document rather than the submitted one, so a panel cannot display a value the backend adjusted or refused. There is no field anywhere in the document that could hold a credential.",
       "tests": [
         "crates/lab/tests/settings.rs",
-        "apps/desktop/src/SettingsPanel.test.tsx",
-        "apps/desktop/src-tauri/src/settings.rs"
+        "apps/desktop/src/SettingsPanel.test.tsx"
       ]
     },
     {
@@ -170,27 +187,32 @@
       "area": "provider",
       "status": "complete",
       "command": "get_provider_status",
-      "summary": "The OpenAI-compatible chat-completions path, verified working against a local Ollama. Also reaches vLLM, LM Studio, and llama.cpp where they expose /v1.",
+      "implementation": "crates/model-adapters/src/lib.rs",
+      "summary": "Chat Completions over HTTPS or loopback, with redirects and retries disabled, credentials read from the environment by the adapter and never crossing the IPC boundary. The only provider the run configuration admits. The transport reaches any server exposing /v1/chat/completions; that is a protocol statement, not a tested claim, and no such server is in CI.",
       "tests": [
-        "crates/model-adapters/src/lib.rs"
+        "crates/model-adapters/src/lib.rs",
+        "crates/lab/tests/adversarial.rs"
       ]
     },
     {
       "id": "provider-anthropic",
       "area": "provider",
-      "status": "complete",
+      "status": "partial",
       "command": "get_provider_status",
-      "summary": "The Anthropic Messages API: version header, top-level system prompt, and multi-block content joined so a truncated-looking reply is not misreported as unparseable.",
+      "implementation": "crates/model-adapters/src/anthropic.rs",
+      "summary": "The Messages API adapter exists, is unit tested against the same transport rules, and joins multi-block content so a reply split across blocks is not misreported as unparseable. It is NOT selectable in the desktop product: `ConnectedProvider` has one variant. Its descriptor also omits configuration_fingerprint, prompt_template_version, and environment_version, so a run through it would record those three as empty -- see docs/STATUS.md 6.3. Partial rather than complete because the adapter is a library artifact, not a product capability.",
       "tests": [
-        "crates/model-adapters/src/anthropic.rs"
+        "crates/model-adapters/src/anthropic.rs",
+        "crates/model-adapters/tests/provider_boundary.rs"
       ]
     },
     {
       "id": "provider-gemini",
       "area": "provider",
-      "status": "complete",
+      "status": "partial",
       "command": "get_provider_status",
-      "summary": "The Gemini generateContent API, with the model name constrained so it cannot redirect a request out of the intended endpoint.",
+      "implementation": "crates/model-adapters/src/gemini.rs",
+      "summary": "The generateContent adapter exists and constrains the model name, because it goes into a URL path. NOT selectable in the desktop product. Same descriptor gap as the Anthropic adapter: an empty fingerprint, prompt version, and environment version. Partial rather than complete for the same reason.",
       "tests": [
         "crates/model-adapters/src/gemini.rs",
         "crates/model-adapters/tests/provider_boundary.rs"
@@ -201,25 +223,26 @@
       "area": "provider",
       "status": "not-implemented",
       "command": null,
-      "summary": "Deliberately absent. The verified OpenAI-compatible path already reaches Ollama; a native /api/chat adapter would add a second thing to test without adding a capability.",
-      "tests": []
+      "summary": "Deliberately absent. The OpenAI-compatible transport already reaches a local Ollama server that exposes /v1, so a native adapter would be a second transport for the same protocol, maintained for branding rather than for a capability the product lacks."
     },
     {
       "id": "provider-opencode",
       "area": "provider",
       "status": "not-implemented",
       "command": null,
-      "summary": "Deliberately absent. OpenCode is a coding agent, not a model endpoint; there is no API to point at.",
-      "tests": []
+      "summary": "Deliberately absent. OpenCode is a coding-agent tooling environment, not a model endpoint. Registering it as a provider would be a category error: a tool that calls models is not a thing that answers a chat-completions request."
     },
     {
       "id": "capability-broker",
       "area": "security",
       "status": "complete",
       "command": "run_experiment",
-      "summary": "The only capability authorization authority. Review, grant, and refuse filesystem, network, process, and environment requests under an explicit policy.",
+      "implementation": "crates/broker/src/lib.rs",
+      "summary": "The only authorization authority, depending on nothing but the core types -- it holds no model handle, so there is nothing for an agent to reach through. Deny by default, with canonicalized path checks, independent read and write roots, explicit program and endpoint allowlists with no defaults, and an unconditional environment.inspect denial that has no grant path. Traversal and symlink escape are refused. A denial is value-free, so a refusal can never become a probe for what was asked.",
       "tests": [
-        "crates/broker/tests/broker.rs"
+        "crates/broker/tests/broker.rs",
+        "crates/engine/tests/capability_broker.rs",
+        "crates/lab/tests/adversarial.rs"
       ]
     },
     {
@@ -227,10 +250,13 @@
       "area": "security",
       "status": "complete",
       "command": "run_experiment",
-      "summary": "Windows AppContainer containment: a derived per-run SID, a designated writable directory, protected paths, job limits, and a fail-closed refusal when the identity cannot be placed in force. Not complete OS isolation.",
+      "implementation": "crates/sandbox/src/containment/appcontainer.rs",
+      "summary": "Windows only; every other platform fails closed with UnsupportedPlatform rather than running unconfined. A child starts suspended, inside a job object with CPU, memory, and process-count limits and KILL_ON_JOB_CLOSE, under a derived AppContainer package identity whose TokenAppContainerSid is read back and compared before resume, at low mandatory integrity, able to write only to a designated directory, with outbound network refused by the OS, an empty environment, a mandatory wall-clock timeout, and stdout/stderr redirected into the run's own directory. This is not a code sandbox: no syscall filtering, no filesystem or registry virtualization, no control over native code loading.",
       "tests": [
         "crates/sandbox/tests/appcontainer.rs",
-        "crates/sandbox/tests/containment_identity.rs"
+        "crates/sandbox/tests/containment_identity.rs",
+        "crates/sandbox/tests/containment.rs",
+        "crates/sandbox/tests/protection.rs"
       ]
     },
     {
@@ -238,7 +264,8 @@
       "area": "orchestration",
       "status": "complete",
       "command": "run_experiment",
-      "summary": "One authoritative product execution path. The Runner draws episode seeds from the benchmark own declared evaluation pool, disjoint from its development seeds, and reports a Wilson interval via the engine function rather than its own. A failed episode is recorded and skipped, each episode gets a fresh RunContext, and mean_success_fraction() is None when nothing completed. The separate Harness remains for offline benchmark discrimination measurement, where fail-fast is correct.",
+      "implementation": "crates/engine/src/harness.rs",
+      "summary": "The measurement method: declared dev and eval seed pools validated as disjoint both when the definition loads and again in the constructor, N episodes over a pool, and a success rate with a Wilson interval. Wilson rather than the normal approximation because the approximation collapses to zero width at 0% and leaves [0,1] at 100%, which is exactly where a weak policy sits. The engine's measure loop is not the loop the desktop runs, but the lab's runner uses the same pools, the same interval, and the same reporting.",
       "tests": [
         "crates/lab/tests/harness_integration.rs",
         "crates/engine/tests/benchmark_quality.rs"
@@ -249,20 +276,19 @@
       "area": "ui",
       "status": "complete",
       "command": null,
-      "summary": "Seven destinations in a persistent sidebar, hash-routed and deep-linkable, each showing one panel: command center, agents, benchmarks, providers, arena, security, replay. The active destination is marked by colour, a left bar, and aria-current, so it is not signalled by colour alone. The nav is a real button list in a labelled landmark: Tab leaves it, arrow keys and Home/End move within it, and focus follows the selection. A skip link bypasses the nav on every page. Every nav item opens a panel that exists; there are no disabled or coming-soon entries. No routing dependency is used.",
-      "tests": [
-        "apps/desktop/src/AppShell.test.tsx"
-      ]
+      "implementation": "apps/desktop/src/AppShell.tsx",
+      "summary": "Nine hash-routed destinations in a persistent sidebar, with the active one marked by colour, a left bar, and aria-current rather than by colour alone. A real button list in a labelled landmark, with a skip link. No routing dependency. Registers no command of its own: it routes between the panels below, every one of which is driven by their commands, so `brain_panel` is named as the witness. No nav item leads nowhere, and the checker verifies that by comparing the frontend's real invoke calls against the real handler list.",
+      "tests": ["apps/desktop/src/AppShell.test.tsx"]
     },
     {
       "id": "persistence-recovery",
       "area": "orchestration",
       "status": "complete",
       "command": "run_experiment",
-      "summary": "Results and telemetry persist to SQLite under an immutability trigger. Experiment lifecycle is a separate five-state record: planned, running, completed, failed, interrupted. The running state is written before the first episode, so a crash leaves evidence; on the next start every row still saying running is transitioned to interrupted, because that is provably false. A crashed run is never reported completed. Partial episodes are preserved but are not a complete measurement. There is no resume.",
+      "implementation": "crates/telemetry/src/lib.rs",
+      "summary": "Append-only telemetry with a gap-free per-run sequence, immutable results carrying an immutability trigger, a durable action trace, and lifecycle rows. Settings live in a separate file so a reset cannot reach a measurement. A row still saying running at start-up is provably wrong, so it is marked interrupted and logged rather than left to make a crashed run look complete. The running state is persisted BEFORE the first episode, which is what makes a mid-run crash detectable at all.",
       "tests": [
-        "crates/telemetry/tests/experiment_lifecycle.rs",
-        "apps/desktop/src-tauri/src/lib.rs"
+        "crates/telemetry/tests/experiment_lifecycle.rs"
       ]
     },
     {
@@ -270,11 +296,41 @@
       "area": "orchestration",
       "status": "complete",
       "command": "run_experiment",
-      "summary": "Every type that crosses a process or storage boundary has its field names and enum spellings pinned against hand-written JSON literals, in both directions. A round-trip test alone would pass when both ends drift together, which is the one case that does not matter; the defect that motivated this shipped as SecurityProbe where the wire format is security_probe, with every test green. Three properties are asserted: field names, that every boundary enum is snake_case, and that an absent optional stays absent -- a missing score that decodes to 0.0 is a measurement the product did not make. Unknown variants are rejected rather than defaulted, so a corrupted row cannot become a plausible-looking state. Two naming rules are in deliberate use and are documented where they are asserted: structs the frontend reads are camelCase, everything else is snake_case, and CapabilityPermission keeps its dotted names because stored policy documents have always used them. CI runs this as a named target, so deleting the file fails the step instead of quietly matching zero tests -- the previous filter passed while running none.",
+      "implementation": "crates/lab/tests/wire_format.rs",
+      "summary": "Field names, enum spellings, and absence semantics pinned against hand-written literals rather than asserted by round trip, because a round-trip test passes when both ends drift together. Every enum that reaches stored data or the IPC boundary has a wire_name derived from its serde definition and a test asserting the two agree, because four call sites were retyping the same enum four ways and one was storing a Debug rendering in a database column. serde_json's float_roundtrip is enabled so a stored f64 comes back bit-identical.",
       "tests": [
         "crates/lab/tests/wire_format.rs",
         "crates/lab/tests/float_precision.rs"
       ]
+    },
+    {
+      "id": "ipc-boundary",
+      "area": "orchestration",
+      "status": "complete",
+      "command": "brain_panel",
+      "implementation": "apps/desktop/src-tauri/tests/ipc_boundary.rs",
+      "summary": "The frontend is untrusted input, so the boundary is tested with what a stale, buggy, or hostile build sends: malformed JSON, missing required fields, unknown fields, case-shifted field names, numbers given as strings, negative counts, unknown tags and strategies, schema-version drift, undeclared credential fields, base URLs with embedded credentials, and path-shaped identifiers. Every refusal is a typed refusal rather than a panic, an overflow, or a value reaching the engine unvalidated. A poisoned state lock returns an error instead of crashing the process.",
+      "tests": [
+        "apps/desktop/src-tauri/tests/ipc_boundary.rs"
+      ]
+    },
+    {
+      "id": "dependency-policy",
+      "area": "orchestration",
+      "status": "complete",
+      "command": "brain_panel",
+      "implementation": "deny.toml",
+      "summary": "cargo-deny over advisories, licences, duplicate versions, and allowed sources, checked in both the Linux and Windows CI jobs with a required clean exit rather than trusting the action's pass/fail. Fail-closed: unknown registries and unknown git sources are denied, unlicensed crates are denied, and licence confidence is 0.93 with no OSI-category shortcuts. Six documented advisory exceptions, all unmaintained notices reachable only through Tauri, each naming its path in.",
+      "tests": ["crates/lab/tests/adversarial.rs"]
+    },
+    {
+      "id": "probe-registry",
+      "area": "security",
+      "status": "partial",
+      "command": "run_experiment",
+      "implementation": "crates/lab/src/probes.rs",
+      "summary": "A second, independent probe system of three prompt-injection and decoy-secret probes, wired into LabRunner and LabBrain. Library-reachable and product-unreachable: the desktop always sends an empty probe_agents list, so it never runs. Partial because it is a real capability with no product surface, and the security lab's six agent-registry probes are a different thing.",
+      "tests": ["crates/lab/tests/lab.rs"]
     }
   ]
 }
