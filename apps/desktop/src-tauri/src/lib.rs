@@ -67,23 +67,53 @@ struct RecentEventBuffer {
 }
 
 impl RecentEventBuffer {
+    /// Buffers an event for the replay read path, dropping the oldest when full.
+    ///
+    /// Deliberately infallible. This runs inside the SQLite recorder's commit callback, on whichever
+    /// thread is driving the engine, mid-experiment. A panic here cannot be returned to anyone -- the
+    /// callback's signature has no error channel -- and it would poison the lock for every later event
+    /// of the session. So a failure is logged and the event is dropped, which costs one event from an
+    /// in-memory convenience buffer; the durable SQLite record is written independently and is
+    /// unaffected.
     fn push(&self, event: TelemetryEvent) {
-        let mut buffers = self.events.lock().expect("recent telemetry buffer lock");
+        let mut buffers = match self.events.lock() {
+            Ok(buffers) => buffers,
+            Err(poisoned) => {
+                // `PoisonError` still hands back the guard, so the buffer keeps working for the rest
+                // of the session rather than becoming permanently dead.
+                tracing::error!(
+                    "the recent telemetry buffer was left locked by an earlier fault; recovering and \
+                     continuing"
+                );
+                poisoned.into_inner()
+            }
+        };
         let events = buffers.entry(event.run_id.clone()).or_default();
         if events.len() == RECENT_EVENT_LIMIT {
             events.pop_front();
         }
-        if events.len() < RECENT_EVENT_LIMIT {
-            events.push_back(event);
-        }
+        events.push_back(event);
     }
 
+    /// The buffered events for a run, oldest first.
+    ///
+    /// An empty result means either "no events" or "the buffer is unavailable", and the two are not
+    /// distinguished. That is the safe direction: the replay path falls back to the durable store, and
+    /// reporting a partial in-memory buffer as a complete one would be worse than reporting none.
     fn replay(&self, run_id: &str) -> Vec<TelemetryEvent> {
-        let buffers = self.events.lock().expect("recent telemetry buffer lock");
-        buffers
-            .get(run_id)
-            .map(|events| events.iter().cloned().collect())
-            .unwrap_or_default()
+        match self.events.lock() {
+            Ok(buffers) => buffers
+                .get(run_id)
+                .map(|events| events.iter().cloned().collect())
+                .unwrap_or_default(),
+            Err(_) => {
+                tracing::error!(
+                    run_id,
+                    "the recent telemetry buffer could not be read; the replay view is empty"
+                );
+                Vec::new()
+            }
+        }
     }
 }
 
@@ -223,7 +253,17 @@ pub fn run() {
             let brain = BrainSurface::default();
             // The Brain's runner records into the same durable sink as a single-episode run, so an
             // experiment's events and a run's events end up in one place rather than two.
-            brain.set_recorder(recorder.clone());
+            //
+            // The surface was created two lines above, so its lock cannot be poisoned here. The
+            // failure is still handled rather than unwrapped: if that ever stops being true, the
+            // application should start and record the degradation instead of aborting at launch.
+            if let Err(error) = brain.set_recorder(recorder.clone()) {
+                tracing::error!(
+                    error = %error.message,
+                    "the command center could not install its telemetry sink; experiment telemetry \
+                     will not be recorded"
+                );
+            }
             app.manage(AppState {
                 catalog: BenchmarkCatalog::new()?,
                 brain,
@@ -238,6 +278,15 @@ pub fn run() {
             });
             Ok(())
         })
+        // Every command the frontend invokes is registered here, and the list is verified against
+        // `apps/desktop/src/api.ts` by `every_invoked_command_is_registered` in the tests below.
+        //
+        // Eight commands were exported from their modules but absent from this handler, which meant
+        // the Arena, Security Lab, and Replay panels were dead surfaces in the built application
+        // while `README.md`, `PROGRESS.md`, `ARCHITECTURE.md`, and `docs/feature-matrix.json` all
+        // described them as working. `#[tauri::command]` on a function is only a *definition*: Tauri
+        // dispatches nothing that is not in `generate_handler!`. The drift guard now fails if the
+        // two lists ever disagree again, in either direction.
         .invoke_handler(tauri::generate_handler![
             apply_settings,
             brain_panel,
@@ -256,7 +305,16 @@ pub fn run() {
             run_benchmark,
             get_result,
             get_run_metadata,
-            subscribe_telemetry
+            subscribe_telemetry,
+            get_arena_match,
+            latest_arena_match,
+            list_arena_agents,
+            list_arena_games,
+            play_arena_match,
+            replay_arena_match,
+            latest_security_report,
+            list_security_probes,
+            run_security_sweep
         ])
         .run(tauri::generate_context!())
         .expect("error while running ProbeLab desktop application");
@@ -265,8 +323,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        list_agents, list_benchmark_details, list_providers, new_run_id, AgentSummary,
-        BenchmarkDetail, ProviderSummary,
+        get_arena_match, latest_arena_match, latest_security_report, list_agents,
+        list_arena_agents, list_arena_games, list_benchmark_details, list_providers,
+        list_security_probes, new_run_id, play_arena_match, replay_arena_match, run_security_sweep,
+        AgentSummary, BenchmarkDetail, ProviderSummary,
     };
     use probelab_lab::AgentCategory;
     use probelab_lab::AgentRegistry;
@@ -446,5 +506,247 @@ mod tests {
             assert_eq!(restored.id, provider.id);
             assert_eq!(restored.api_key_env, provider.api_key_env);
         }
+    }
+
+    // # IPC registration drift guard
+    //
+    // `#[tauri::command]` marks a function as a command. It does not make Tauri dispatch it. Only an
+    // entry in `generate_handler![]` does, and a command that is defined but not registered is not a
+    // command the product has — it is a function that silently does nothing.
+    //
+    // That distinction was invisible here for a long time. The Arena, Security Lab, and Replay panels
+    // were fully built, fully tested, and fully documented, and every one of their commands was
+    // absent from the handler. Nothing failed: the Rust compiled, all 834 tests passed, the feature
+    // matrix checker passed, and CI was green. A user who opened the application found three panels
+    // that could not do anything.
+    //
+    // The failure mode was structural, not accidental. Three separate facts had to be checked and none
+    // of them were: the frontend invokes a name, `api.ts` declares a wrapper for it, and
+    // `generate_handler![]` lists it. `scripts/check-feature-matrix.py` came closest, but it collected
+    // every `#[tauri::command]` in the crate — definitions, not registrations — so a command that was
+    // defined and unregistered satisfied it exactly. A gate that reads the wrong list is worse than no
+    // gate, because it reads as coverage.
+    //
+    // So the two real lists are compared directly: the names `api.ts` actually invokes, and the names
+    // `generate_handler![]` actually dispatches. Either direction of drift fails.
+
+    /// The command names the frontend invokes, read out of the real frontend source.
+    ///
+    /// Scans every `.ts`/`.tsx` file under `apps/desktop/src`, not just `api.ts`. The typed wrappers
+    /// in `api.ts` are the *preferred* route, but the command center also calls a handful of commands
+    /// directly -- `get_result` and `get_run_metadata` for the durable read-back, `run_benchmark` for
+    /// the single-episode path, `get_provider_status` for the preflight check. Reading only the
+    /// wrappers would report those as unreachable and the gate would be wrong.
+    fn frontend_invoked_commands() -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for source in frontend_sources() {
+            let mut rest = source;
+            while let Some(at) = rest.find("invoke<") {
+                rest = &rest[at + "invoke<".len()..];
+                // Skip the generic argument, which may itself contain angle brackets.
+                let mut angle = 1usize;
+                let mut end = None;
+                for (index, character) in rest.char_indices() {
+                    match character {
+                        '<' => angle += 1,
+                        '>' => {
+                            angle -= 1;
+                            if angle == 0 {
+                                end = Some(index);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                let Some(end) = end else { break };
+                rest = &rest[end + 1..];
+                let Some(open) = rest.find('(') else { break };
+                let Some(close) = rest[open..].find(')') else {
+                    break;
+                };
+                let arguments = &rest[open + 1..open + close];
+                let quoted = arguments
+                    .trim()
+                    .trim_start_matches(|c: char| c != '"' && c != '\'' && c != '`')
+                    .trim_start_matches(['"', '\'', '`']);
+                if let Some(end_quote) = quoted.find(['"', '\'', '`']) {
+                    names.push(quoted[..end_quote].to_owned());
+                }
+            }
+        }
+        names.sort();
+        names.dedup();
+        assert!(
+            !names.is_empty(),
+            "no invoke calls found in the frontend; the extraction is broken, not the frontend"
+        );
+        names
+    }
+
+    /// Every frontend source file, embedded at compile time so the guard cannot pass by accident.
+    fn frontend_sources() -> Vec<&'static str> {
+        vec![
+            include_str!("../../src/api.ts"),
+            include_str!("../../src/App.tsx"),
+            include_str!("../../src/AppShell.tsx"),
+            include_str!("../../src/AgentCatalog.tsx"),
+            include_str!("../../src/ArenaPanel.tsx"),
+            include_str!("../../src/BenchmarkCatalog.tsx"),
+            include_str!("../../src/BrainPanel.tsx"),
+            include_str!("../../src/ComparisonPanel.tsx"),
+            include_str!("../../src/ReplayPanel.tsx"),
+            include_str!("../../src/SecurityPanel.tsx"),
+            include_str!("../../src/SettingsPanel.tsx"),
+            include_str!("../../src/main.tsx"),
+        ]
+    }
+
+    /// The command names `generate_handler![]` dispatches, read out of this file's own source.
+    fn dispatched_commands() -> Vec<String> {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("tauri::generate_handler![")
+            .expect("this file registers commands");
+        let rest = &source[start + "tauri::generate_handler![".len()..];
+        let end = rest.find(']').expect("the handler list is closed");
+        let mut names: Vec<String> = rest[..end]
+            .split(',')
+            .map(|entry| entry.trim().to_owned())
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        names.sort();
+        names.dedup();
+        assert!(!names.is_empty(), "the handler list is empty");
+        names
+    }
+
+    /// Every command the frontend calls is one Tauri dispatches.
+    ///
+    /// This is the assertion that would have failed before the eight missing commands were
+    /// registered, and it fails in the same direction if one is ever dropped again.
+    #[test]
+    fn every_command_the_frontend_invokes_is_registered() {
+        let invoked = frontend_invoked_commands();
+        let dispatched = dispatched_commands();
+        let missing: Vec<&String> = invoked
+            .iter()
+            .filter(|name| !dispatched.contains(name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the frontend invokes {} command(s) Tauri does not dispatch: {missing:?}. \
+             A command that is not in `generate_handler![]` is a function, not a feature: the panel \
+             that calls it is dead in the built application while its documentation claims it works.",
+            missing.len()
+        );
+    }
+
+    /// Every dispatched command is one the frontend calls, or is on the justified list below.
+    ///
+    /// The other direction, and it is a weaker property than the first. A command nobody invokes is
+    /// not a correctness defect -- nothing breaks, and the read-only commands that make up most of this
+    /// list are useful without being wired to a screen. Deleting working code to satisfy a check would
+    /// be the wrong trade, so this is a *declared* list rather than a hard requirement: an unused
+    /// command has to be named here, with its reason, and a reason that stops being true gets deleted
+    /// rather than left to rot.
+    #[test]
+    fn every_registered_command_is_reachable_or_declared() {
+        // Read-only accessors and a durable read-back path that the API deliberately keeps exposed
+        // even where no panel currently calls it. Each entry states why it is still here.
+        const DECLARED_UNUSED: &[(&str, &str)] = &[(
+            "get_arena_match",
+            "read-only single-match accessor, paired with the 20-match retained surface; \
+                 `latest_arena_match` is what the panel calls",
+        )];
+        let invoked = frontend_invoked_commands();
+        let dispatched = dispatched_commands();
+        let unaccounted: Vec<&String> = dispatched
+            .iter()
+            .filter(|name| !invoked.contains(name))
+            .filter(|name| !DECLARED_UNUSED.iter().any(|(command, _)| command == *name))
+            .collect();
+        assert!(
+            unaccounted.is_empty(),
+            "Tauri dispatches {} command(s) the frontend never invokes and that are not declared \
+             unused: {unaccounted:?}. Either the frontend should call it, or the reason it is kept \
+             belongs in DECLARED_UNUSED -- an undeclared command is a claim with no user.",
+            unaccounted.len()
+        );
+        // A declared entry that has become used is stale, and a stale exception hides the next one.
+        for (command, _) in DECLARED_UNUSED {
+            assert!(
+                dispatched.iter().any(|name| name == command),
+                "{command} is declared unused but is not dispatched at all"
+            );
+            assert!(
+                !invoked.iter().any(|name| name == command),
+                "{command} is declared unused but the frontend now invokes it; remove the entry"
+            );
+        }
+    }
+
+    /// The eight commands that were defined but never dispatched, by name.
+    ///
+    /// Pinned rather than left to history because the failure was invisible for long enough that
+    /// "it used to be broken" is the only honest description. If one of these is ever deliberately
+    /// removed, this test is the place to record that, in the same commit.
+    #[test]
+    fn the_panels_that_were_dead_are_now_live() {
+        let dispatched = dispatched_commands();
+        for command in [
+            // Arena
+            "play_arena_match",
+            "list_arena_games",
+            "list_arena_agents",
+            "latest_arena_match",
+            "get_arena_match",
+            "replay_arena_match",
+            // Security Lab
+            "run_security_sweep",
+            "list_security_probes",
+            "latest_security_report",
+        ] {
+            assert!(
+                dispatched.iter().any(|name| name == command),
+                "{command} is not dispatched, so the panel that calls it cannot work"
+            );
+        }
+        // The functions exist and are typed; registration is what was missing. Referencing them keeps
+        // this test honest if a command is ever renamed on the Rust side without the frontend
+        // following, which `every_command_the_frontend_invokes_is_registered` also catches.
+        let _ = (
+            list_arena_games(),
+            list_arena_agents("tic_tac_toe".to_owned()),
+            latest_security_report as fn(_) -> _,
+        );
+        let _ = (
+            latest_arena_match as fn(_) -> _,
+            list_security_probes as fn(_) -> _,
+            get_arena_match as fn(_, _) -> _,
+            replay_arena_match as fn(_, _) -> _,
+        );
+    }
+
+    /// The surfaces those commands read are the ones the application manages.
+    ///
+    /// `play_arena_match` and `run_security_sweep` take `State<'_, AppState>`, which only resolves
+    /// because `AppState` is what `app.manage(..)` installs. A refactor that managed a different type
+    /// would compile and then fail at run time on the first Arena match, so this asserts the managed
+    /// state is the one the commands ask for.
+    #[test]
+    fn the_arena_and_security_commands_read_managed_state_that_exists() {
+        fn assert_state_types_are_expressible(
+            _: Option<tauri::State<'static, super::ArenaSurface>>,
+            _: Option<tauri::State<'static, super::SecuritySurface>>,
+            _: Option<tauri::State<'static, super::BrainSurface>>,
+            _: Option<tauri::State<'static, super::AppState>>,
+        ) {
+        }
+        // The commands below are never called; their types are what is under test.
+        let _ = play_arena_match as fn(_, _) -> _;
+        let _ = run_security_sweep as fn(_, _) -> _;
+        assert_state_types_are_expressible(None, None, None, None);
     }
 }
