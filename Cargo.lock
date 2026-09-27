@@ -2540,6 +2540,8 @@ name = "probelab-agent"
 version = "0.4.1"
 dependencies = [
  "probelab-core",
+ "serde_json",
+ "thiserror 2.0.21",
  "tokio",
 ]
 
@@ -2625,6 +2627,7 @@ dependencies = [
 name = "probelab-model-adapters"
 version = "0.4.1"
 dependencies = [
+ "probelab-agent",
  "probelab-core",
  "rand 0.9.5",
  "rand_chacha",

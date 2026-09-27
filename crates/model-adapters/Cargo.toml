@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Deterministic model provider adapters for ProbeLab"
 
 [dependencies]
+probelab-agent = { path = "../agent" }
 probelab-core = { path = "../core" }
 rand.workspace = true
 rand_chacha.workspace = true

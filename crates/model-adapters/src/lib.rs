@@ -1175,6 +1175,7 @@ struct Flooded {
 /// exhausted. Without that, walking into a cul-de-sac means stepping back in on the next turn and
 /// oscillating until the budget runs out — which is exactly the failure mode that made the previous
 /// version of this benchmark unable to tell a search policy from a coin flip.
+#[derive(Clone, Debug)]
 pub struct LookaheadSolver {
     known: BTreeMap<(u8, u8), TileKind>,
     readings: BTreeMap<(u8, u8), u32>,
@@ -1201,6 +1202,18 @@ impl LookaheadSolver {
     /// Returns the seed this solver was created with.
     pub fn seed(&self) -> u64 {
         self.seed
+    }
+
+    /// Discards everything inferred so far, keeping the seed.
+    ///
+    /// The seed is retained because it is never consulted in a decision — it exists for the
+    /// descriptor and the replay fingerprint — while the three maps are pure episode state. A solver
+    /// that remembered its previous episode would start the next one already knowing tiles it never
+    /// observed, which is an advantage no honest policy gets.
+    pub fn clear_inferred(&mut self) {
+        self.known.clear();
+        self.readings.clear();
+        self.tried.clear();
     }
 
     /// Records this turn's evidence and corrects the inferred direction if the last move lied.
@@ -1823,6 +1836,10 @@ fn orthogonal(cell: (u8, u8), grid_size: GridSize) -> Vec<(u8, u8)> {
     }
     cells
 }
+
+mod reference_strategies;
+
+pub use reference_strategies::{GridWorldReference, SandboxProcessReference};
 
 #[cfg(test)]
 mod tests {

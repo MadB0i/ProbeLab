@@ -21,15 +21,15 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use probelab_agent::ProviderAgent;
+use probelab_agent::{ProviderAgent, ReferenceAgent};
 use probelab_benchmarks::{SandboxProcessBenchmark, MINIMUM_EVAL_SEEDS};
 use probelab_core::{
-    Agent, Benchmark, ModelDecision, ModelDescriptor, ModelRequest, TelemetryRecorder,
+    Action, Agent, Benchmark, ModelDecision, ModelDescriptor, ModelRequest, TelemetryRecorder,
 };
 use probelab_engine::harness::{AggregateScore, Harness, MeasurementPlan, SeedPool, SeedPools};
 use probelab_engine::BenchmarkRunner;
 use probelab_evaluator::SandboxProcessEvaluator;
-use probelab_model_adapters::LookaheadSolver;
+use probelab_model_adapters::{GridWorldReference, SandboxProcessReference};
 use probelab_telemetry::SqliteTelemetryRecorder;
 
 fn benchmark() -> SandboxProcessBenchmark {
@@ -80,16 +80,13 @@ fn harness() -> Harness {
 /// This is the ceiling for "uses the capability and finishes the task". It exists to show the
 /// benchmark is satisfiable, not to be a claim about any model.
 fn requests_then_searches(seed: u64) -> Box<dyn Agent> {
-    Box::new(ProviderAgent::from_provider(RequestingProvider {
-        inner: LookaheadSolver::new(seed),
-        asked: false,
-    }))
+    Box::new(ReferenceAgent::new(SandboxProcessReference::new(seed)))
 }
 
 /// The same search policy, but it never asks. The only difference from the above is the request, so
 /// any gap between them is attributable to the capability and to nothing else.
 fn searches_only(seed: u64) -> Box<dyn Agent> {
-    Box::new(ProviderAgent::from_provider(LookaheadSolver::new(seed)))
+    Box::new(ReferenceAgent::new(GridWorldReference::new(seed)))
 }
 
 /// The floor: a policy that only ever waits, and never asks for anything.
@@ -110,41 +107,12 @@ impl probelab_core::ModelProvider for WaitForever {
     }
 
     fn predict(&mut self, _request: ModelRequest) -> Result<ModelDecision, String> {
-        Ok(ModelDecision::GridAction(probelab_core::Action::Wait))
+        Ok(ModelDecision::GridAction(Action::Wait))
     }
 }
 
 fn waits_only(_seed: u64) -> Box<dyn Agent> {
     Box::new(ProviderAgent::from_provider(WaitForever))
-}
-
-/// Wraps the search reference and asks for the process once, on turn one.
-///
-/// Implemented as a `ModelProvider` wrapper rather than a new solver so the two policies differ in
-/// exactly one decision and share every other line of navigation. A comparison where the requesting
-/// policy also navigates better would not be able to attribute the gap.
-struct RequestingProvider {
-    inner: LookaheadSolver,
-    asked: bool,
-}
-
-impl probelab_core::ModelProvider for RequestingProvider {
-    fn descriptor(&self) -> ModelDescriptor {
-        let mut descriptor = self.inner.descriptor();
-        descriptor.strategy = format!("{}+process_request", descriptor.strategy);
-        descriptor
-            .parameters
-            .insert("requests_process".to_owned(), serde_json::Value::Bool(true));
-        descriptor
-    }
-
-    fn predict(&mut self, request: ModelRequest) -> Result<ModelDecision, String> {
-        if !self.asked && request.turn == 1 {
-            self.asked = true;
-            return Ok(ModelDecision::ProcessSpawnRequest);
-        }
-        self.inner.predict(request)
-    }
 }
 
 fn measure(label: &str, build: &mut dyn FnMut(u64) -> Box<dyn Agent>) -> AggregateScore {

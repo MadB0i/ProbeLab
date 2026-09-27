@@ -134,11 +134,50 @@ Windows host at `main` `0608e92`; see `docs/AUDIT-2026-09-26.md` for the full au
   that charges it a turn*. It is not a coding measurement, and a seed-aware plan accessor is the
   prerequisite for that.
 
+### v0.5 phase 3 — the reusable cross-benchmark reference agent
+
+- **`ReferenceStrategy` + `ReferenceAgent`**, in `crates/agent`, depending only on `core`. A strategy
+  answers exactly one question — given this `ModelRequest`, what do you do — and knows nothing about
+  harnesses, telemetry, evaluators, or containment. The wrapper owns request validation, the descriptor
+  contract, and the per-episode reset, so a new benchmark supplies four methods and inherits the rest.
+  This is a component, not a competing product: it has no objective of its own and no way to be
+  configured into looking better than it is.
+- **It replaced real duplication, not hypothetical duplication.** The `sandbox-process` reference policy
+  had been a `ModelProvider` wrapper written inline inside a test, so the reference policy for a shipped
+  benchmark was not a shipped artifact. It is now `SandboxProcessReference`, and
+  `GridWorldReference` wraps the existing `LookaheadSolver` rather than reimplementing it — so the
+  published grid-world numbers still describe the same policy they always did. The phase-2 measurement
+  reproduces identically through the new strategies.
+- **The non-privilege guarantee is structural, and published.** A strategy receives `&ModelRequest` and
+  `&mut self`, so there is no layout in scope even by accident. The seed is *not* passed to `decide` — it
+  is recorded and never consulted. `ReferenceKnowledge` states this as structured data, and
+  `ReferenceAgent` writes all four flags into the run's descriptor, so a result bundle carries its own
+  guarantee instead of asking the reader to trust a comment.
+- **The proof is written once, generically, over a registry.** Phase 0 proved this about one solver in a
+  test that named it, which does not scale — the next benchmark would either copy it or skip it. A new
+  strategy is now covered the moment it is registered. Three properties: two instances from different
+  seeds agree on every turn of one request stream (checked against seeds that are first *proved* to
+  describe different worlds, or the check would pass regardless); replaying one episode twice gives
+  identical answers; and every strategy declares and publishes observation-only knowledge.
+- **The tests caught two real defects in the design, not just in the code.** `ReferenceAgent` originally
+  reset only when `episode_id` changed, so a caller reusing an id would carry the previous episode's
+  inferences into the next; it now also resets on turn one, which cannot be faked. And a test asserting
+  the two strategies "differ only on turn one" was simply false — the request costs the inner solver its
+  first observation, which is the effect the benchmark measures and must not be engineered away. The
+  test now asserts the claim that actually matters for attribution: after the request, the two run the
+  *same policy*, compared against a grid-world reference that was likewise not consulted on turn one.
+- **A flaky test found and fixed, root-caused.** `a_child_that_outlives_its_declared_timeout_is_killed_with_the_job`
+  failed about one full-suite run in five with "the timed-out child is still running". The assertion was
+  stronger than the API it was testing: `TerminateJobObject` *marks* a job's processes for termination
+  and returns, and the kernel finishes asynchronously. It now polls a bounded grace period, which holds
+  the property worth holding — the child does not *survive* — instead of one that fails on load rather
+  than on regressions. Four consecutive full runs are clean.
+
 ## Verified
 
 - `cargo fmt --check` — the gate. Bare form is correct here because the workspace root is a *virtual* manifest, so `cargo fmt` already covers every member; `--all` is equivalent at this root.
 - `cargo build --workspace --locked`
-- `cargo test --workspace --all-targets --locked` — 277 tests passing (272 after phase 1, +5 sandbox-process tests)
+- `cargo test --workspace --all-targets --locked` — 284 tests passing (277 after phase 2, +7 reference-agent tests)
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `pnpm install` in `apps/desktop`
 - `pnpm build` in `apps/desktop`

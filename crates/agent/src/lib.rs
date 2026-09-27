@@ -2,6 +2,10 @@
 
 #![deny(missing_docs)]
 
+mod reference;
+
+pub use reference::{ReferenceAgent, ReferenceError, ReferenceKnowledge, ReferenceStrategy};
+
 use std::sync::Arc;
 
 use probelab_core::{

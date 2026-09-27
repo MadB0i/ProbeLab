@@ -39,6 +39,35 @@ const SUGGESTED_TIMEOUT: Duration = Duration::from_secs(30);
 /// A short timeout, used where a test needs the host's timer rather than the child's CPU budget.
 const SHORT_TIMEOUT: Duration = Duration::from_millis(1_500);
 
+/// How long a terminated child is given to actually stop existing.
+///
+/// `TerminateJobObject` marks a job's processes for termination and returns; the kernel does the work
+/// on its own schedule. Generous enough to absorb a loaded machine, short enough that a child which
+/// genuinely survives the kill is still caught.
+#[cfg(windows)]
+const TERMINATION_GRACE: Duration = Duration::from_secs(10);
+
+/// Whether a terminated process is still present, polled over `grace`.
+///
+/// Returns true only if the process is *still* alive when the grace period expires, so a caller can
+/// assert on the outcome without racing the kernel.
+#[cfg(windows)]
+fn survives(pid: u32, grace: Duration) -> bool {
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        match is_process_alive(pid) {
+            Ok(false) => return false,
+            Ok(true) | Err(_) if std::time::Instant::now() >= deadline => {
+                return is_process_alive(pid).unwrap_or(true)
+            }
+            _ => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+#[cfg(windows)]
+use probelab_sandbox::is_process_alive;
+
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 
 struct MemoryRecorder {
@@ -476,7 +505,7 @@ mod enforced {
     use probelab_core::{
         ContainmentStatus, IntegrityLevel, StreamCapture, TerminationReason, STREAM_PREVIEW_LIMIT,
     };
-    use probelab_sandbox::{is_process_alive, ENFORCED_JOB_LIMITS};
+    use probelab_sandbox::ENFORCED_JOB_LIMITS;
 
     #[test]
     fn an_authorized_spawn_runs_contained_with_a_full_lifecycle_record() {
@@ -706,10 +735,19 @@ mod enforced {
         );
         // Nothing the child started may outlive it: the whole job is terminated, not just the tracked
         // process, and the guard's drop closes the job handle with KILL_ON_JOB_CLOSE as a backstop.
+        //
+        // Polled rather than asserted once. `TerminateJobObject` is a *request*: it marks every process
+        // in the job for termination, and the kernel finishes the work asynchronously. An earlier
+        // version of this line asserted the child was already gone on the very next query, which is a
+        // stronger claim than the API makes — and it duly failed roughly one run in five under the
+        // full suite, where the machine is busy enough that the kill had not landed yet. The property
+        // worth holding is that the child does not *survive*, so that is what is bounded here. An
+        // instant-death assertion would be a test that fails on load rather than on regressions.
         let pid = execution.pid.expect("a process identifier was recorded");
         assert!(
-            !is_process_alive(pid).expect("query the process table"),
-            "the timed-out child is still running"
+            !survives(pid, TERMINATION_GRACE),
+            "the timed-out child was still running {:?} after the job was terminated",
+            TERMINATION_GRACE
         );
         assert_eq!(
             completed.result.integrity.total_events(),

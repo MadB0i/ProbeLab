@@ -9,4 +9,6 @@ description = "Provider-backed model agent for ProbeLab"
 
 [dependencies]
 probelab-core = { path = "../core" }
+serde_json.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true }
