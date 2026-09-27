@@ -56,11 +56,18 @@ jobs:
         # The matrix claims what is implemented. If it drifts, the claim is worthless, so CI checks that
         # every capability it marks complete still has the tests it says it has.
         run: python3 scripts/check-feature-matrix.py
-      - name: Audit serialization round-trips
+      - name: Audit wire-format stability
         # A serialization defect once shipped as `SecurityProbe` where the wire format is
-        # `security_probe`. These are named separately so a regression there is obvious in the log
-        # rather than buried among unrelated assertions.
-        run: cargo test --workspace --locked -- --exact security::serialization
+        # `security_probe`: nothing broke at run time, because both ends agreed, and the only
+        # evidence was a person reading JSON. `wire_format.rs` pins the field names and enum
+        # spellings against hand-written literals, so a rename fails here instead of reaching a
+        # stored row.
+        #
+        # The previous filter here was `--exact security::serialization`, which matched zero tests
+        # and passed. A gate that can silently stop testing anything is worse than no gate, because
+        # it reads as coverage. The target name is used instead, so deleting the file fails the step
+        # rather than quietly emptying it.
+        run: cargo test --locked --workspace --all-features --test wire_format
       - name: Audit structural security guarantees
         # The architectural tests that assert the Brain, Runner, Arena, and Replay cannot authorize,
         # execute, or bypass enforcement. Run as a named step so a failure reads as a security

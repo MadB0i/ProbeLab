@@ -257,6 +257,17 @@
         "crates/telemetry/tests/experiment_lifecycle.rs",
         "apps/desktop/src-tauri/src/lib.rs"
       ]
+    },
+    {
+      "id": "wire-format",
+      "area": "orchestration",
+      "status": "complete",
+      "command": "run_experiment",
+      "summary": "Every type that crosses a process or storage boundary has its field names and enum spellings pinned against hand-written JSON literals, in both directions. A round-trip test alone would pass when both ends drift together, which is the one case that does not matter; the defect that motivated this shipped as SecurityProbe where the wire format is security_probe, with every test green. Three properties are asserted: field names, that every boundary enum is snake_case, and that an absent optional stays absent -- a missing score that decodes to 0.0 is a measurement the product did not make. Unknown variants are rejected rather than defaulted, so a corrupted row cannot become a plausible-looking state. Two naming rules are in deliberate use and are documented where they are asserted: structs the frontend reads are camelCase, everything else is snake_case, and CapabilityPermission keeps its dotted names because stored policy documents have always used them. CI runs this as a named target, so deleting the file fails the step instead of quietly matching zero tests -- the previous filter passed while running none.",
+      "tests": [
+        "crates/lab/tests/wire_format.rs",
+        "crates/lab/tests/float_precision.rs"
+      ]
     }
   ]
 }
