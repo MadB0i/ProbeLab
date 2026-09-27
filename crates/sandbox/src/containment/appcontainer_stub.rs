@@ -120,9 +120,6 @@ pub enum AppContainerError {
         /// The Win32 error code.
         code: u32,
     },
-    /// The attribute list could not be released.
-    #[error("the AppContainer process attribute list could not be released")]
-    AttributeListNotReleased,
 }
 
 /// The profile name ProbeLab derives for every contained child.

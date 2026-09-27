@@ -30,7 +30,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use probelab_core::{Agent, Benchmark, CompletionStatus, Evaluator, TestResult};
+use probelab_core::{Agent, Benchmark, CompletionStatus, Evaluator};
 
 use crate::BenchmarkRunner;
 
@@ -401,18 +401,5 @@ fn aggregate(label: &str, outcomes: &[EpisodeOutcome], confidence: f64) -> Aggre
         mean_reward: total_reward as f64 / divisor,
         mean_turns: f64::from(total_turns) / divisor,
         status_counts,
-    }
-}
-
-/// Extracts the per-episode facts a measurement needs from a stored result.
-///
-/// Provided so a caller that runs episodes by some other route can still aggregate them honestly.
-pub fn outcome_of(result: &TestResult) -> EpisodeOutcome {
-    EpisodeOutcome {
-        seed: result.seed,
-        completion_status: result.capability.completion_status,
-        task_success: result.capability.task_success,
-        total_reward: result.capability.total_reward,
-        turns_used: result.capability.turns_used,
     }
 }

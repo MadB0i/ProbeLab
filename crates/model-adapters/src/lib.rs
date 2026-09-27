@@ -1204,12 +1204,16 @@ impl LookaheadSolver {
     }
 
     /// Records this turn's evidence and corrects the inferred direction if the last move lied.
-    fn observe(&mut self, request: &ModelRequest) -> ((u8, u8), u32) {
+    ///
+    /// Returns the cell the agent is standing on. The distance reading is not returned: it is
+    /// recorded into `readings` like every other reading, and `consistent_goal_candidates` reads it
+    /// back from there. Handing it back as well gave callers a second, unrecorded copy of a number
+    /// that is already tracked, which is the kind of duplicate that silently drifts.
+    fn observe(&mut self, request: &ModelRequest) -> (u8, u8) {
         let here = (
             request.observation.position.x,
             request.observation.position.y,
         );
-        let distance = request.observation.distance_to_goal;
         self.known.insert(here, request.observation.current_tile);
         for neighbor in &request.observation.visible_neighbors {
             self.known.insert(
@@ -1217,37 +1221,42 @@ impl LookaheadSolver {
                 neighbor.tile,
             );
         }
-        self.readings.insert(here, distance);
+        self.readings
+            .insert(here, request.observation.distance_to_goal);
 
-        (here, distance)
+        here
     }
 
     /// Every grid cell still consistent with all distance readings taken so far.
     ///
     /// This is triangulation, and it is the whole trick. Each reading says "the goal is exactly this
-    /// many Manhattan steps away", which is the boundary of a diamond centred on the agent. Two
-    /// readings on different axes normally intersect in a handful of cells, and a third collapses it
-    /// to one. Everything here comes from numbers the model was handed in its own observation: the
-    /// solver is doing arithmetic on the `distance_to_goal` field, not being told where the goal is.
-    fn consistent_goal_candidates(&self, here: (u8, u8), distance: u32) -> Vec<(u8, u8)> {
+    /// many Manhattan steps away", which is the boundary of a diamond centred on the cell the reading
+    /// was taken from. Two readings on different axes normally intersect in a handful of cells, and a
+    /// third collapses it to one. Everything here comes from numbers the model was handed in its own
+    /// observation: the solver is doing arithmetic on the `distance_to_goal` field, not being told
+    /// where the goal is.
+    ///
+    /// The current reading needs no special handling. `observe` records it in `self.readings` before
+    /// this is called, so the loop below already constrains candidates against the cell the agent is
+    /// standing on. An earlier version took the current reading as a parameter and recomputed its
+    /// distance, then discarded the result — the parameter was doing no work, and the recomputation
+    /// invited the reader to believe it was the thing being applied when it was not.
+    fn consistent_goal_candidates(&self) -> Vec<(u8, u8)> {
         let mut candidates: Vec<(u8, u8)> = (0..5)
             .flat_map(|y| (0..5).map(move |x| (x as u8, y as u8)))
             .collect();
         for (cell, reading) in &self.readings {
-            let expected = u32::from(cell.0.abs_diff(here.0)) + u32::from(cell.1.abs_diff(here.1));
-            let _ = expected;
             candidates.retain(|candidate| {
                 u32::from(candidate.0.abs_diff(cell.0)) + u32::from(candidate.1.abs_diff(cell.1))
                     == *reading
             });
         }
-        let _ = distance;
         candidates
     }
 
     /// Decides one move.
     fn decide(&mut self, request: &ModelRequest) -> Result<Action, String> {
-        let (here, distance) = self.observe(request);
+        let here = self.observe(request);
 
         // Standing next to the reward: take it. Nothing outranks this.
         if let Some(action) = self.action_to_reward(request) {
@@ -1255,7 +1264,7 @@ impl LookaheadSolver {
         }
 
         let grid_size = request.observation.grid_size;
-        let candidates = self.consistent_goal_candidates(here, distance);
+        let candidates = self.consistent_goal_candidates();
 
         // Flood-fill what this agent knows is traversable, keeping a parent pointer per cell so a
         // route can be walked back. An unknown tile counts as traversable: the solver re-plans every

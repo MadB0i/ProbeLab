@@ -204,8 +204,21 @@ fn sp_the_definition_declares_disjoint_pools_and_one_declared_program() {
 
     // A spawning benchmark has to protect its answer key: containment refuses an empty set.
     assert!(
-        !benchmark().protected_paths().is_empty(),
+        !catalog.protected_paths().is_empty(),
         "a benchmark that runs a real child must declare protected paths"
+    );
+    assert_eq!(
+        catalog.protected_paths(),
+        std::slice::from_ref(&catalog.answer_key_path().to_path_buf()),
+        "the protected path and the answer key must be the same directory; if they drift, the child \
+         is protected from nothing"
+    );
+    assert!(
+        catalog
+            .answer_key_path()
+            .join("expected-output.txt")
+            .exists(),
+        "the answer key must exist, or protecting it protects nothing"
     );
 }
 

@@ -419,10 +419,9 @@ pub const SANDBOX_PROCESS_DEFINITION_JSON: &str =
 pub struct SandboxProcessBenchmark {
     definition: GridWorldDefinition,
     program: String,
-    /// Held for its `Drop`, which removes the directory. Its path is also what `protected_paths`
-    /// reports, so the two can never disagree about which directory is the answer key.
+    /// Held for its `Drop`, which removes the directory, and as the single source of truth for
+    /// which directory is the answer key.
     answer_key: AnswerKey,
-    protected: Vec<std::path::PathBuf>,
 }
 
 /// The material a contained child must not be able to read, in a directory the containment layer can
@@ -444,6 +443,12 @@ pub struct SandboxProcessBenchmark {
 #[derive(Clone, Debug)]
 struct AnswerKey {
     directory: std::path::PathBuf,
+    /// The same path, as the slice `protected_paths` returns.
+    ///
+    /// Stored rather than rebuilt on each call so there is exactly one source of truth for which
+    /// directory is the answer key. An earlier version cached the list on the benchmark with a
+    /// `OnceLock` and held the directory separately, which meant the two could disagree.
+    paths: Vec<std::path::PathBuf>,
 }
 
 impl AnswerKey {
@@ -470,12 +475,15 @@ impl AnswerKey {
         let mut file = std::fs::File::create(directory.join("expected-output.txt")).map_err(io)?;
         file.write_all(SANDBOX_PROCESS_EXPECTED_OUTPUT.as_bytes())
             .map_err(io)?;
-        Ok(Self { directory })
+        Ok(Self {
+            paths: vec![directory.clone()],
+            directory,
+        })
     }
 
-    /// Returns the path to protect.
-    fn path(&self) -> &std::path::Path {
-        &self.directory
+    /// Returns the paths to protect.
+    fn paths(&self) -> &[std::path::PathBuf] {
+        &self.paths
     }
 }
 
@@ -515,12 +523,10 @@ impl SandboxProcessBenchmark {
             SANDBOX_PROCESS_CAPABILITY_DIMENSION,
         )?;
         let answer_key = AnswerKey::create()?;
-        let protected = vec![answer_key.path().to_path_buf()];
         Ok(Self {
             definition,
             program: declared_child_program(),
             answer_key,
-            protected,
         })
     }
 
@@ -536,7 +542,7 @@ impl SandboxProcessBenchmark {
 
     /// Returns the answer-key directory this benchmark protects from its contained child.
     pub fn answer_key_path(&self) -> &std::path::Path {
-        self.answer_key.path()
+        &self.answer_key.directory
     }
 
     /// Creates the per-seed grid world, with the same budget rule as the grid-world benchmark.
@@ -605,7 +611,7 @@ impl Benchmark for SandboxProcessBenchmark {
     /// Per-instance rather than cached process-wide, because the protection is applied and restored
     /// around every spawn and two instances sharing one path would restore each other's label.
     fn protected_paths(&self) -> &[std::path::PathBuf] {
-        &self.protected
+        self.answer_key.paths()
     }
 
     fn create_sandbox(&self, seed: u64) -> Result<Box<dyn Sandbox>, String> {

@@ -37,21 +37,6 @@ const HEIGHT: u8 = 5;
 const START_X: u8 = 0;
 const START_Y: u8 = 0;
 
-/// The fixed grid width in tiles.
-pub const GRID_WIDTH: u8 = WIDTH;
-/// The fixed grid height in tiles.
-pub const GRID_HEIGHT: u8 = HEIGHT;
-
-/// The catalog ceiling on episode length, in turns.
-///
-/// This is **not** the turn budget of any particular seed. A seed's real budget is derived from its
-/// own shortest safe route and is usually far smaller; this value is the upper bound the catalog
-/// advertises, so a summary can describe the benchmark without knowing which seed a run will use.
-pub const DEFAULT_MAX_TURNS: u32 = 12;
-
-/// The Manhattan diameter of the grid: the longest possible shortest route between two tiles.
-const GRID_DIAMETER: u32 = (WIDTH - 1) as u32 + (HEIGHT - 1) as u32;
-
 /// Numerator of the per-seed turn budget ratio.
 pub const TURN_BUDGET_NUMERATOR: u32 = 3;
 /// Denominator of the per-seed turn budget ratio.
@@ -572,11 +557,6 @@ pub fn turn_budget_for(shortest_safe_path: u32) -> u32 {
     let denominator = u64::from(TURN_BUDGET_DENOMINATOR);
     let rounded = scaled.div_ceil(denominator);
     u32::try_from(rounded.max(1)).unwrap_or(u32::MAX)
-}
-
-/// The largest turn budget any seed on this grid can require.
-pub fn maximum_turn_budget() -> u32 {
-    turn_budget_for(GRID_DIAMETER)
 }
 
 /// Draws the start and the goal, both per seed.
