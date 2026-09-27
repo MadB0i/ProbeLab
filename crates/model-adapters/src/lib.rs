@@ -3,7 +3,6 @@
 #![deny(missing_docs)]
 
 use std::collections::BTreeMap;
-use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -20,7 +19,7 @@ use reqwest::redirect::Policy;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use url::{Host, Url};
+use url::Url;
 
 /// Version of the embedded grid-world prompt template.
 pub const GRID_WORLD_PROMPT_TEMPLATE_VERSION: &str = "grid_world_v2";
@@ -120,35 +119,11 @@ impl OpenAiCompatibleConfig {
     /// Validates URL, credential-name, model, timeout, and generation settings.
     pub fn validate(&self) -> Result<(), OpenAiCompatibleConfigError> {
         self.validated_url()?;
-        if self.api_key_env.is_empty()
-            || !self
-                .api_key_env
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || character == '_')
-            || self
-                .api_key_env
-                .as_bytes()
-                .first()
-                .is_some_and(u8::is_ascii_digit)
-        {
-            return if self.api_key_env.is_empty() {
-                Err(OpenAiCompatibleConfigError::EmptyApiKeyEnv)
-            } else {
-                Err(OpenAiCompatibleConfigError::InvalidApiKeyEnv)
-            };
-        }
-        if self.model.trim().is_empty() {
-            return Err(OpenAiCompatibleConfigError::EmptyModel);
-        }
-        if self.timeout_seconds == 0 {
-            return Err(OpenAiCompatibleConfigError::InvalidTimeout);
-        }
-        if !self.temperature.is_finite() || !(0.0..=2.0).contains(&self.temperature) {
-            return Err(OpenAiCompatibleConfigError::InvalidTemperature);
-        }
-        if self.max_tokens == 0 {
-            return Err(OpenAiCompatibleConfigError::InvalidMaxTokens);
-        }
+        crate::transport::validate_api_key_env(&self.api_key_env).map_err(transport_error)?;
+        crate::transport::validate_model(&self.model).map_err(transport_error)?;
+        crate::transport::validate_timeout(self.timeout_seconds).map_err(transport_error)?;
+        crate::transport::validate_sampling(self.temperature, self.max_tokens)
+            .map_err(transport_error)?;
         Ok(())
     }
 
@@ -166,38 +141,29 @@ impl OpenAiCompatibleConfig {
     }
 
     fn validated_url(&self) -> Result<Url, OpenAiCompatibleConfigError> {
-        if self.base_url.trim().is_empty() {
-            return Err(OpenAiCompatibleConfigError::EmptyBaseUrl);
-        }
-        let url =
-            Url::parse(&self.base_url).map_err(|_| OpenAiCompatibleConfigError::InvalidBaseUrl)?;
-        if url.host().is_none() {
-            return Err(OpenAiCompatibleConfigError::InvalidBaseUrl);
-        }
-        if !url.username().is_empty() || url.password().is_some() {
-            return Err(OpenAiCompatibleConfigError::UrlUserInfo);
-        }
-        if url.query().is_some() {
-            return Err(OpenAiCompatibleConfigError::UrlQuery);
-        }
-        if url.fragment().is_some() {
-            return Err(OpenAiCompatibleConfigError::UrlFragment);
-        }
-        let secure = url.scheme() == "https";
-        let loopback_http = url.scheme() == "http" && is_loopback_url(&url);
-        if !secure && !loopback_http {
-            return Err(OpenAiCompatibleConfigError::InsecureBaseUrl);
-        }
-        Ok(url)
+        crate::transport::validate_base_url(&self.base_url).map_err(transport_error)
     }
 }
 
-fn is_loopback_url(url: &Url) -> bool {
-    match url.host() {
-        Some(Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
-        Some(Host::Ipv4(address)) => IpAddr::from(address).is_loopback(),
-        Some(Host::Ipv6(address)) => IpAddr::from(address).is_loopback(),
-        None => false,
+/// Narrows a shared transport error to this adapter's public error type.
+///
+/// The variants are the same set in the same order; only the prose differs, because the established
+/// messages are part of the desktop IPC contract. The *rules* live in one place.
+fn transport_error(error: crate::transport::TransportConfigError) -> OpenAiCompatibleConfigError {
+    use crate::transport::TransportConfigError as Transport;
+    match error {
+        Transport::EmptyBaseUrl => OpenAiCompatibleConfigError::EmptyBaseUrl,
+        Transport::InvalidBaseUrl => OpenAiCompatibleConfigError::InvalidBaseUrl,
+        Transport::UrlUserInfo => OpenAiCompatibleConfigError::UrlUserInfo,
+        Transport::UrlQuery => OpenAiCompatibleConfigError::UrlQuery,
+        Transport::UrlFragment => OpenAiCompatibleConfigError::UrlFragment,
+        Transport::InsecureBaseUrl => OpenAiCompatibleConfigError::InsecureBaseUrl,
+        Transport::EmptyApiKeyEnv => OpenAiCompatibleConfigError::EmptyApiKeyEnv,
+        Transport::InvalidApiKeyEnv => OpenAiCompatibleConfigError::InvalidApiKeyEnv,
+        Transport::EmptyModel => OpenAiCompatibleConfigError::EmptyModel,
+        Transport::InvalidTimeout => OpenAiCompatibleConfigError::InvalidTimeout,
+        Transport::InvalidTemperature => OpenAiCompatibleConfigError::InvalidTemperature,
+        Transport::InvalidMaxTokens => OpenAiCompatibleConfigError::InvalidMaxTokens,
     }
 }
 
@@ -232,6 +198,29 @@ pub enum ActionProtocolError {
 
 /// Alias exposing the protocol error kind under an explicit name.
 pub type ActionProtocolErrorKind = ActionProtocolError;
+
+impl ActionProtocolError {
+    /// The failure category this protocol error belongs to.
+    ///
+    /// One implementation for all three adapters, because the distinction is a scoring decision and
+    /// three copies of it would be three chances to disagree. A reply that is not parseable is a
+    /// malformed response; a reply that parses but names an action the engine did not offer is an
+    /// invalid action. Collapsing those two would make a model that hallucinated a move look like a
+    /// model that speaks nonsense.
+    pub fn kind(&self) -> ModelCallFailureKind {
+        match self {
+            ActionProtocolError::Empty => ModelCallFailureKind::EmptyResponse,
+            ActionProtocolError::Malformed
+            | ActionProtocolError::Array
+            | ActionProtocolError::MissingAction
+            | ActionProtocolError::UnknownField
+            | ActionProtocolError::MultipleValues => ModelCallFailureKind::MalformedResponse,
+            ActionProtocolError::UnknownAction | ActionProtocolError::OutOfVocabulary => {
+                ModelCallFailureKind::InvalidAction
+            }
+        }
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -495,6 +484,11 @@ fn prompt_template_version_for(process_spawn_available: bool) -> &'static str {
 }
 
 /// An OpenAI-compatible asynchronous chat-completions provider.
+///
+/// `Clone` and `Debug` because the vendor-dispatching provider holds one of these behind an enum, and
+/// both traits are required there. `Debug` is safe because the struct holds a configuration and a
+/// client and never a credential — the key is read from the environment per call.
+#[derive(Clone, Debug)]
 pub struct OpenAiCompatibleProvider {
     config: OpenAiCompatibleConfig,
     client: Client,
@@ -693,21 +687,8 @@ impl OpenAiCompatibleProvider {
         ) {
             Ok(decision) => decision,
             Err(error) => {
-                let kind = match error {
-                    ActionProtocolError::Empty => ModelCallFailureKind::EmptyResponse,
-                    ActionProtocolError::Malformed
-                    | ActionProtocolError::Array
-                    | ActionProtocolError::MissingAction
-                    | ActionProtocolError::UnknownField
-                    | ActionProtocolError::MultipleValues => {
-                        ModelCallFailureKind::MalformedResponse
-                    }
-                    ActionProtocolError::UnknownAction | ActionProtocolError::OutOfVocabulary => {
-                        ModelCallFailureKind::InvalidAction
-                    }
-                };
                 return Err(ModelCallFailure {
-                    kind,
+                    kind: error.kind(),
                     message: "provider response did not follow the action protocol".to_owned(),
                     response_text: Some(sanitized_content),
                     usage,
@@ -1836,6 +1817,15 @@ fn orthogonal(cell: (u8, u8), grid_size: GridSize) -> Vec<(u8, u8)> {
     }
     cells
 }
+
+pub mod anthropic;
+pub mod gemini;
+pub mod transport;
+pub mod vendors;
+
+pub use anthropic::{AnthropicConfig, AnthropicProvider, ANTHROPIC_VERSION};
+pub use gemini::{GeminiConfig, GeminiProvider, GEMINI_API_VERSION};
+pub use vendors::{AnyProvider, AnyProviderConfig, ProviderKind};
 
 mod reference_strategies;
 
