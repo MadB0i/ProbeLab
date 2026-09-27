@@ -2,6 +2,7 @@
 
 #![deny(missing_docs)]
 
+pub mod arena;
 pub mod harness;
 
 use std::collections::VecDeque;

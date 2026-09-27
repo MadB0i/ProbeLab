@@ -208,11 +208,44 @@ Windows host at `main` `0608e92`; see `docs/AUDIT-2026-09-26.md` for the full au
   have been enough — a digest change is *silent*, every test still passes, and only a number already
   in a document would have moved.
 
+### v0.5 phase 3.5 step 2 — the arena, and tic-tac-toe
+
+- **A separate arena runner, deliberately not the grid engine.** `BenchmarkRunner` drives
+  `Environment`, whose `step` takes an `Action`; that loop also carries the containment executor, the
+  broker, and the policy gate. Bending it to drive a board would put a game benchmark on the same path
+  as process spawning and low-integrity containment for no benefit. The arena is its own module with
+  its own entry point, sharing only `ModelRequest`, `ModelDecision`, `GameTelemetry`, and the
+  `TelemetryRecorder`. **A game cannot reach containment, by construction rather than by a flag.**
+- **Every ply reaches telemetry** with the board *after* the move, and with **both** sides' moves
+  labelled. Both halves were bugs the tests caught, and both would have produced a plausible-looking
+  broken live view: telemetry first recorded the *pre-move* board, so every frame rendered one ply
+  behind; and it recorded only the tested model's move, leaving half the board's changes unexplained.
+  Neither would have failed a suite.
+- **Tic-tac-toe, with a perfect reference and the loss rate as the headline.** Calibration in the grid
+  world's shape: perfect-versus-perfect draws from either seat (the control that pins the rules),
+  perfect never loses, and a policy that replays a taken cell loses every game with the illegal move
+  recorded. Draw rate is reported separately and explicitly **not** treated as ceiling-setting.
+- **The perfect policy is exact, not approximate.** Exhaustive minimax over nine cells, which is cheap
+  enough to solve outright. An approximate "strong" opponent would make a loss ambiguous between the
+  model blundering and the opponent missing something; a loss against this policy is a loss, full stop.
+- **Two of my own claims were wrong and the tests said so.** The first version asserted "against a
+  perfect opponent no legal policy can lose". A diagnostic showed a legal policy playing the lowest
+  empty cell walking into a diagonal and losing 30 times — **legal moves can lose**, so legality is
+  necessary and not sufficient. That is now a test in its own right, and it is precisely why loss rate
+  is the headline rather than win rate. Separately, the minimax returned an *absolute* score while the
+  caller negated it, inverting every decision when the first player moved; the symptom was a "perfect"
+  policy that lost to itself. Both perspective and depth are now explicit.
+- **Telemetry shape grouped into config structs.** `play_match` had ten positional arguments, two
+  adjacent `&str`s and three `u32`s in a row, where swapping a label with a seed compiles cleanly.
+  `MatchConfig` and `BatchConfig` group the seats, seeds, and labels, because they are one measurement
+  decision — and a batch labelled as one policy while measured as another is a reporting bug waiting to
+  happen.
+
 ## Verified
 
 - `cargo fmt --check` — the gate. Bare form is correct here because the workspace root is a *virtual* manifest, so `cargo fmt` already covers every member; `--all` is equivalent at this root.
 - `cargo build --workspace --locked`
-- `cargo test --workspace --all-targets --locked` — 286 tests passing (284 after phase 3, +2 digest guards)
+- `cargo test --workspace --all-targets --locked` — 300 tests passing (286 after step 1, +14 arena/tic-tac-toe tests)
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `pnpm install` in `apps/desktop`
 - `pnpm build` in `apps/desktop`

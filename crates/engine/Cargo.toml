@@ -8,6 +8,9 @@ repository.workspace = true
 description = "Adapter-neutral deterministic benchmark execution engine for ProbeLab"
 
 [dependencies]
+# The arena matches a tested model against a trusted reference policy, so it needs the reference
+# strategy trait in production rather than only in tests.
+probelab-agent = { path = "../agent" }
 probelab-broker = { path = "../broker" }
 probelab-core = { path = "../core" }
 probelab-sandbox = { path = "../sandbox" }
@@ -16,7 +19,6 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-probelab-agent = { path = "../agent" }
 probelab-benchmarks = { path = "../benchmarks" }
 probelab-evaluator = { path = "../evaluator" }
 probelab-model-adapters = { path = "../model-adapters" }
