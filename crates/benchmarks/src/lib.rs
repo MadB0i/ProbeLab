@@ -634,36 +634,46 @@ pub enum BenchmarkCatalogError {
 }
 
 /// A deterministic registry of the benchmarks compiled into ProbeLab.
+///
+/// Now a thin adapter over [`BenchmarkRegistry`], which is the authoritative description. This type is
+/// kept because the engine and the desktop IPC already speak `summaries()` and `resolve(id)`, and
+/// changing that surface would be churn rather than improvement. It deliberately holds *no* benchmark
+/// list of its own — that is exactly the duplication that left `sandbox-process` unreachable.
+#[derive(Debug)]
 pub struct BenchmarkCatalog {
-    summaries: Vec<BenchmarkSummary>,
-    grid_world: GridWorldBenchmark,
+    registry: BenchmarkRegistry,
 }
 
 impl BenchmarkCatalog {
     /// Builds the catalog from validated, statically registered definitions.
     pub fn new() -> Result<Self, BenchmarkCatalogError> {
-        let grid_world = GridWorldBenchmark::built_in()?;
-        let summaries = vec![grid_world.summary()];
         Ok(Self {
-            summaries,
-            grid_world,
+            registry: BenchmarkRegistry::built_in(),
         })
     }
 
+    /// The authoritative registry, for callers that need the full metadata.
+    pub fn registry(&self) -> &BenchmarkRegistry {
+        &self.registry
+    }
+
     /// Lists summaries for every statically registered benchmark.
-    pub fn summaries(&self) -> &[BenchmarkSummary] {
-        &self.summaries
+    pub fn summaries(&self) -> Vec<BenchmarkSummary> {
+        self.registry.summaries()
     }
 
     /// Resolves one built-in benchmark by its stable identifier.
     pub fn resolve(&self, id: &str) -> Result<Box<dyn Benchmark>, BenchmarkCatalogError> {
-        if id == GRID_WORLD_BENCHMARK_ID {
-            Ok(Box::new(self.grid_world.clone()))
-        } else {
-            Err(BenchmarkCatalogError::UnknownBenchmark { id: id.to_owned() })
-        }
+        self.registry.build(id)
     }
 }
+
+mod registry;
+
+pub use registry::{
+    BenchmarkCategory, BenchmarkEntry, BenchmarkRegistrationError, BenchmarkRegistry,
+    BenchmarkSpec, CapabilityExecution, PlatformRequirement, ReplaySupport,
+};
 
 #[cfg(test)]
 mod tests {
@@ -690,12 +700,34 @@ mod tests {
     }
 
     #[test]
-    fn catalog_lists_and_resolves_the_single_real_benchmark() {
+    fn catalog_lists_and_resolves_every_registered_benchmark() {
+        // This used to assert exactly one benchmark and be named for it. That was not a requirement —
+        // it was a snapshot of the state in which `sandbox-process` had been implemented, tested, and
+        // then never registered, which left phase 1's containment work unreachable from the product.
+        // Asserting the count pinned the defect. The assertions below are the ones that were actually
+        // meant: every registered benchmark resolves, and an unknown one does not.
         let catalog = BenchmarkCatalog::new().expect("built-in catalog");
-        assert_eq!(catalog.summaries().len(), 1);
-        assert_eq!(catalog.summaries()[0].benchmark_id, "grid-world");
-        let resolved = catalog.resolve("grid-world").expect("grid-world resolves");
-        assert_eq!(resolved.summary().benchmark_version, "2");
+        let summaries = catalog.summaries();
+        assert!(
+            summaries.len() >= 2,
+            "grid-world and sandbox-process must both be listed, got {}",
+            summaries.len()
+        );
+        for summary in &summaries {
+            let resolved = catalog
+                .resolve(&summary.benchmark_id)
+                .unwrap_or_else(|error| panic!("{} should resolve: {error}", summary.benchmark_id));
+            assert_eq!(
+                resolved.summary().benchmark_version,
+                summary.benchmark_version
+            );
+        }
+        let grid = catalog.resolve("grid-world").expect("grid-world resolves");
+        assert_eq!(grid.summary().benchmark_version, "2");
+        assert!(
+            catalog.resolve("sandbox-process").is_ok(),
+            "sandbox-process must be reachable, or its capability grant is dead code"
+        );
         assert!(catalog.resolve("missing").is_err());
     }
 
