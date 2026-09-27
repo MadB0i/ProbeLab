@@ -106,6 +106,67 @@ pub trait ReferenceStrategy: Send {
     fn reset(&mut self) {}
 }
 
+/// Puts a reference policy into an agent seat.
+///
+/// # Why this exists
+///
+/// The arena's `play_match` puts a *model* in the tested seat and a *reference policy* in the
+/// opponent seat. That is the right shape for measuring a model — you want a fixed, unbeatable
+/// opponent — but it leaves no way to seat two policies against each other, and a match between two
+/// ceilings is the cheapest way to exercise a game implementation end to end.
+///
+/// This adapter was written as a local helper inside the arena test file, where it served one test.
+/// It lives here now because the arena needs it in production: without a policy that can sit in the
+/// tested seat, the arena can only ever be driven by a model, and the command center would have no
+/// way to demonstrate a real match at all.
+///
+/// # What it does not do
+///
+/// It does not grant any capability. It reads a `ModelRequest` and returns a `ModelDecision`, which is
+/// the whole contract every agent in this lab satisfies. The environment still decides whether the move
+/// it returns is legal.
+pub struct ReferenceAsAgent {
+    strategy: Box<dyn ReferenceStrategy>,
+}
+
+impl std::fmt::Debug for ReferenceAsAgent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `dyn ReferenceStrategy` is not `Debug`, and requiring every policy to derive it would be a
+        // tax on all of them for the sake of one log line. The name is the part that identifies it.
+        formatter
+            .debug_struct("ReferenceAsAgent")
+            .field("strategy", &self.strategy.name())
+            .finish()
+    }
+}
+
+impl ReferenceAsAgent {
+    /// Wraps a strategy so it can be used wherever an agent is expected.
+    pub fn new(strategy: Box<dyn ReferenceStrategy>) -> Self {
+        Self { strategy }
+    }
+
+    /// The wrapped strategy's stable name.
+    pub fn strategy_name(&self) -> &'static str {
+        self.strategy.name()
+    }
+}
+
+impl Agent for ReferenceAsAgent {
+    fn descriptor(&self) -> ModelDescriptor {
+        ModelDescriptor {
+            adapter: "reference-as-agent-v1".to_owned(),
+            strategy: self.strategy.name().to_owned(),
+            seed: 0,
+            parameters: reference_parameters(self.strategy.knowledge()),
+        }
+    }
+
+    fn decide(&mut self, request: ModelRequest) -> Result<ModelDecision, String> {
+        self.strategy.decide(&request)
+    }
+}
+
 /// Lets a strategy be held behind a trait object, which is what a registry needs.
 ///
 /// Without this, a benchmark selected from a table would have to be generic all the way up to the
@@ -182,30 +243,44 @@ impl<S: ReferenceStrategy> ReferenceAgent<S> {
     }
 }
 
+/// Builds the descriptor parameters that publish what a reference policy is allowed to consult.
+///
+/// Shared by [`ReferenceAgent`] and [`ReferenceAsAgent`] so the non-privilege claim is emitted
+/// identically whichever seat the policy occupies. Two copies of this would be two chances for one to
+/// drift, and the whole point of the claim is that a reader can rely on it.
+fn reference_parameters(knowledge: ReferenceKnowledge) -> BTreeMap<String, serde_json::Value> {
+    let mut parameters: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    parameters.insert("reference_policy".to_owned(), serde_json::Value::Bool(true));
+    parameters.insert(
+        "strategy".to_owned(),
+        serde_json::Value::String(String::new()),
+    );
+    parameters.insert(
+        "reads_layout".to_owned(),
+        serde_json::Value::Bool(knowledge.reads_layout),
+    );
+    parameters.insert(
+        "reads_goal".to_owned(),
+        serde_json::Value::Bool(knowledge.reads_goal),
+    );
+    parameters.insert(
+        "reads_answer".to_owned(),
+        serde_json::Value::Bool(knowledge.reads_answer),
+    );
+    parameters.insert(
+        "reads_seed".to_owned(),
+        serde_json::Value::Bool(knowledge.reads_seed),
+    );
+    parameters
+}
+
 impl<S: ReferenceStrategy> Agent for ReferenceAgent<S> {
     fn descriptor(&self) -> ModelDescriptor {
         let knowledge = self.strategy.knowledge();
-        let mut parameters: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-        parameters.insert("reference_policy".to_owned(), serde_json::Value::Bool(true));
+        let mut parameters = reference_parameters(knowledge);
         parameters.insert(
             "strategy".to_owned(),
             serde_json::Value::String(self.strategy.name().to_owned()),
-        );
-        parameters.insert(
-            "reads_layout".to_owned(),
-            serde_json::Value::Bool(knowledge.reads_layout),
-        );
-        parameters.insert(
-            "reads_goal".to_owned(),
-            serde_json::Value::Bool(knowledge.reads_goal),
-        );
-        parameters.insert(
-            "reads_answer".to_owned(),
-            serde_json::Value::Bool(knowledge.reads_answer),
-        );
-        parameters.insert(
-            "reads_seed".to_owned(),
-            serde_json::Value::Bool(knowledge.reads_seed),
         );
         ModelDescriptor {
             adapter: "probelab-reference-v1".to_owned(),

@@ -20,6 +20,7 @@
 #![deny(missing_docs)]
 
 mod agents;
+mod arena;
 mod brain;
 mod events;
 mod experiment;
@@ -30,6 +31,10 @@ mod view;
 pub use agents::{
     AgentBuildError, AgentCategory, AgentExecution, AgentRegistrationError, AgentRegistry,
     AgentSpec,
+};
+pub use arena::{
+    available_games, ArenaGame, ArenaMatch, ArenaMatchSpec, ArenaMatchView, ArenaOutcome,
+    ArenaRunError, ArenaRunner, IllegalMoveView, PlyView,
 };
 pub use brain::{
     category_label, label_for, Anomaly, AnomalyDetector, BrainEvent, BrainPanel, BrainState,

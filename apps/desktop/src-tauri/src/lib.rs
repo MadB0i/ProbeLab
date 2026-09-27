@@ -13,10 +13,15 @@ use probelab_telemetry::{SqliteResultRepository, SqliteTelemetryRecorder};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
+mod arena;
 mod brain;
 mod commands;
 mod provider;
 
+pub use arena::{
+    get_arena_match, latest_arena_match, list_arena_agents, list_arena_games, play_arena_match,
+    ArenaAgentSummary, ArenaCommandError, ArenaGameSummary, ArenaMatchRequest, ArenaSurface,
+};
 pub use brain::{
     brain_panel, get_experiment, list_experiments, run_experiment, BrainCommandError, BrainSurface,
     ExperimentRequest,
@@ -74,6 +79,8 @@ pub struct AppState {
     /// now" as well as "tell me when it changes" — a channel alone would show an empty panel after a
     /// reload even though a run had already finished.
     pub brain: BrainSurface,
+    /// Completed arena matches, so a finished match stays inspectable.
+    pub arena: ArenaSurface,
     recorder: Arc<SqliteTelemetryRecorder>,
     results: Arc<SqliteResultRepository>,
     recent_events: RecentEventBuffer,
@@ -156,6 +163,7 @@ pub fn run() {
             app.manage(AppState {
                 catalog: BenchmarkCatalog::new()?,
                 brain,
+                arena: ArenaSurface::default(),
                 recorder,
                 results,
                 recent_events,

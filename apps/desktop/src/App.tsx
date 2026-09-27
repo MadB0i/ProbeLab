@@ -15,6 +15,16 @@ import {
   type BrainReadModel,
 } from "./api";
 import { BrainPanel } from "./BrainPanel";
+import { ArenaPanel } from "./ArenaPanel";
+import {
+  latestArenaMatch,
+  listArenaAgents,
+  listArenaGames,
+  playArenaMatch,
+  type ArenaAgentSummary,
+  type ArenaGameSummary,
+  type ArenaMatchView,
+} from "./api";
 
 type BenchmarkSummary = {
   benchmark_id: string;
@@ -532,6 +542,19 @@ const App = () => {
   const [brain, setBrain] = useState<BrainReadModel | null>(null);
   const [brainError, setBrainError] = useState<string | null>(null);
   const [brainRunning, setBrainRunning] = useState(false);
+  // The arena. `null` until the backend answers, and the panel renders that as its own state rather
+  // than as an empty board.
+  const [arenaGames, setArenaGames] = useState<ArenaGameSummary[]>([]);
+  const [arenaAgents, setArenaAgents] = useState<ArenaAgentSummary[]>([]);
+  const [arenaMatch, setArenaMatch] = useState<ArenaMatchView | null>(null);
+  const [arenaError, setArenaError] = useState<string | null>(null);
+  const [arenaPlaying, setArenaPlaying] = useState(false);
+  const [arenaGame, setArenaGame] = useState("tic_tac_toe");
+  const [arenaTested, setArenaTested] = useState("");
+  const [arenaOpponent, setArenaOpponent] = useState("");
+  const [arenaSide, setArenaSide] = useState<"first" | "second">("first");
+  const [arenaSeed, setArenaSeed] = useState(7);
+
   const [benchmarksError, setBenchmarksError] = useState<string | null>(null);
   const [selectedStrategy, setSelectedStrategy] = useState<Strategy>("optimal");
   const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE_URL);
@@ -812,6 +835,73 @@ const App = () => {
     }
   }, [benchmark, selectedStrategy]);
   /**
+   * Loads the arena catalog and the most recent match.
+   *
+   * The agent list is fetched per game from the backend, which is where compatibility lives. The
+   * frontend keeps no list of its own, so it cannot offer a pairing the arena would refuse.
+   */
+  useEffect(() => {
+    let active = true;
+    Promise.all([listArenaGames(), listArenaAgents(arenaGame), latestArenaMatch()])
+      .then(([games, agents, latest]) => {
+        if (!active) {
+          return;
+        }
+        setArenaGames(games);
+        setArenaAgents(agents);
+        setArenaMatch(latest);
+        setArenaError(null);
+        // Default both seats to a real policy rather than leaving the select empty, but only when the
+        // current selection is not itself playable.
+        setArenaTested((current) =>
+          agents.some((agent) => agent.id === current) ? current : (agents[0]?.id ?? ""),
+        );
+        setArenaOpponent((current) =>
+          agents.some((agent) => agent.id === current)
+            ? current
+            : (agents.find((agent) => agent.canBeOpponent)?.id ?? agents[0]?.id ?? ""),
+        );
+      })
+      .catch((error) => {
+        if (active) {
+          setArenaError(`The arena did not report its catalog: ${formatError(error)}`);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [arenaGame]);
+
+  /**
+   * Plays one match.
+   *
+   * The whole match runs in the engine and comes back projected, so there is no local state to fall
+   * out of step with the environment. Changing a seat or the seed clears the displayed match, because
+   * a board from a different configuration sitting under new selectors would be actively misleading.
+   */
+  const playArena = useCallback(async () => {
+    setArenaPlaying(true);
+    setArenaError(null);
+    try {
+      const result = await playArenaMatch({
+        game: arenaGame,
+        testedAgent: arenaTested,
+        opponentAgent: arenaOpponent,
+        testedSide: arenaSide,
+        seed: arenaSeed,
+      });
+      setArenaMatch(result);
+    } catch (error) {
+      setArenaError(`The match could not be played: ${formatError(error)}`);
+    } finally {
+      setArenaPlaying(false);
+    }
+  }, [arenaGame, arenaTested, arenaOpponent, arenaSide, arenaSeed]);
+
+  const clearArenaMatch = useCallback(() => {
+    setArenaMatch(null);
+  }, []);
+  /**
    * Load the authoritative registries.
    *
    * Both are fetched together and a failure in either is surfaced rather than swallowed, because a
@@ -996,6 +1086,41 @@ const App = () => {
           canRun={benchmark !== null}
         />
 
+        {/*
+         * The arena sits under the Brain panel because it is an evaluation environment the orchestrator
+         * may later drive, not a game the Brain plays. The panel's own controls start a match; the
+         * Brain does not.
+         */}
+        <ArenaPanel
+          games={arenaGames}
+          agents={arenaAgents}
+          match={arenaMatch}
+          error={arenaError}
+          playing={arenaPlaying}
+          selectedGame={arenaGame}
+          selectedTested={arenaTested}
+          selectedOpponent={arenaOpponent}
+          selectedSide={arenaSide}
+          onPlay={() => void playArena()}
+          onReset={clearArenaMatch}
+          onGameChange={(game) => {
+            setArenaGame(game);
+            clearArenaMatch();
+          }}
+          onTestedChange={(agent) => {
+            setArenaTested(agent);
+            clearArenaMatch();
+          }}
+          onOpponentChange={(agent) => {
+            setArenaOpponent(agent);
+            clearArenaMatch();
+          }}
+          onSideChange={(side) => {
+            setArenaSide(side);
+            clearArenaMatch();
+          }}
+          canPlay={arenaTested !== "" && arenaOpponent !== "" && arenaGames.length > 0}
+        />
         {/*
          * The catalog section.
          *

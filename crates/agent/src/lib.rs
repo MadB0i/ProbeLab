@@ -4,7 +4,9 @@
 
 mod reference;
 
-pub use reference::{ReferenceAgent, ReferenceError, ReferenceKnowledge, ReferenceStrategy};
+pub use reference::{
+    ReferenceAgent, ReferenceAsAgent, ReferenceError, ReferenceKnowledge, ReferenceStrategy,
+};
 
 use std::sync::Arc;
 

@@ -21,8 +21,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use probelab_agent::ReferenceAsAgent;
 use probelab_agent::{ProviderAgent, ReferenceAgent, ReferenceStrategy};
-use probelab_core::{Agent, ModelProvider};
+use probelab_core::{Agent, GameKind, ModelProvider, ModelRequest};
 use probelab_model_adapters::{
     GridWorldReference, LookaheadSolver, MemoryReactive, MockModelConfig, MockModelProvider,
     SandboxProcessReference, StatelessReactive,
@@ -105,6 +106,14 @@ pub struct AgentSpec {
     pub execution: AgentExecution,
     /// The benchmark identifiers it is meaningful for, empty meaning all of them.
     pub applicable_benchmarks: Vec<String>,
+    /// The arena games it can legally be seated in.
+    ///
+    /// Empty means it cannot play an arena game at all, which is the case for every grid-world agent.
+    /// That default is the safe direction: an agent that is not listed for a game is never offered for
+    /// it, so adding a new game cannot silently surface policies that have no idea what the rules are.
+    /// The compatibility decision lives here rather than in the UI so a frontend cannot offer a pairing
+    /// the backend would refuse.
+    pub supported_games: Vec<GameKind>,
     /// The deterministic seed it is configured with, where that is meaningful.
     pub seed: u64,
 }
@@ -114,6 +123,12 @@ type AgentFactory = Box<dyn Fn(u64) -> Box<dyn Agent> + Send + Sync>;
 struct AgentEntry {
     spec: AgentSpec,
     factory: AgentFactory,
+    /// How to build this entry as a bare `ReferenceStrategy`, for the arena's opponent seat.
+    ///
+    /// `None` for everything that is not a policy. Present alongside `factory` rather than instead of
+    /// it, because a reference policy is useful in two places — as a benchmark's ceiling and as an
+    /// arena opponent — and registering it once for both is what keeps one id meaning one thing.
+    reference_factory: Option<fn(u64) -> Box<dyn ReferenceStrategy>>,
 }
 
 impl std::fmt::Debug for AgentEntry {
@@ -171,6 +186,26 @@ impl AgentRegistry {
         Ok((entry.factory)(seed))
     }
 
+    /// Builds this entry as a bare reference strategy, for the arena's opponent seat.
+    ///
+    /// Fails for anything that is not a policy, which is the honest answer: a mock strategy or a
+    /// connected model has no reference form, and silently coercing one into the other would let an
+    /// agent-vs-model match masquerade as a match against a fixed ceiling.
+    pub fn build_reference(
+        &self,
+        id: &str,
+        seed: u64,
+    ) -> Result<Box<dyn ReferenceStrategy>, AgentBuildError> {
+        let entry = self
+            .entries
+            .get(id)
+            .ok_or_else(|| AgentBuildError::UnknownAgent { id: id.to_owned() })?;
+        let factory = entry
+            .reference_factory
+            .ok_or_else(|| AgentBuildError::NotAReferencePolicy { id: id.to_owned() })?;
+        Ok(factory(seed))
+    }
+
     /// Registers an additional agent, for a benchmark or probe that needs one.
     pub fn register(
         &mut self,
@@ -185,6 +220,7 @@ impl AgentRegistry {
             AgentEntry {
                 spec,
                 factory: Box::new(factory),
+                reference_factory: None,
             },
         );
         Ok(())
@@ -218,6 +254,16 @@ pub enum AgentBuildError {
         /// The unresolved identifier.
         id: String,
     },
+    /// The identifier resolved, but the agent has no reference-policy form.
+    ///
+    /// A separate variant rather than a misleading "unknown agent", because the two failures call for
+    /// different fixes: one is a typo, the other is asking a mock or a connected model to play the
+    /// part of a fixed ceiling.
+    #[error("{id:?} is registered but is not a reference policy")]
+    NotAReferencePolicy {
+        /// The identifier that resolved.
+        id: String,
+    },
 }
 
 /// A registration failure.
@@ -246,12 +292,30 @@ fn spec(
         category,
         execution,
         applicable_benchmarks,
+        supported_games: Vec::new(),
         seed: 0,
     }
 }
 
 fn entry(spec: AgentSpec, factory: AgentFactory) -> AgentEntry {
-    AgentEntry { spec, factory }
+    AgentEntry {
+        spec,
+        factory,
+        reference_factory: None,
+    }
+}
+
+/// An entry that can also be built as a bare reference strategy.
+fn reference_entry(
+    spec: AgentSpec,
+    factory: AgentFactory,
+    reference_factory: fn(u64) -> Box<dyn ReferenceStrategy>,
+) -> AgentEntry {
+    AgentEntry {
+        spec,
+        factory,
+        reference_factory: Some(reference_factory),
+    }
 }
 
 /// The ten deterministic mock strategies, split across their three honest categories.
@@ -460,7 +524,100 @@ fn reference_entries() -> Vec<AgentEntry> {
         ));
     }
 
+    entries.extend(tictactoe_entries());
     entries
+}
+
+/// The Tic-Tac-Toe policies, registered in both seats.
+///
+/// The arena puts a model in the tested seat and a reference policy in the opponent seat. Neither
+/// Tic-Tac-Toe policy is a model, so both are registered twice: once as an `Agent` for the tested
+/// seat, through [`ReferenceAsAgent`], and once as the reference policy for the opponent seat. Without
+/// the adapter there is no Tic-Tac-Toe agent at all, and the arena would be reachable only with a
+/// connected model.
+///
+/// These are the only agents tagged with [`GameKind::TicTacToe`]. A perfect play against a perfect
+/// play is a draw, which makes the pair a self-check: if a future change to either policy made it
+/// stronger than perfect, the draw would become a win and the arena's own test would fail.
+fn tictactoe_entries() -> Vec<AgentEntry> {
+    vec![
+        reference_entry(
+            AgentSpec {
+                id: "perfect_tictactoe".to_owned(),
+                name: "Perfect Tic-Tac-Toe".to_owned(),
+                description:
+                    "Exhaustive minimax over the nine cells. Cannot be beaten, and cannot beat itself. \
+                     The ceiling for this game, and the reference opponent the arena seats by default."
+                        .to_owned(),
+                category: AgentCategory::ReferenceCeiling,
+                execution: AgentExecution::InProcessDeterministic,
+                applicable_benchmarks: Vec::new(),
+                supported_games: vec![GameKind::TicTacToe],
+                seed: 0,
+            },
+            Box::new(|_seed| {
+                Box::new(ReferenceAsAgent::new(Box::new(
+                    probelab_engine::arena::tictactoe::PerfectTicTacToe::new(),
+                ))) as Box<dyn Agent>
+            }),
+            |_seed| {
+                Box::new(probelab_engine::arena::tictactoe::PerfectTicTacToe::new())
+                    as Box<dyn ReferenceStrategy>
+            },
+        ),
+        reference_entry(
+            AgentSpec {
+                id: "first_legal_tictactoe".to_owned(),
+                name: "First Legal Tic-Tac-Toe".to_owned(),
+                description:
+                    "Takes the lowest-indexed legal cell every ply. A legal, deterministic floor that \
+                     loses to a perfect opponent, which makes it useful for showing that the arena \
+                     distinguishes skill levels rather than just reporting winners."
+                        .to_owned(),
+                category: AgentCategory::DeterministicBaseline,
+                execution: AgentExecution::InProcessDeterministic,
+                applicable_benchmarks: Vec::new(),
+                supported_games: vec![GameKind::TicTacToe],
+                seed: 0,
+            },
+            Box::new(|_seed| {
+                Box::new(ReferenceAsAgent::new(Box::new(FirstLegalTicTacToe))) as Box<dyn Agent>
+            }),
+            |_seed| Box::new(FirstLegalTicTacToe) as Box<dyn ReferenceStrategy>,
+        ),
+    ]
+}
+
+/// A policy that always takes the lowest-indexed legal cell.
+///
+/// Implemented as a `ReferenceStrategy` rather than only as an `Agent` so the same policy can sit in
+/// either seat, which is what lets the arena measure it as the tested side against a perfect opponent.
+#[derive(Clone, Copy, Debug)]
+struct FirstLegalTicTacToe;
+
+impl probelab_agent::ReferenceStrategy for FirstLegalTicTacToe {
+    fn name(&self) -> &'static str {
+        "first_legal_tictactoe"
+    }
+
+    fn knowledge(&self) -> probelab_agent::ReferenceKnowledge {
+        probelab_agent::ReferenceKnowledge::default()
+    }
+
+    fn decide(&mut self, request: &ModelRequest) -> Result<probelab_core::ModelDecision, String> {
+        let Some(board) = request.game.as_ref() else {
+            return Err("this policy only plays tic-tac-toe".to_owned());
+        };
+        // The request carries the legal moves explicitly, so the policy reads the environment's own
+        // answer rather than recomputing it. A policy that derived legality itself would be a second,
+        // possibly disagreeing, source of truth for the rules.
+        board
+            .legal_moves
+            .first()
+            .copied()
+            .map(probelab_core::ModelDecision::GameMove)
+            .ok_or_else(|| "no legal move was offered".to_owned())
+    }
 }
 
 /// The stable identifier for a mock strategy, matching its wire name.

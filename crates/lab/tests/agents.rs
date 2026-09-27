@@ -108,16 +108,40 @@ fn only_a_target_model_may_be_called_a_model() {
     );
 }
 
-/// Every registered agent builds and produces a decision.
+/// Every registered agent builds and produces a decision for what it declares it can play.
 ///
 /// A registry entry that constructs a policy which cannot act is worse than a missing one: the user is
 /// offered a control, the run starts, and it fails on the first turn.
+///
+/// The agent is asked for a request matching its own declared `supported_games`, which this test used
+/// to skip. That made it weaker in a way that was invisible: it asserted every agent handles a
+/// grid-world request, so adding an arena-only policy would have "failed" — and the tempting fix would
+/// have been to register the Tic-Tac-Toe policies for a game they have no idea how to play. Asking each
+/// agent for a request from a game it actually declares is both correct and a stronger claim: it also
+/// proves the registry's compatibility data is real, since an agent that declares a game and then
+/// cannot answer its request fails here.
 #[test]
 fn every_registered_agent_actually_produces_a_decision() {
     for spec in AgentRegistry::built_in().specs() {
         let mut agent = AgentRegistry::built_in()
             .build(&spec.id, 2_000)
             .unwrap_or_else(|error| panic!("{} should build: {error}", spec.id));
+        // An arena-only policy answers a board request, and refusing a grid request is the correct
+        // behaviour for it rather than a failure — which is what the companion test below pins.
+        if spec
+            .supported_games
+            .contains(&probelab_core::GameKind::TicTacToe)
+        {
+            let decision = agent
+                .decide(tictactoe_request())
+                .unwrap_or_else(|error| panic!("{} should decide a game: {error}", spec.id));
+            assert!(
+                matches!(decision, probelab_core::ModelDecision::GameMove(_)),
+                "{} returned {decision:?} for a game request, which is not a move",
+                spec.id
+            );
+            continue;
+        }
         let decision = agent
             .decide(grid_request())
             .unwrap_or_else(|error| panic!("{} should decide: {error}", spec.id));
@@ -149,6 +173,93 @@ fn every_registered_agent_actually_produces_a_decision() {
             "{} could not decide on a second turn with history",
             spec.id
         );
+    }
+}
+
+/// Every agent that declares an arena game can actually answer that game's request.
+///
+/// The companion to the test above. An agent-only policy is useless, but a policy that claims a game
+/// in the registry and then refuses that game's request is worse — the arena would offer it and fail
+/// on the first ply. This is the check that keeps `supported_games` honest.
+#[test]
+fn every_arena_agent_answers_its_declared_game() {
+    for spec in AgentRegistry::built_in().specs() {
+        for game in &spec.supported_games {
+            assert_eq!(
+                *game,
+                probelab_core::GameKind::TicTacToe,
+                "{} declares {game:?}, which this build does not implement",
+                spec.id
+            );
+            let mut agent = AgentRegistry::built_in()
+                .build(&spec.id, 11)
+                .unwrap_or_else(|error| panic!("{} should build: {error}", spec.id));
+            let decision = agent.decide(tictactoe_request()).unwrap_or_else(|error| {
+                panic!(
+                    "{} declares tic-tac-toe but could not decide it: {error}",
+                    spec.id
+                )
+            });
+            assert!(
+                matches!(decision, probelab_core::ModelDecision::GameMove(_)),
+                "{} returned {decision:?} for a game request, which is not a move",
+                spec.id
+            );
+        }
+    }
+}
+
+/// A policy that has no board refuses a grid-world request rather than pretending to play.
+///
+/// The honest failure is what makes the compatibility data worth having: an arena-only policy asked to
+/// navigate a grid says no instead of returning a plausible-looking move that would corrupt a
+/// benchmark.
+#[test]
+fn an_arena_only_agent_refuses_a_grid_request() {
+    let mut agent = AgentRegistry::built_in()
+        .build("perfect_tictactoe", 3)
+        .expect("build");
+    assert!(
+        agent.decide(grid_request()).is_err(),
+        "a tic-tac-toe policy should not pretend it can navigate a grid"
+    );
+}
+
+/// A realistic tic-tac-toe opening request, for the arena agents.
+///
+/// Built by hand rather than through the game implementation so the fixture is an independent
+/// statement of the wire format — if the engine changed the request shape, this would fail and say so,
+/// rather than silently following the change.
+fn tictactoe_request() -> ModelRequest {
+    ModelRequest {
+        episode_id: "registry-ttt".to_owned(),
+        turn: 1,
+        observation: probelab_core::Observation {
+            turn: 1,
+            position: probelab_core::NO_GRID_POSITION,
+            grid_size: probelab_core::NO_GRID,
+            current_tile: probelab_core::TileKind::Safe,
+            visible_neighbors: Vec::new(),
+            distance_to_goal: 0,
+            max_turns: 9,
+            remaining_turns: 9,
+            available_actions: Vec::new(),
+        },
+        available_actions: Vec::new(),
+        process_spawn_available: false,
+        history: Vec::new(),
+        game: Some(probelab_core::GameRequest {
+            kind: probelab_core::GameKind::TicTacToe,
+            ply: 1,
+            side: probelab_core::GameSide::First,
+            board: probelab_core::GameBoard::TicTacToe {
+                cells: vec![probelab_core::TicTacToeCell::Empty; 9],
+            },
+            legal_moves: (0..9).map(probelab_core::GameMove::TicTacToe).collect(),
+            history: Vec::new(),
+            remaining_plies: 8,
+            last_move: None,
+        }),
     }
 }
 
@@ -304,6 +415,7 @@ fn an_agent_can_be_registered_by_anything_that_implements_the_contract() {
         category: AgentCategory::TargetModel,
         execution: AgentExecution::InProcessDeterministic,
         applicable_benchmarks: Vec::new(),
+        supported_games: Vec::new(),
         seed: 0,
     };
     registry
@@ -322,6 +434,7 @@ fn an_agent_can_be_registered_by_anything_that_implements_the_contract() {
                     category: AgentCategory::TargetModel,
                     execution: AgentExecution::RemoteModel,
                     applicable_benchmarks: Vec::new(),
+                    supported_games: Vec::new(),
                     seed: 0,
                 },
                 |_seed| Box::new(AlwaysWaits) as Box<dyn Agent>

@@ -228,3 +228,101 @@ export async function runExperiment(request: {
 export const BRAIN_EVENT = "probe-lab/brain-event";
 /** The complete read model, emitted when it changes. */
 export const BRAIN_MODEL_EVENT = "probe-lab/brain";
+/**
+ * The Arena's typed catalog and match view.
+ *
+ * Every field here comes from the engine's `play_match` via a projection. There is no score, no
+ * "performance" number, and no client-side board state — see `ArenaPanel.tsx` for why.
+ */
+
+export type ArenaGameSummary = {
+  id: string;
+  name: string;
+  description: string;
+  width: number;
+  height: number;
+  maxPlies: number;
+};
+
+export type ArenaAgentSummary = {
+  id: string;
+  name: string;
+  description: string;
+  categoryLabel: string;
+  /** Whether this policy can be seated as the arena's reference opponent. */
+  canBeOpponent: boolean;
+};
+
+/**
+ * How a match ended, in the backend's four-way vocabulary.
+ *
+ * `no_result` is distinct from `loss` on purpose: a harness failure is not something a policy lost.
+ */
+export type ArenaOutcome = "win" | "draw" | "loss" | "no_result";
+
+export type GameCell = "empty" | "first" | "second";
+
+export type PlyView = {
+  ply: number;
+  side: "first" | "second";
+  /**
+   * The board as a tagged union, because the backend's `GameBoard` is one. The panel switches on
+   * `game` rather than assuming a shape, so an unimplemented game cannot render as a broken board.
+   */
+  board:
+    | { game: "tic_tac_toe"; cells: GameCell[] }
+    | { game: string; cells?: unknown };
+  played: { tic_tac_toe?: number; [key: string]: unknown } | null;
+};
+
+export type IllegalMoveView = {
+  ply: number;
+  /** Absent when the failure did not identify a move. Never a guess. */
+  attempted: { tic_tac_toe?: number; [key: string]: unknown } | null;
+  reason: string;
+};
+
+export type ArenaMatchView = {
+  matchId: string;
+  game: string;
+  gameName: string;
+  outcome: ArenaOutcome;
+  testedAgent: string;
+  opponentAgent: string;
+  testedSide: "first" | "second";
+  seed: number;
+  plies: number;
+  finalBoard: PlyView["board"];
+  winner: "first" | "second" | null;
+  illegalMoves: IllegalMoveView[];
+  history: PlyView[];
+  timeline: { sequence: number; code: string; severity: string; detail: string }[];
+  failure: string | null;
+};
+
+export type ArenaCommandError = {
+  code: string;
+  message: string;
+};
+
+export async function listArenaGames(): Promise<ArenaGameSummary[]> {
+  return invoke<ArenaGameSummary[]>("list_arena_games");
+}
+
+export async function listArenaAgents(game: string): Promise<ArenaAgentSummary[]> {
+  return invoke<ArenaAgentSummary[]>("list_arena_agents", { game });
+}
+
+export async function latestArenaMatch(): Promise<ArenaMatchView | null> {
+  return invoke<ArenaMatchView | null>("latest_arena_match");
+}
+
+export async function playArenaMatch(request: {
+  game: string;
+  testedAgent: string;
+  opponentAgent: string;
+  testedSide: "first" | "second";
+  seed: number;
+}): Promise<ArenaMatchView> {
+  return invoke<ArenaMatchView>("play_arena_match", { request });
+}
