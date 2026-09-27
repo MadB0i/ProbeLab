@@ -12,6 +12,7 @@ probelab-core = { path = "../core" }
 rand.workspace = true
 rand_chacha.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true

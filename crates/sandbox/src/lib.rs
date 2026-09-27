@@ -14,10 +14,12 @@ mod containment;
 mod security;
 
 pub use containment::{
-    is_process_alive, process_integrity, read_integrity, ChildOutcome, ContainedProcessSpawner,
-    ContainmentError, ContainmentLimits, MandatoryIntegrity, ProtectedPaths,
-    RestrictedProcessGuard, RestrictedProcessSpec, SandboxDirectory, ENFORCED_JOB_LIMITS,
-    LOW_INTEGRITY_SID, SANDBOX_DIRECTORY_SDDL, STDERR_CAPTURE_FILE, STDOUT_CAPTURE_FILE,
+    capability_sid, is_process_alive, process_integrity, read_integrity, AppContainerError,
+    AppContainerIdentity, ChildOutcome, ContainedProcessSpawner, ContainmentError,
+    ContainmentLimits, MandatoryIntegrity, ProtectedPaths, RestrictedProcessGuard,
+    RestrictedProcessSpec, SandboxDirectory, ENFORCED_JOB_LIMITS, INTERNET_CLIENT_CAPABILITY,
+    LOW_INTEGRITY_SID, PROFILE_NAME, SANDBOX_DIRECTORY_SDDL, STDERR_CAPTURE_FILE,
+    STDOUT_CAPTURE_FILE,
 };
 pub use security::{DenyAllPolicyGate, RuntimeGuardian};
 

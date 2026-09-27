@@ -191,13 +191,6 @@ fn comspec() -> String {
     std::env::var("ComSpec").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".to_owned())
 }
 
-/// Returns the absolute path of `ping.exe`, for a child that has no `PATH` to resolve it with.
-#[cfg(windows)]
-fn absolute_ping() -> String {
-    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_owned());
-    format!("{system_root}\\System32\\ping.exe")
-}
-
 fn temporary_root(label: &str) -> PathBuf {
     let sequence = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!(
@@ -530,32 +523,28 @@ mod enforced {
     #[test]
     fn a_child_that_outlives_its_declared_timeout_is_killed_with_the_job() {
         let root = temporary_root("hang");
-        // The child sleeps far past the declared budget while using almost no CPU, so neither job
-        // object limit can end it. Only the host's wall-clock timer can, and a job object does not
-        // bound elapsed time on its own.
+        // The child runs far past the declared budget, so only the host's wall-clock timer can end it:
+        // a job object does not bound elapsed time on its own.
         //
-        // `ping` is named by absolute path on purpose: a contained child starts with an empty
-        // environment and therefore has no `PATH`, so a plan that relied on a bare program name would
-        // fail to resolve it. That is intended behaviour, and a plan is expected to name an absolute
-        // program.
+        // The spin loop is deliberate. Two earlier versions of this test used mechanisms that v0.5
+        // closed off. `ping -n 60 127.0.0.1` stopped working the moment contained children were refused
+        // outbound network, and `waitfor /T 60` is refused outright inside the AppContainer. A bounded
+        // `for /L` loop needs neither a network, a console, nor a named object, so it tests the
+        // wall-clock bound on its own terms.
+        //
+        // It also makes the assertion stronger rather than weaker: the child is actively consuming
+        // CPU, and the job's CPU budget here is 60 seconds. If the wall clock did not fire at 1.5
+        // seconds, the CPU limit would be the thing that eventually stopped it, so a pass here is
+        // specifically evidence about elapsed time.
         let plan = ProcessSpawnPlan::new(comspec())
-            .with_args([
-                "/D",
-                "/C",
-                &format!("{} -n 60 127.0.0.1 >nul", absolute_ping()),
-            ])
+            .with_args(["/D", "/C", "for /L %i in (1,1,2000000000) do @rem"])
             .with_timeout(SHORT_TIMEOUT)
             .with_budget(probelab_core::ProcessBudget {
                 job_cpu_time_millis: 60_000,
                 per_process_cpu_time_millis: 60_000,
                 job_memory_bytes: 256 * 1024 * 1024,
                 per_process_memory_bytes: 128 * 1024 * 1024,
-                // `ping` needs a second active process on this Windows version and is refused with
-                // "not enough quota" under the strict default of one. The strict default is kept
-                // everywhere else, including the CPU-limit test, because refusing a fork is a
-                // containment property worth holding. This test is about the wall-clock bound, so it
-                // declares the headroom its utility needs.
-                active_processes: 4,
+                active_processes: 1,
             });
         let mut policy = CapabilityPolicy::deny_all();
         policy.grant_process(comspec()).expect("grant cmd");

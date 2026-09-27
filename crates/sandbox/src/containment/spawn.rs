@@ -34,8 +34,9 @@ use probelab_core::{
 };
 
 use super::{
-    process_integrity, ChildOutcome, ContainmentError, ContainmentLimits, MandatoryIntegrity,
-    ProtectedPaths, RestrictedProcessGuard, RestrictedProcessSpec, SandboxDirectory,
+    process_integrity, AppContainerIdentity, ChildOutcome, ContainmentError, ContainmentLimits,
+    MandatoryIntegrity, ProtectedPaths, RestrictedProcessGuard, RestrictedProcessSpec,
+    SandboxDirectory, PROFILE_NAME,
 };
 
 /// How many distinct limits a contained job object is verified to carry.
@@ -53,6 +54,7 @@ pub struct ContainedProcessSpawner {
     designated_directory: PathBuf,
     protected_paths: Vec<PathBuf>,
     journal_directory: PathBuf,
+    app_container_capabilities: Vec<String>,
 }
 
 impl ContainedProcessSpawner {
@@ -62,7 +64,19 @@ impl ContainedProcessSpawner {
             designated_directory: designated_directory.into(),
             protected_paths,
             journal_directory: std::env::temp_dir().join("probelab-protected-paths"),
+            app_container_capabilities: Vec::new(),
         }
+    }
+
+    /// Grants AppContainer capabilities to contained children.
+    ///
+    /// The default is an **empty** capability list, which is what makes the operating system refuse
+    /// outbound network access to a contained child. Adding a capability such as `internetClient` is a
+    /// deliberate loosening of that boundary, so it has to be asked for by name and it is reported in
+    /// the containment telemetry.
+    pub fn with_app_container_capabilities(mut self, capabilities: Vec<String>) -> Self {
+        self.app_container_capabilities = capabilities;
+        self
     }
 
     /// Places the crash-recovery journals in an explicit directory.
@@ -103,15 +117,29 @@ impl ProcessSpawner for ContainedProcessSpawner {
             ));
         }
 
+        // 0. The AppContainer identity, derived first because the designated directory has to grant
+        //    it access. A package SID matches none of the DACL's existing trustees, so without this
+        //    the child could read its own directory but not write to it.
+        let app_container = AppContainerIdentity::derive(PROFILE_NAME).map_err(|error| {
+            containment_failure(
+                "derive_app_container",
+                ContainmentError::AppContainer(error.to_string()),
+                ContainmentFailureKind::AppContainerUnavailable,
+            )
+        })?;
+
         // 1. The one directory this child may work in.
-        let designated =
-            SandboxDirectory::prepare(&self.designated_directory).map_err(|error| {
-                containment_failure(
-                    "prepare_designated_directory",
-                    error,
-                    ContainmentFailureKind::DesignatedDirectoryUnavailable,
-                )
-            })?;
+        let designated = SandboxDirectory::prepare_for_app_container(
+            &self.designated_directory,
+            Some(app_container.sid_text()),
+        )
+        .map_err(|error| {
+            containment_failure(
+                "prepare_designated_directory",
+                error,
+                ContainmentFailureKind::DesignatedDirectoryUnavailable,
+            )
+        })?;
         let capture_stdout = designated.path().join(STDOUT_CAPTURE_FILE);
         let capture_stderr = designated.path().join(STDERR_CAPTURE_FILE);
         designated.verify().map_err(|error| {
@@ -142,12 +170,31 @@ impl ProcessSpawner for ContainedProcessSpawner {
         // deliberately no builder that turns it off: a contained child must never be handed the
         // operator's exported variables, provider credentials above all. A benchmark that needs a
         // variable declares it explicitly on the plan, where it is visible and reviewable.
-        let spec = RestrictedProcessSpec::new(plan.program.as_str())
+        //
+        // The AppContainer identity is requested unconditionally for the same reason. This spawner is
+        // the product's containment boundary, and a boundary that can be skipped is not a boundary.
+        // There is no flag to launch a child without it: if the SID cannot be derived, the attribute
+        // list cannot be built, or the running child's token does not carry the SID, the spawn fails.
+        let mut spec = RestrictedProcessSpec::new(plan.program.as_str())
             .with_args(plan.args.iter())
             .with_current_directory(child_directory(designated.path()))
             .with_stdout_file(capture_stdout.clone())
             .with_stderr_file(capture_stderr.clone())
             .without_inherited_environment();
+        if self.app_container_capabilities.is_empty() {
+            spec = spec.with_app_container();
+        } else {
+            // A non-empty capability list is a deliberate loosening of the network boundary, so it is
+            // logged rather than applied silently. It belongs in the result bundle too, and that
+            // surfacing is outstanding UI work rather than something to fake here.
+            tracing::warn!(
+                run_root = %self.designated_directory.display(),
+                capabilities = ?self.app_container_capabilities,
+                "a contained child was granted AppContainer capabilities, which loosens the \
+                 default outbound network denial"
+            );
+            spec = spec.with_app_container_capabilities(self.app_container_capabilities.clone());
+        }
 
         // 3. Suspended, in a job, at low integrity, resumed last.
         let mut guard = RestrictedProcessGuard::spawn(spec, &limits).map_err(|error| {
@@ -377,6 +424,11 @@ fn classify(error: &ContainmentError) -> ContainmentFailureKind {
         | ContainmentError::TokenIntegrityLevelUnavailable => {
             ContainmentFailureKind::TokenIntegrityFailed
         }
+        // An AppContainer failure is reported as its own kind rather than folded into a generic one.
+        // "The identity could not be established or confirmed" is a distinct operational fact from a
+        // token or job-object problem, and a reader of a result bundle should be able to tell them
+        // apart without parsing a message.
+        ContainmentError::AppContainer(_) => ContainmentFailureKind::AppContainerUnavailable,
         ContainmentError::ProtectionPathInvalid
         | ContainmentError::ProtectionNothingToProtect
         | ContainmentError::ProtectionNotVerified { .. }

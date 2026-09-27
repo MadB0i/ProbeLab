@@ -46,9 +46,9 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, OpenProcess, OpenProcessToken, ResumeThread,
-    TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE,
-    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    STARTF_USESHOWWINDOW, STARTF_USESTDHANDLES, STARTUPINFOW,
+    TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+    EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SYNCHRONIZE, STARTF_USESHOWWINDOW, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
 };
 
 use super::{
@@ -258,7 +258,10 @@ impl Guard {
 }
 
 /// Creates the designated sandbox directory and applies the containment security descriptor.
-pub(crate) fn prepare_designated_directory(path: &Path) -> Result<(), ContainmentError> {
+pub(crate) fn prepare_designated_directory(
+    path: &Path,
+    app_container_sid: Option<&str>,
+) -> Result<(), ContainmentError> {
     let parent = path
         .parent()
         .ok_or(ContainmentError::MissingParentDirectory)?;
@@ -271,7 +274,7 @@ pub(crate) fn prepare_designated_directory(path: &Path) -> Result<(), Containmen
         return Err(ContainmentError::NotADirectory);
     }
     std::fs::create_dir_all(path).map_err(|_| ContainmentError::DesignatedDirectoryUnavailable)?;
-    apply_designated_security(path)?;
+    apply_designated_security(path, app_container_sid)?;
     verify_designated_directory(path)
 }
 
@@ -417,6 +420,170 @@ pub(crate) fn is_process_alive(process_id: u32) -> Result<bool, ContainmentError
     }
 }
 
+/// Builds the child's environment block.
+///
+/// `None` means "inherit the parent's block", which is only ever correct when the spec asked to
+/// inherit *and* supplied no overrides. An empty `Vec` is a different thing entirely — a block with
+/// no variables in it — so the two are kept distinct rather than collapsed.
+///
+/// A contained child never inherits the host's, because that is where credentials live. When an
+/// AppContainer identity is in force, `LOCALAPPDATA` must be supplied: the launch needs it to build the
+/// package's per-user folder, and omitting it fails the launch with `ERROR_ENVVAR_NOT_FOUND` rather
+/// than degrading. `TEMP` and `TMP` are left alone, because Windows discards them for a package folder
+/// anyway — see the module docs in `appcontainer.rs` for that measurement.
+fn build_environment(spec: &RestrictedProcessSpec) -> Result<Option<Vec<u16>>, ContainmentError> {
+    if spec.inherits_environment() {
+        return match spec.environment() {
+            [] => Ok(None),
+            overrides => environment_block(overrides, true).map(Some),
+        };
+    }
+    let mut overrides = spec.environment().to_vec();
+    if spec.app_container().is_some() {
+        // `LOCALAPPDATA` is not optional. When a process is launched with an AppContainer identity,
+        // Windows creates the package's per-user folder under `%LOCALAPPDATA%\Packages\<SID>`, and
+        // it resolves that base directory from the child's environment. With the variable absent the
+        // launch fails outright with `ERROR_ENVVAR_NOT_FOUND` (203) — verified empirically, and the
+        // only variable that turned out to be required. `USERPROFILE`, `APPDATA`, `SystemRoot`,
+        // `windir` and `ComSpec` are all unnecessary; each was tried alone and none is sufficient.
+        //
+        // This is a path *disclosure*, not an access grant: the child is told where the folder is and
+        // the AppContainer still refuses to open it. Passing the whole host environment instead would
+        // be simpler and would hand the child every exported variable, credentials included, which is
+        // precisely what the empty-environment invariant exists to prevent.
+        if !overrides.iter().any(|(key, _)| key == "LOCALAPPDATA") {
+            if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                overrides.push((
+                    OsString::from("LOCALAPPDATA"),
+                    OsString::from(local_app_data),
+                ));
+            }
+        }
+        if let Some(designated) = spec.current_directory() {
+            // `TEMP` and `TMP` are deliberately *not* forced to the designated directory. Measured
+            // behaviour: Windows replaces them with the package's own
+            // `%LOCALAPPDATA%\Packages\<name>\AC\Temp`, creating it during launch. That is strictly
+            // better than a directory ProbeLab picked — it is per-identity, it is already writable by
+            // this child, and it cannot collide with another run. Overriding it would be fighting the
+            // platform for no gain. The designated directory remains the child's *working* directory
+            // and the only place it may write.
+            let _ = &designated;
+        }
+    }
+    environment_block(&overrides, false).map(Some)
+}
+
+/// Derives the AppContainer identity and builds the process attribute list that applies it.
+fn build_app_container(
+    request: &super::appcontainer::AppContainerRequest,
+) -> Result<super::appcontainer::SecurityAttributeList, super::appcontainer::AppContainerError> {
+    use super::appcontainer::{
+        capability_sid, AppContainerIdentity, SecurityAttributeList, PROFILE_NAME,
+    };
+
+    let identity = AppContainerIdentity::derive(PROFILE_NAME)?;
+    if request.capabilities.is_empty() {
+        // The safe default: an empty capability list means the OS refuses outbound network access.
+        return SecurityAttributeList::for_identity(&identity);
+    }
+    let mut resolved = Vec::with_capacity(request.capabilities.len());
+    for name in &request.capabilities {
+        resolved.push(capability_sid(name)?);
+    }
+    SecurityAttributeList::with_capabilities(&identity, resolved)
+}
+
+/// Confirms the suspended child's token really carries the AppContainer SID we asked for.
+///
+/// Nothing here trusts the request. The child is still suspended and has run no instructions, so this
+/// reads the token the OS actually built. If the SID is absent the child is terminated rather than
+/// resumed, because a child that looks contained and is not is worse than no child at all.
+fn verify_app_container_membership(
+    process: &OwnedHandle,
+    identity: &super::appcontainer::AppContainerIdentity,
+) -> Result<(), ContainmentError> {
+    use windows_sys::Win32::Security::GetTokenInformation;
+    use windows_sys::Win32::Security::{TokenAppContainerSid, TOKEN_INFORMATION_CLASS};
+
+    // SAFETY: `process` is a live process handle and the out-parameters are written by the call.
+    let (token, returned) = unsafe {
+        let mut token: HANDLE = null_mut();
+        let opened = OpenProcessToken(process.as_raw(), TOKEN_QUERY, &mut token);
+        if opened == 0 {
+            return Err(ContainmentError::AppContainer(format!(
+                "the child's token could not be opened for query (error {})",
+                last_error()
+            )));
+        }
+        let mut returned: u32 = 0;
+        let queried = GetTokenInformation(
+            token,
+            TokenAppContainerSid as TOKEN_INFORMATION_CLASS,
+            null_mut(),
+            0,
+            &mut returned,
+        );
+        if queried != 0 || returned == 0 {
+            // The call is expected to fail with ERROR_INSUFFICIENT_BUFFER and report the size.
+            CloseHandle(token);
+            return Err(ContainmentError::AppContainer(
+                "the child's token reported no AppContainer SID".to_owned(),
+            ));
+        }
+        (token, returned)
+    };
+    // SAFETY: `returned` is the size the previous call reported for exactly this information class.
+    let outcome = unsafe {
+        let mut buffer = vec![0u8; usize::try_from(returned).unwrap_or(0)];
+        let mut written: u32 = 0;
+        let queried = GetTokenInformation(
+            token,
+            TokenAppContainerSid as TOKEN_INFORMATION_CLASS,
+            buffer.as_mut_ptr().cast::<c_void>(),
+            returned,
+            &mut written,
+        );
+        let result = if queried == 0 {
+            Err(ContainmentError::AppContainer(
+                "the child's AppContainer SID could not be read".to_owned(),
+            ))
+        } else {
+            // `TOKEN_APP_CONTAINER_SID` does **not** contain the SID inline. It holds a pointer to it
+            // as its first field, followed by the capability count, a pointer to the capabilities,
+            // and a length. Reading the buffer as if the SID bytes started at offset zero would compare
+            // a pointer against a SID and always mismatch, so the pointer is followed and the SID is
+            // copied with its own accessor.
+            //
+            // SAFETY: on success the first field is a PSID the OS allocated for this token, and
+            // `copy_sid` only reads through it.
+            let actual = {
+                use super::appcontainer::copy_sid;
+                let sid_pointer = buffer.as_ptr().cast::<*const c_void>().read();
+                if sid_pointer.is_null() {
+                    None
+                } else {
+                    Some(copy_sid(sid_pointer.cast_mut()))
+                }
+            };
+            match actual {
+                None => Err(ContainmentError::AppContainer(
+                    "the child's token reported a null AppContainer SID".to_owned(),
+                )),
+                Some(actual) if actual == identity.sid_bytes() => Ok(()),
+                Some(actual) => Err(ContainmentError::AppContainer(format!(
+                    "the running child's AppContainer SID does not match the one requested \
+                     (expected {}, read {})",
+                    String::from_utf8_lossy(identity.sid_bytes()),
+                    String::from_utf8_lossy(&actual)
+                ))),
+            }
+        };
+        CloseHandle(token);
+        result
+    };
+    outcome
+}
+
 /// A child that has not been allowed to run yet, and is terminated if this scope unwinds.
 struct PendingChild {
     process: Option<OwnedHandle>,
@@ -435,6 +602,38 @@ impl PendingChild {
         // never block on, or read from, the operator's console. The redirection handles are dropped
         // as soon as creation returns: the child holds its own copies from that point on.
         let streams = StandardStreams::open(spec)?;
+
+        // AppContainer identity, when the spec asked for one. This is derived, not registered, so it
+        // works on a host where `CreateAppContainerProfile` fails. Built *before* the process is
+        // created so a failure here means no process was ever started.
+        let identity = match spec.app_container() {
+            None => None,
+            Some(request) => {
+                let built = build_app_container(request)
+                    .map_err(|error| ContainmentError::AppContainer(error.to_string()))?;
+                // Which identity and which capabilities went into force is security-relevant and is
+                // recorded, so a containment failure in a log can be read back as "this child ran as
+                // this package with these capabilities".
+                tracing::debug!(
+                    app_container_sid = %built.identity().sid_text(),
+                    capabilities = ?built.granted_capabilities(),
+                    granted_capability_count = built.granted_capability_count(),
+                    "a contained child is being launched with a derived AppContainer identity"
+                );
+                Some(built)
+            }
+        };
+        if spec.app_container().is_some()
+            && identity.as_ref().is_none_or(|built| !built.is_present())
+        {
+            // The spec demanded an identity and none is in force. Refuse rather than launch a child
+            // that looks contained and is not.
+            return Err(ContainmentError::AppContainer(
+                "an AppContainer identity was requested but none could be placed in force"
+                    .to_owned(),
+            ));
+        }
+
         let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
         startup.cb = size_of::<STARTUPINFOW>() as u32;
         startup.dwFlags = STARTF_USESHOWWINDOW;
@@ -448,16 +647,23 @@ impl PendingChild {
             startup.hStdOutput = streams.output.as_raw();
             startup.hStdError = streams.error.as_raw();
         }
-        let environment = if spec.inherits_environment() {
-            match spec.environment() {
-                [] => None,
-                overrides => Some(environment_block(overrides, true)?),
-            }
+
+        // `STARTUPINFOEXW` is required to carry the AppContainer capability, and with it the
+        // `EXTENDED_STARTUPINFO_PRESENT` creation flag. The struct is only used when an identity is
+        // in force; otherwise the plain `STARTUPINFOW` path is untouched.
+        let mut extended: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+        extended.StartupInfo = startup;
+        let mut creation_flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
+        let startup_pointer: *const STARTUPINFOW = if let Some(identity) = identity.as_ref() {
+            extended.lpAttributeList = identity.pointer();
+            extended.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+            creation_flags |= EXTENDED_STARTUPINFO_PRESENT;
+            &extended.StartupInfo
         } else {
-            // An empty environment block is a single NUL, which is what Windows expects for "no
-            // variables at all". Passing `None` here would mean "inherit the parent's block".
-            Some(environment_block(spec.environment(), false)?)
+            &startup
         };
+
+        let environment = build_environment(spec)?;
         let mut information: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         let inherit_handles = i32::from(streams.is_some());
         let created = unsafe {
@@ -467,18 +673,23 @@ impl PendingChild {
                 null(),
                 null(),
                 inherit_handles,
-                CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                creation_flags,
                 environment
                     .as_ref()
                     .map_or(null(), |block| block.as_ptr() as *const c_void),
                 directory.as_ref().map_or(null(), |path| path.as_ptr()),
-                &startup,
+                startup_pointer,
                 &mut information,
             )
         };
         if created == 0 {
+            let step = if identity.is_some() {
+                "CreateProcessW(CREATE_SUSPENDED, AppContainer)"
+            } else {
+                "CreateProcessW(CREATE_SUSPENDED)"
+            };
             return Err(ContainmentError::Win32 {
-                step: "CreateProcessW(CREATE_SUSPENDED)",
+                step,
                 code: last_error(),
             });
         }
@@ -494,6 +705,22 @@ impl PendingChild {
                 step: "CreateProcessW(process handles)",
                 code: last_error(),
             });
+        }
+        // The child is still suspended here, so verifying its token costs nothing and is the earliest
+        // moment at which a wrong identity could be caught before a single instruction runs.
+        if let Some(identity) = identity.as_ref() {
+            let Some(handle) = process.as_ref() else {
+                return Err(ContainmentError::Win32 {
+                    step: "CreateProcessW(process handles)",
+                    code: last_error(),
+                });
+            };
+            if let Err(error) = verify_app_container_membership(handle, identity.identity()) {
+                unsafe {
+                    TerminateProcess(handle.as_raw(), TERMINATED_EXIT_CODE);
+                }
+                return Err(error);
+            }
         }
         Ok(Self {
             process,
@@ -788,9 +1015,33 @@ fn mandatory_label_sid(sacl: *const ACL) -> Result<String, ContainmentError> {
 ///
 /// The DACL is written first so the label is written against an ACL that already grants its owner
 /// the access setting a mandatory label requires.
-fn apply_designated_security(path: &Path) -> Result<(), ContainmentError> {
+fn apply_designated_security(
+    path: &Path,
+    app_container_sid: Option<&str>,
+) -> Result<(), ContainmentError> {
     let wide = wide_path(path)?;
-    let sddl = wide_string(OsStr::new(SANDBOX_DIRECTORY_SDDL));
+    // The designated directory's DACL grants write access to SYSTEM, Administrators, and Owner
+    // Rights. An AppContainer token matches **none** of those: it carries the package SID and its
+    // capability SIDs, not the invoking user's membership. Without an explicit ACE for the package
+    // SID a contained child can read the directory but not write to it, which is not the contract —
+    // the contract is that this is the one place a child may write.
+    //
+    // The ACE is granted to the package identity alone. It adds nothing for the trusted user and
+    // nothing for any other AppContainer.
+    let sddl = match app_container_sid {
+        None => SANDBOX_DIRECTORY_SDDL.to_owned(),
+        Some(sid) => {
+            let marker = "S:(ML;OICI;NW;;;S-1-16-4096)";
+            let Some((dacl, label)) = SANDBOX_DIRECTORY_SDDL.split_once(marker) else {
+                return Err(ContainmentError::Win32 {
+                    step: "the designated directory SDDL no longer has the expected shape",
+                    code: 0,
+                });
+            };
+            format!("{dacl}(A;OICI;FA;;;{sid}){marker}{label}")
+        }
+    };
+    let sddl = wide_string(OsStr::new(&sddl));
     let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
     let mut length = 0u32;
     let parsed = unsafe {

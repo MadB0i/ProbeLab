@@ -126,27 +126,78 @@ The lesson generalises past this repository: an allow-list whose gate covers the
 dependencies is only as usable as the weakest grant in the dependency graph, and that grant is
 frequently a system directory.
 
-### Why AppContainer is the next mechanism, and what blocked it
+### AppContainer — IMPLEMENTED (identity and network, measured)
 
 AppContainer resolves the loader problem without elevation, because Windows itself pre-grants read and
 execute on the system image set to *all* AppContainer packages — the missing grant is already there.
 The property that then matters is that a user's files carry no ACE for a package identity ProbeLab
-invented, so the child cannot read them. Two properties come from the one mechanism, which is why they
+invents, so the child cannot read them. Two properties come from the one mechanism, which is why they
 are one milestone: **identity** (file-system access bounded by the package identity rather than by the
 invoking user's group membership) and **network** (an AppContainer token is refused outbound access by
 the operating system unless a capability such as `internetClient` is granted; the default is an empty
 capability list, so the OS is the enforcement, independent of the broker).
 
-The attempt was made and is **currently blocked on this host**. `CreateAppContainerProfile` fails with
-`HRESULT 0x80070017` (`ERROR_INVALID_NAME`), which left the real-child suites red — no contained child
-could start. The pivot is to `DeriveAppContainerSidFromAppContainerName`, which computes a package SID
-straight from the profile name and so does not depend on the failing registration call succeeding. The
-abandoned branch that contained this attempt has been deleted; the two findings above are what survive
-from it.
+`CreateAppContainerProfile` still fails on this host with `HRESULT 0x80070017`
+(`ERROR_INVALID_NAME`). That no longer blocks anything: the implementation uses
+`DeriveAppContainerSidFromAppContainerName`, which computes a package SID straight from the profile
+name and never touches profile registration. The abandoned branch that contained the failing attempt
+has been deleted; the finding is what survives from it, and it is now a note rather than a blocker.
 
-AppContainer would still not be a syscall filter. A child can load native code, and anything the
-package identity is granted on the machine remains reachable. What it closes is the broad
-"anything this user can read" surface, plus outbound network.
+Every contained child is launched through `STARTUPINFOEXW` with
+`PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`. There is no opt-out: `ContainedProcessSpawner` builds
+the request itself and offers no method to skip it, and a non-Windows build fails closed with
+`ContainmentFailureKind::AppContainerUnavailable` rather than launching uncontained. The child starts
+suspended so its token can be opened and its `TokenAppContainerSid` read back and compared against the
+derived SID before it is allowed to run — the identity is verified, not assumed.
+
+| Property | Evidence | Measured result |
+| --- | --- | --- |
+| SID is derived, not registered | `crates/sandbox/tests/appcontainer.rs` (`the_appcontainer_sid_is_derived_without_registering_anything`) | Stable `S-1-15-2-*` for `probelab.containedchild`, no profile created |
+| A real dynamically linked child runs | `a_dynamically_linked_program_launches_inside_the_appcontainer` | `cmd.exe` starts and executes |
+| Identity is verified, not assumed | `verify_app_container_membership` in `crates/sandbox/src/containment/windows.rs` | Every launch reads `TokenAppContainerSid` from the suspended child's own token and refuses to resume on a mismatch. Exercised by all 9 real-child tests, since a broken comparison would kill every child |
+| User files are unreachable | `a_real_user_file_outside_the_sandbox_is_unreadable` | A real file the invoking user can read is refused by the OS |
+| Designated directory is writable | `the_designated_directory_is_still_writable_by_the_contained_child` | Write succeeds; the directory's ACL names the package SID, added at run start |
+| Loopback is refused | `an_outbound_network_attempt_is_refused_with_no_capability_granted` | A real loopback listener is proven reachable by an uncontained control, then `curl.exe` inside the container exits `7` (could not connect) |
+| A capability is the SID it is | `a_capability_is_parsed_as_the_sid_it_is_rather_than_derived_as_a_package` | `S-1-15-3-1` round-trips as itself and is not turned into an `S-1-15-2-*` package SID |
+| The grant ProbeLab makes is the grant it reports | `a_granted_capability_is_reported_back_exactly_as_requested` (unit test in `appcontainer.rs`) | Requested capability names and the count passed to `SECURITY_CAPABILITIES` match; the default is empty |
+
+Two findings from the real-child tests are worth recording because both were assumptions that proved
+false:
+
+- **`LOCALAPPDATA` is required, and its absence must fail the launch.** When a process starts with an
+  AppContainer identity, Windows builds the package's per-user folder under `%LOCALAPPDATA%`. Supplying
+  the child's environment without it fails `CreateProcessW` with code `203`
+  (`ERROR_ENVVAR_NOT_FOUND`). The spawner therefore always supplies it, and there is no fallback that
+  drops it to get a child running.
+- **`TEMP` and `TMP` cannot be aimed at the designated directory.** The plan was to point them into
+  the run's own directory. Measured, Windows rewrites them to `%LOCALAPPDATA%\Packages\<name>\AC\Temp`,
+  creating it at launch, and discards what the parent asked for. Forcing them would have been
+  theatre, so the spawner leaves them alone and the test asserts what the child actually observes. The
+  package temp directory is a real location on disk; it is bounded by the package identity that owns
+  it, not by anything ProbeLab enforces.
+
+AppContainer is still not a syscall filter. A child can load native code, and anything the package
+identity is granted on the machine remains reachable. It is also not a memory or integrity boundary,
+and it says nothing about a child's compliance — only about what the OS will let it touch. What it
+closes is the broad "anything this user can read" surface, plus outbound network.
+
+### What is *not* proven about the network boundary
+
+Stated here because the distinction is easy to lose:
+
+- **The measured refusal is loopback.** AppContainer refuses loopback separately from internet access,
+  and a loopback exemption requires `CheckNetIsolation`, not a capability. So the passing test proves
+  loopback is refused, not that `internetClient` governs external internet.
+- **A granted capability is not proven end-to-end.** ProbeLab's wiring is tested — the requested
+  capability is parsed to the right SID, and the names and count handed to `SECURITY_CAPABILITIES`
+  match what was asked for. That the OS then honours the grant at connect time is untested. Two
+  attempts to test it from inside the container failed informatively: `whoami.exe` is refused with
+  `Access is denied.`, so the child cannot report its own token, and the child is resumed before a
+  caller could inspect its token while still suspended. Approximating this with a loopback fetch would
+  have tested the wrong mechanism and could have passed for the wrong reason.
+- **Therefore "no network unless a benchmark declares `internetClient`" is a design property, not a
+  measured result.** It holds by construction — the default list is empty and that is tested — but the
+  positive case is unverified.
 
 ## Capability broker — IMPLEMENTED (primary boundary)
 
@@ -199,13 +250,17 @@ that started it; only its mandatory integrity level and its kernel-enforced reso
 
 ### What Windows containment does not enforce
 
-- No syscall filtering, no AppContainer or package identity, no restricted token, no capability SIDs,
-  and no job-object UI or registry restrictions.
-- A contained child can still read whatever its user can read, open network connections, and load
-  native code.
+- No syscall filtering and no restricted token. AppContainer and package identity are now in force;
+  see the AppContainer section above for what they do and do not buy.
+- A contained child is bounded by its package identity and the ACEs on individual objects, not by a
+  list of paths ProbeLab enumerates. So a contained child can still read anything the *package* is
+  granted anywhere on the machine, load native code, and reach anything reachable from its identity.
 - The designated directory is created by the same user as the child, so the child can modify the
   DACL of *that* directory. It cannot write outside it, because that is refused by the mandatory
   label, not by the DACL.
+- Outbound network is denied by the OS for a package token with an empty capability list. This is
+  refused, not filtered: it is not a syscall filter, so it is a claim about what the OS grants, not
+  about what a child is prevented from attempting.
 - Nothing on this path changes the in-process adapter, the provider, the engine, or the broker.
   `crates/broker` is still the component that decides what a capability is worth.
 

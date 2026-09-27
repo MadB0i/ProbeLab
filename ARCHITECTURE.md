@@ -237,6 +237,50 @@ connected model, which gets a fresh request each turn and has no other memory. T
 intended use, but it means the window's *usefulness* is currently asserted only for real providers —
 which is one more reason no connected model has been measured on this benchmark yet.
 
+## v0.5 phase 1: AppContainer identity and network isolation
+
+Before this phase a contained child ran as the *invoking user* under a job object, which bounded CPU,
+memory, process count, and wall clock, and nothing else. It could read every file that user could read
+and it could open network connections. The job object is a resource boundary; it is not an identity.
+
+The phase adds the missing half. Every contained child is now launched with a derived AppContainer
+identity, which bounds file access by *package identity* rather than by group membership, and which the
+OS refuses outbound network access for unless a capability is granted. Both properties come from one
+mechanism, which is why they are one phase.
+
+The design decisions, and the two that did not survive contact with the machine:
+
+- **Derive, do not register.** `CreateAppContainerProfile` fails on this host with
+  `ERROR_INVALID_NAME`. `DeriveAppContainerSidFromAppContainerName` computes the same package SID
+  arithmetically from the profile name and never touches registration, so it is unaffected. One name
+  for the whole installation is deliberate: the package SID is what an ACE must name, so a per-run
+  profile would mean rewriting run-directory ACLs with a SID that changes every run.
+- **Verify the identity, do not assume it.** The child starts suspended, its token is opened,
+  `TokenAppContainerSid` is read back, and only a match against the derived SID allows it to resume. A
+  mismatch kills it. A containment mechanism that is never checked is a comment, not a boundary.
+- **No opt-out.** `ContainedProcessSpawner` builds the AppContainer request itself and exposes no method
+  to skip it, and a non-Windows build fails closed with `AppContainerUnavailable` instead of quietly
+  launching uncontained.
+- **`TEMP`/`TMP` could not be aimed at the designated directory.** The plan was to point them into the
+  run's own directory. Measured, Windows rewrites them to the package's per-user folder and discards
+  what the parent set. Forcing them would have been a guarantee in the docs and nothing in the machine,
+  so the spawner supplies only what is genuinely required — `LOCALAPPDATA`, without which the launch
+  fails with `ERROR_ENVVAR_NOT_FOUND` — and the test asserts the value the child really sees.
+- **Explicit capabilities are real, and the limit is stated.** A capability is *parsed* as the SID it
+  already is (`ConvertStringSidToSidW`), not derived as a package SID from its name — deriving would
+  turn the well-known `internetClient` capability into an unrelated `S-1-15-2-*` package SID that grants
+  nothing while looking granted. The parsed SIDs are passed through `SECURITY_CAPABILITIES` for real,
+  and a grant that is requested but not delivered is refused rather than dropped. Two honest limits:
+  the measured network refusal is **loopback** (AppContainer gates loopback separately, via
+  `CheckNetIsolation`, not via a capability), and a *granted* capability is not proven end-to-end,
+  because the child cannot report its own token from inside the container. Both are recorded in
+  `docs/SECURITY-STATUS.md` rather than glossed.
+
+The sharp remaining limit: this is **refusal, not filtering.** It is not a syscall filter, so it bounds
+what the OS grants a child, not what a child may attempt. Native code still loads, and anything the
+package identity is granted anywhere on the machine is still reachable. Full detail and the per-property
+evidence table are in `docs/SECURITY-STATUS.md`.
+
 ## v0.3 capability broker
 
 `crates/broker` is the primary capability boundary. It is deny-by-default and answers one question:

@@ -42,14 +42,53 @@ Windows host at `main` `0608e92`; see `docs/AUDIT-2026-09-26.md` for the full au
 - A contained child always starts with an empty environment, so it never inherits the host's provider credentials. This is an invariant of the spawner: the method that would re-enable inheritance has been removed rather than left as an unused public escape hatch.
 - Wall-clock containment: every spawn plan must declare its own timeout, an undeclared or zero timeout is refused at plan-validation time rather than defaulted, and expiry terminates the whole job with `TerminateJobObject` and records a distinct `timeout` termination reason with no exit code.
 - stdout/stderr redirected into the run's existing designated directory instead of inherited, with standard input pointed at the `NUL` device; telemetry keeps each stream's total byte count plus a 4 KiB-capped preview, the full output stays in the sandbox file, and neither the capture nor the byte count enters the replay digest.
-- Windows OS-level defense-in-depth containment in `crates/sandbox`, below the broker: children are started suspended inside a job object with per-job and per-process CPU limits, per-process and whole-job memory limits, an active-process limit, and `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; the primary token is set to the low mandatory label `S-1-16-4096` before the child is resumed; a designated sandbox directory is labeled low and protected so a contained child can write only there. Non-Windows platforms return `UnsupportedPlatform` and a spawn fails closed. This is not a code sandbox.
+- Windows OS-level defense-in-depth containment in `crates/sandbox`, below the broker: children are started suspended inside a job object with per-job and per-process CPU limits, per-process and whole-job memory limits, an active-process limit, and `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; the primary token is set to the low mandatory label `S-1-16-4096` before the child is resumed; a designated sandbox directory is labeled low and protected so a contained child can write only there; and since phase 1 the child also runs under a derived AppContainer package identity whose `TokenAppContainerSid` is verified before resume, which is what bounds file access by identity and gets outbound network refused by the OS. Non-Windows platforms return `UnsupportedPlatform` and a spawn fails closed. This is not a code sandbox.
 
+
+### v0.5 phase 1 — AppContainer identity and network isolation
+
+- **Every contained child now runs as a package identity, not as the invoking user.** A job object
+  bounds CPU, memory, process count, and wall clock; it was never an identity boundary, so a child
+  could read anything that user could read and could open network connections. Both are now closed:
+  file access is bounded by package identity, and the OS refuses outbound network for a package token
+  with an empty capability list.
+- The SID is **derived** via `DeriveAppContainerSidFromAppContainerName`, not registered.
+  `CreateAppContainerProfile` still fails on this host with `ERROR_INVALID_NAME` and no longer blocks
+  anything. One profile name for the whole installation, because the package SID is what an ACE names.
+- **The identity is verified, not assumed.** The child starts suspended, its `TokenAppContainerSid` is
+  read back and compared against the derived SID, and only a match resumes it. A mismatch kills the
+  child. No opt-out exists on `ContainedProcessSpawner`, and non-Windows fails closed with
+  `AppContainerUnavailable`. The comparison runs on every launch, so all 9 real-child tests exercise
+  it — a broken comparison would kill every child rather than pass quietly.
+- Real-child evidence, all in `crates/sandbox/tests/appcontainer.rs`: a dynamically linked `cmd.exe`
+  launches; a real user file outside the sandbox is unreadable; the designated directory stays writable
+  via an ACE naming the package SID, added at run start; and loopback is refused — proven by a real
+  loopback listener that an uncontained control reaches and the contained `curl.exe` cannot (exit `7`).
+- **A capability is parsed, not derived.** `capability_sid` used to route through
+  `DeriveAppContainerSidFromAppContainerName`, which turned the well-known `internetClient` capability
+  `S-1-15-3-1` into an unrelated `S-1-15-2-*` package SID — granting nothing while appearing to grant
+  something. It now uses `ConvertStringSidToSidW`, and a test pins the distinction.
+- **A grant that is requested but not delivered is refused, not dropped.** The parsed SIDs are passed
+  through `SECURITY_CAPABILITIES` for real, so the reported capability list cannot claim a grant no
+  token carried. `docs/SECURITY-STATUS.md` records what is *not* proven: the measured refusal is
+  loopback, and a granted capability is not verified end-to-end, because `whoami.exe` is refused inside
+  the AppContainer and the child is resumed before a caller could inspect its token.
+- **Two measured findings contradicted the plan, and both are recorded rather than papered over.**
+  `LOCALAPPDATA` is mandatory in the child environment or the launch fails with `ERROR_ENVVAR_NOT_FOUND`
+  (203), so it is always supplied. And `TEMP`/`TMP` *cannot* be aimed at the designated directory:
+  Windows rewrites them to the package's per-user folder and discards what the parent set, so the
+  spawner does not pretend otherwise and the test asserts what the child actually observes.
+- One existing test changed because containment got stronger, not because it got weaker: the
+  wall-clock kill test used `ping -n 60 127.0.0.1` to manufacture a hang, which the new network denial
+  now kills instantly. It uses a bounded `for /L` spin instead, which needs no network and makes the
+  assertion stronger — the child is consuming CPU against a 60-second budget, so a pass at 1.5 seconds
+  is specifically evidence about elapsed time.
 
 ## Verified
 
 - `cargo fmt --check` — the gate. Bare form is correct here because the workspace root is a *virtual* manifest, so `cargo fmt` already covers every member; `--all` is equivalent at this root.
 - `cargo build --workspace --locked`
-- `cargo test --workspace --all-targets --locked` — 256 tests passing
+- `cargo test --workspace --all-targets --locked` — 267 tests passing (256 at the end of phase 0, +9 AppContainer tests, +2 AppContainer unit tests)
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `pnpm install` in `apps/desktop`
 - `pnpm build` in `apps/desktop`
@@ -80,8 +119,8 @@ Windows host at `main` `0608e92`; see `docs/AUDIT-2026-09-26.md` for the full au
 
 ### Deferred
 
-- Executing authorized filesystem and network capabilities, and syscall-level isolation: seccomp/namespaces on Linux, AppContainer or restricted tokens, filesystem virtualization, and network isolation. The v0.3/v0.4 Windows layer is a job object plus a mandatory integrity label only.
-- Linux and macOS OS-level containment.
+- Executing authorized filesystem and network capabilities, and syscall-level isolation: seccomp/namespaces on Linux, filesystem virtualization, and syscall filtering. The Windows layer is now a job object, a mandatory integrity label, **and** an AppContainer package identity with the OS refusing outbound network — but it is still refusal rather than filtering, so native code loads and anything the package identity is granted remains reachable. Restricted tokens remain unusable without elevation.
+- Linux and macOS OS-level containment. There is no AppContainer equivalent ProbeLab can rely on there, and a weaker substitute is not offered in its place.
 - Provider-specific adapters beyond OpenAI-compatible HTTP.
 - Auth, multi-user support, cloud sync, and additional capability dimensions.
 
@@ -100,12 +139,13 @@ output, and it was measuring nothing.
 2. **Surface the aggregate in the desktop app.** The harness is library-and-CLI only by deliberate
    scope, so the UI still runs one episode and shows no success rate, no Wilson interval, and no
    baseline. That gap is real and is the obvious next UI milestone.
-3. **Add the AppContainer identity layer**, using `DeriveAppContainerSidFromAppContainerName`.
-   `CreateAppContainerProfile` fails with `HRESULT 0x80070017` on this host. Do **not** retry the
-   restricted-token approach — it is unusable without elevation, for the reason recorded in
-   `docs/SECURITY-STATUS.md`.
+3. ~~**Add the AppContainer identity layer**~~ — **done in phase 1.** Every contained child now runs
+   under a derived package identity with a verified `TokenAppContainerSid`, and outbound network is
+   refused by the OS. The recorded `CreateAppContainerProfile` failure and the reason not to retry the
+   restricted-token approach both still stand in `docs/SECURITY-STATUS.md`.
 4. **Expose an authorized `filesystem.read`** to a contained child through the same executor, so a
-   child can be given a read-only view of a granted root while the evaluator stays refused.
+   child can be given a read-only view of a granted root while the evaluator stays refused. This is now
+   the natural next step on the spawn path, because the identity layer that would enforce it exists.
 5. **Add the remaining capability dimensions** — reasoning, coding, safety, injection — and the
    Benchmark SDK, now that one benchmark is known to measure something. Multiplies correctly only
    because of step 1.

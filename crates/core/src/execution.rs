@@ -92,6 +92,12 @@ pub enum ContainmentFailureKind {
     ChildStartFailed,
     /// The child's token could not be lowered, or the level was not low when read back.
     TokenIntegrityFailed,
+    /// The AppContainer identity could not be derived, applied, or confirmed on the running child.
+    ///
+    /// Distinct from [`ContainmentFailureKind::TokenIntegrityFailed`] on purpose: a low mandatory
+    /// label and a package identity are separate mechanisms, and a reader diagnosing a containment
+    /// failure should be able to tell which one is missing.
+    AppContainerUnavailable,
     /// The containment invariants could not be verified after they were applied.
     VerificationFailed,
     /// The child's exit could not be observed.

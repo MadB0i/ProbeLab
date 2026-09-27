@@ -1,4 +1,4 @@
-﻿//! Windows OS-level defense-in-depth containment for child processes ProbeLab launches.
+//! Windows OS-level defense-in-depth containment for child processes ProbeLab launches.
 //!
 //! # What this is
 //!
@@ -67,6 +67,27 @@ mod other;
 
 mod protection;
 mod spawn;
+
+/// AppContainer identity and network isolation. Windows only; every other platform gets a stub whose
+/// every entry point reports `UnsupportedPlatform`, so asking for isolation off-Windows fails rather
+/// than quietly launching unconfined.
+#[cfg(windows)]
+mod appcontainer;
+
+#[cfg(not(windows))]
+mod appcontainer_stub;
+
+#[cfg(windows)]
+pub use appcontainer::{
+    capability_sid, AppContainerError, AppContainerIdentity, INTERNET_CLIENT_CAPABILITY,
+    PROFILE_NAME,
+};
+
+#[cfg(not(windows))]
+pub use appcontainer_stub::{
+    capability_sid, AppContainerError, AppContainerIdentity, INTERNET_CLIENT_CAPABILITY,
+    PROFILE_NAME,
+};
 
 #[cfg(windows)]
 use self::windows as platform;
@@ -139,6 +160,13 @@ pub enum ContainmentError {
     /// An environment override value contained a NUL.
     #[error("environment override values must not contain a NUL")]
     InvalidEnvironmentValue,
+    /// The AppContainer identity could not be derived, applied, or confirmed.
+    ///
+    /// Reported as a single string because every path here is fail-closed: the spawn does not happen,
+    /// or the already-suspended child is terminated. There is deliberately no variant that means
+    /// "continue without the identity".
+    #[error("AppContainer isolation failed: {0}")]
+    AppContainer(String),
     /// The designated sandbox directory could not be created.
     #[error("the designated sandbox directory could not be created")]
     DesignatedDirectoryUnavailable,
@@ -455,6 +483,7 @@ pub struct RestrictedProcessSpec {
     inherit_environment: bool,
     stdout_path: Option<PathBuf>,
     stderr_path: Option<PathBuf>,
+    app_container: Option<appcontainer::AppContainerRequest>,
 }
 
 impl RestrictedProcessSpec {
@@ -468,7 +497,31 @@ impl RestrictedProcessSpec {
             inherit_environment: true,
             stdout_path: None,
             stderr_path: None,
+            app_container: None,
         }
+    }
+
+    /// Runs the child inside a derived AppContainer with an empty capability list.
+    ///
+    /// This is the identity and network boundary. The package SID is derived from
+    /// [`appcontainer::PROFILE_NAME`], so nothing is registered with the machine, and the capability
+    /// list is empty, so the operating system refuses outbound network access to the child.
+    ///
+    /// Fail-closed by construction: if the SID cannot be derived or the attribute list cannot be
+    /// built, the spawn returns an error. There is no path that quietly launches the child without the
+    /// identity it was asked for.
+    pub fn with_app_container(mut self) -> Self {
+        self.app_container = Some(appcontainer::AppContainerRequest::default());
+        self
+    }
+
+    /// Runs the child inside a derived AppContainer with an explicit capability list.
+    ///
+    /// Granting a capability such as [`appcontainer::INTERNET_CLIENT_CAPABILITY`] is a deliberate
+    /// loosening of the network boundary and is recorded in the containment telemetry.
+    pub fn with_app_container_capabilities(mut self, capabilities: Vec<String>) -> Self {
+        self.app_container = Some(appcontainer::AppContainerRequest { capabilities });
+        self
     }
 
     /// Sends the child's standard output to a file instead of inheriting the host's streams.
@@ -558,6 +611,11 @@ impl RestrictedProcessSpec {
     /// Returns true when the child inherits this process's environment.
     pub fn inherits_environment(&self) -> bool {
         self.inherit_environment
+    }
+
+    /// Returns the AppContainer request, when the spec asked to run inside one.
+    pub fn app_container(&self) -> Option<&appcontainer::AppContainerRequest> {
+        self.app_container.as_ref()
     }
 
     /// Returns the program the spec names.
@@ -756,11 +814,23 @@ impl SandboxDirectory {
     /// On a volume without that support this returns an error rather than a directory that looks
     /// contained and is not.
     pub fn prepare(path: impl AsRef<Path>) -> Result<Self, ContainmentError> {
+        Self::prepare_for_app_container(path, None)
+    }
+
+    /// Prepares the designated directory, granting an AppContainer package SID access to it.
+    ///
+    /// The package SID is passed as text so the trust decision stays in one place: the spawner derives
+    /// the identity, and this only decides whether the resulting directory is reachable by it. A
+    /// `None` produces exactly the same directory as [`SandboxDirectory::prepare`].
+    pub fn prepare_for_app_container(
+        path: impl AsRef<Path>,
+        app_container_sid: Option<&str>,
+    ) -> Result<Self, ContainmentError> {
         let path = path.as_ref().to_path_buf();
         if path.as_os_str().is_empty() {
             return Err(ContainmentError::DesignatedDirectoryUnavailable);
         }
-        platform::prepare_designated_directory(&path)?;
+        platform::prepare_designated_directory(&path, app_container_sid)?;
         Ok(Self { path })
     }
 

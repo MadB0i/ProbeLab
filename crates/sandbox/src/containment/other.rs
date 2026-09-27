@@ -71,7 +71,10 @@ pub(crate) fn spawn(
 }
 
 /// Reports that this platform cannot create a designated sandbox directory.
-pub(crate) fn prepare_designated_directory(_path: &Path) -> Result<(), ContainmentError> {
+pub(crate) fn prepare_designated_directory(
+    _path: &Path,
+    _app_container_sid: Option<&str>,
+) -> Result<(), ContainmentError> {
     Err(ContainmentError::UnsupportedPlatform)
 }
 
