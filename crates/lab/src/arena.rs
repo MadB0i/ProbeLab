@@ -236,11 +236,21 @@ impl ArenaMatchView {
 
     /// A stable digest of the recorded match.
     ///
-    /// Computed from the recorded ply boards rather than stored, so it cannot drift from the history
-    /// it describes: a tampered history produces a different digest. This is what the replay
-    /// subsystem checks a reconstruction against, so it is a change detector rather than a security
-    /// primitive — the security-relevant digests in this lab are the engine's own replay digests,
-    /// which are SHA-256.
+    /// Computed from the recording rather than stored, so it cannot drift from the history it
+    /// describes. This is what the replay subsystem checks a reconstruction against, so it is a change
+    /// detector rather than a security primitive -- the security-relevant digests in this lab are the
+    /// engine's own SHA-256 replay digests.
+    ///
+    /// It absorbs **every** field a reader would treat as the match's result, not just the ply boards.
+    /// An earlier version bound the game, the seed, the two seats, and the per-ply boards -- and left
+    /// `outcome`, `winner`, `plies`, `tested_side`, `illegal_moves`, `final_board`, and `failure`
+    /// unbound. That meant a recording edited to claim `loss` where the engine recorded `draw` still
+    /// produced the same digest, and the digest is displayed in the replay panel as the evidence that
+    /// the recording is intact. A digest that does not cover the result is not a digest of the result.
+    ///
+    /// The field list is enumerated rather than derived from `Debug`, for the reason
+    /// `ArenaMatchView` is `Debug`-only: a `format!("{:?}")` would change the digest whenever someone
+    /// reformats a struct or a field's `Debug` impl, which is how a wire format becomes a liability.
     pub fn replay_digest(&self) -> String {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         let mut absorb = |text: &str| {
@@ -249,14 +259,58 @@ impl ArenaMatchView {
                 hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
             }
         };
+        // Identity: which match this is, and what produced it.
+        absorb(self.match_id.as_str());
         absorb(self.game.as_str());
+        absorb(self.game_name.as_str());
         absorb(&self.seed.to_string());
         absorb(self.tested_agent.as_str());
         absorb(self.opponent_agent.as_str());
+        absorb(match self.tested_side {
+            GameSide::First => "first",
+            GameSide::Second => "second",
+        });
+        // Result: the fields the panel renders as what happened.
+        absorb(match self.outcome {
+            ArenaOutcome::Win => "win",
+            ArenaOutcome::Draw => "draw",
+            ArenaOutcome::Loss => "loss",
+            ArenaOutcome::NoResult => "no_result",
+        });
+        absorb(match self.winner {
+            None => "none",
+            Some(GameSide::First) => "first",
+            Some(GameSide::Second) => "second",
+        });
+        absorb(&self.plies.to_string());
+        absorb(
+            serde_json::to_string(&self.final_board)
+                .unwrap_or_default()
+                .as_str(),
+        );
+        // Rule violations: a recording claiming no illegal moves when the engine recorded one is a
+        // different match.
+        absorb(&self.illegal_moves.len().to_string());
+        for illegal in &self.illegal_moves {
+            absorb(&illegal.ply.to_string());
+            absorb(illegal.reason.as_str());
+        }
+        // Terminal condition, when the match did not complete.
+        absorb(self.failure.as_deref().unwrap_or(""));
+        // The ply history itself.
         for ply in &self.history {
             absorb(&ply.ply.to_string());
+            absorb(match ply.side {
+                GameSide::First => "first",
+                GameSide::Second => "second",
+            });
             absorb(
                 serde_json::to_string(&ply.board)
+                    .unwrap_or_default()
+                    .as_str(),
+            );
+            absorb(
+                serde_json::to_string(&ply.played)
                     .unwrap_or_default()
                     .as_str(),
             );
