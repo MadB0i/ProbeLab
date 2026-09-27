@@ -173,11 +173,46 @@ Windows host at `main` `0608e92`; see `docs/AUDIT-2026-09-26.md` for the full au
   the property worth holding — the child does not *survive* — instead of one that fails on load rather
   than on regressions. Four consecutive full runs are clean.
 
+### v0.5 phase 3.5 step 1 — the game request shape
+
+- **`ModelRequest::game: Option<GameRequest>`**, additive, and `None` for every grid benchmark. Chosen
+  over widening `Action`/`Observation` into a sum type because `Action` is read by every grid
+  benchmark, the evaluator, the telemetry digest, and the desktop UI, and because a sum type is not
+  free — it touches every field read. The cost is real: this is a second request shape, and it will
+  keep being one. **The agreed trigger to consolidate is a third distinct shape** — a coding
+  benchmark's diffs, or safety/injection payloads. Not decided, and not to be forgotten.
+- **`ModelDecision::GameMove(GameMove)`**, one new top-level variant now and for any future game, with
+  `GameMove` an inner enum of `TicTacToe(usize)`, `ConnectFour(usize)`, `Rps(RpsChoice)`,
+  `Battleship(Position)`. Only the inner enum grows when a game is added; the model boundary does not
+  gain a variant per game forever.
+- **Both rules are enforced, not conventional.** `ModelRequest::validate_decision` refuses a game move
+  on a request that offered no game, a move belonging to a different game, and a move outside the
+  turn's legal set. `ModelRequest::validate` requires a game request to carry an *empty* grid
+  vocabulary and *empty* grid history, so a request is unambiguously one world or the other.
+- **`Position` is deliberately not the grid-world `Coordinate`.** That type means "where the agent is
+  standing", with bounds set by the step radius; a battleship target is a square of ocean. Reusing it
+  would quietly couple the games' geometry to the grid vocabulary.
+- **A game has no grid, but `Observation` is a struct with no "absent" case.** Rather than widen it, a
+  game request carries one canonical `NO_GRID` value and validation *requires* exactly it — so
+  "meaningless grid numbers leaked into a game prompt" is a validation error rather than a silent
+  hazard. The game's own bounded move history lives on `GameRequest::history`, which is why
+  `ModelRequest::history` keeps its grid meaning and stays empty for games.
+- **Telemetry gained `game: Option<GameTelemetry>` carrying the board after each ply**, which is what
+  a live match view needs to render. `#[serde(default, skip_serializing_if = "Option::is_none")]` is
+  load-bearing: the struct is hashed into the replay digest, and an always-serialised `Option` would
+  write `null` into every grid event and change every recorded run.
+- **Grid-world verified unaffected, and the check is pinned rather than inferred.** 286 tests, with the
+  grid-world suite and its calibration numbers unchanged. Two new tests assert the byte-level
+  guarantee directly: a grid event's serialized JSON contains no `game` key at all, and a game event
+  both carries its board and produces different bytes. Relying on the suite staying green would not
+  have been enough — a digest change is *silent*, every test still passes, and only a number already
+  in a document would have moved.
+
 ## Verified
 
 - `cargo fmt --check` — the gate. Bare form is correct here because the workspace root is a *virtual* manifest, so `cargo fmt` already covers every member; `--all` is equivalent at this root.
 - `cargo build --workspace --locked`
-- `cargo test --workspace --all-targets --locked` — 284 tests passing (277 after phase 2, +7 reference-agent tests)
+- `cargo test --workspace --all-targets --locked` — 286 tests passing (284 after phase 3, +2 digest guards)
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `pnpm install` in `apps/desktop`
 - `pnpm build` in `apps/desktop`
@@ -242,6 +277,16 @@ output, and it was measuring nothing.
 
 ## Known limitations
 
+- **A flaky test finally root-caused, after being reported four times as unreproducible.** The symptom
+  was a full-suite run failing roughly one in five with "telemetry sequence must be gap-free", always
+  in whichever test drew a recycled process identifier, and never when the suite ran alone. Two test
+  recorders keyed their SQLite path on the pid alone *and* never deleted it, so a later run assigned the
+  same pid inherited a database whose sequence already started past one. Windows recycles pids, which
+  is why it looked load-dependent and random. Both now use a `unique_scratch_root` keyed on process
+  start time as well as pid; the other pid-keyed sites in the workspace already removed their files
+  first, so they were never exposed. Six consecutive full runs are clean. Two earlier flakes in this
+  file — a spin-loop child asserted dead the instant `TerminateJobObject` returned, since fixed — were
+  real; this one was masked by them.
 - **The bounded history window is not load-bearing on the grid world.** Phase 0 measured it: a
   stateless reactive policy and an otherwise identical memory-reading reactive policy both score
   9/70, with identical mean reward, mean turns, and terminal-status breakdown, and they take the same

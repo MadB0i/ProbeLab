@@ -44,11 +44,6 @@ fn pools() -> SeedPools {
     .expect("declared pools are disjoint")
 }
 
-/// A process-wide counter so two harnesses built in the same test process never share a scratch
-/// directory. Without it, two tests measuring the same policy label would open the same telemetry
-/// database and the second would be rejected as a non-gap-free sequence.
-static HARNESS_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 /// Every scratch directory this test binary created, removed on exit.
 static SCRATCH_DIRECTORIES: std::sync::OnceLock<std::sync::Mutex<Vec<PathBuf>>> =
     std::sync::OnceLock::new();
@@ -58,10 +53,7 @@ fn scratch_directories() -> &'static std::sync::Mutex<Vec<PathBuf>> {
 }
 
 fn harness() -> Harness {
-    let serial = HARNESS_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root =
-        std::env::temp_dir().join(format!("probelab-quality-{}-{serial}", std::process::id()));
-    std::fs::create_dir_all(&root).expect("scratch directory");
+    let root = probelab_engine::harness::unique_scratch_root("quality");
     let scratch: PathBuf = root.clone();
     let factory: probelab_engine::harness::RecorderFactory =
         Arc::new(move |run_id: &str| -> Arc<dyn TelemetryRecorder> {
@@ -542,8 +534,11 @@ fn b4_the_history_window_is_bounded_and_drops_the_oldest_entries() {
             "window-probe",
             Arc::new(
                 SqliteTelemetryRecorder::with_callback(
-                    std::env::temp_dir()
-                        .join(format!("window-probe-{}.sqlite3", std::process::id())),
+                    // Unique per process launch, not per pid: see `unique_scratch_root`. This inline
+                    // recorder was pid-keyed and inherited a stale database whenever Windows recycled
+                    // the identifier, which the gap-free check then refused.
+                    probelab_engine::harness::unique_scratch_root("window-probe")
+                        .join("telemetry.sqlite3"),
                     |_| {},
                 )
                 .expect("recorder"),
@@ -620,6 +615,8 @@ fn b4_a_request_carrying_an_over_long_history_is_refused_rather_than_truncated()
         },
         available_actions: base.available_actions.clone(),
         process_spawn_available: false,
+        // Grid path: the grid-world benchmark offers no game.
+        game: None,
         history: Vec::new(),
     };
     request.history = (0..=HISTORY_WINDOW)

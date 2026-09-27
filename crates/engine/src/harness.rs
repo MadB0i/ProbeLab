@@ -378,6 +378,40 @@ impl Harness {
     }
 }
 
+/// A scratch directory that cannot collide with another run's, ever.
+///
+/// The obvious implementation is `<label>-<pid>-<counter>`, and it is wrong. Windows recycles process
+/// identifiers, and these directories are never cleaned up, so a later test binary that happens to be
+/// assigned a pid an earlier one used inherits its telemetry database — which already holds events
+/// numbered from one. The fresh run then inserts sequence 1 again and the recorder refuses it with
+/// "telemetry sequence must be gap-free".
+///
+/// That failure is load-dependent rather than obvious, because pid reuse depends on how busy the
+/// machine is. It showed up roughly one full-suite run in five, always in whichever test happened to
+/// draw the recycled pid, and never when the suite ran alone. Keying on the process start time as well
+/// as the pid makes the name unique per *process launch* rather than per identifier, and the counter
+/// keeps it unique within a launch. Nothing needs cleaning up afterwards.
+///
+/// Deliberately not a random name: a reproducible-looking path is easier to correlate with a failing
+/// run, and the timestamp is already unique enough for that to be useful.
+pub fn unique_scratch_root(label: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or_default();
+    let root = std::env::temp_dir().join(format!(
+        "probelab-{label}-{}-{started}-{sequence}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create a unique scratch directory");
+    root
+}
+
 fn aggregate(label: &str, outcomes: &[EpisodeOutcome], confidence: f64) -> AggregateScore {
     let episodes = outcomes.len();
     let successes = outcomes

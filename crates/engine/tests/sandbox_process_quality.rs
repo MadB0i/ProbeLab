@@ -46,7 +46,6 @@ fn pools() -> SeedPools {
     .expect("declared pools are disjoint")
 }
 
-static HARNESS_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static SCRATCH_DIRECTORIES: std::sync::OnceLock<std::sync::Mutex<Vec<PathBuf>>> =
     std::sync::OnceLock::new();
 
@@ -55,12 +54,10 @@ fn scratch_directories() -> &'static std::sync::Mutex<Vec<PathBuf>> {
 }
 
 fn harness() -> Harness {
-    let serial = HARNESS_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!(
-        "probelab-sandbox-process-{}-{serial}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&root).expect("scratch directory");
+    // Unique per process launch, not per pid: see `unique_scratch_root`. These directories hold a
+    // real contained child's telemetry and are never cleaned up, so a recycled pid would make a
+    // later run inherit a database whose sequence already starts past one.
+    let root = probelab_engine::harness::unique_scratch_root("sandbox-process");
     let scratch: PathBuf = root.clone();
     let factory: probelab_engine::harness::RecorderFactory =
         Arc::new(move |run_id: &str| -> Arc<dyn TelemetryRecorder> {

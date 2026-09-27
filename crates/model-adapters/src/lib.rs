@@ -2383,6 +2383,8 @@ mod tests {
                 Action::Wait,
             ],
             process_spawn_available: false,
+            // Grid path: this fixture builds a grid-world request.
+            game: None,
             history: Vec::new(),
         }
     }

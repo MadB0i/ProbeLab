@@ -33,12 +33,7 @@ fn benchmark() -> GridWorldBenchmark {
 }
 
 fn harness() -> Harness {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SERIAL: AtomicU64 = AtomicU64::new(0);
-    let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
-    let root =
-        std::env::temp_dir().join(format!("probelab-phase0-{}-{serial}", std::process::id()));
-    std::fs::create_dir_all(&root).expect("scratch directory");
+    let root = probelab_engine::harness::unique_scratch_root("phase0");
     let scratch = root.clone();
     let factory: probelab_engine::harness::RecorderFactory = Arc::new(
         move |run_id: &str| -> Arc<dyn probelab_core::TelemetryRecorder> {
@@ -161,6 +156,8 @@ fn synthetic_stream() -> Vec<ModelRequest> {
             // here rather than defaulted so a change to the benchmark would surface as a mismatch
             // in these phase-0 controls instead of passing silently.
             process_spawn_available: false,
+            // Grid path: the grid world declares no game.
+            game: None,
             history: Vec::new(),
         });
     }
@@ -213,7 +210,10 @@ fn p0_the_history_window_is_delivered_to_the_model() {
     }
     let recorder: Arc<dyn probelab_core::TelemetryRecorder> = Arc::new(
         SqliteTelemetryRecorder::with_callback(
-            std::env::temp_dir().join(format!("phase0-history-{}.sqlite3", std::process::id())),
+            // Unique per process *launch*, not per pid: see `unique_scratch_root` for why a
+            // pid-keyed path fails intermittently once Windows recycles an identifier.
+            probelab_engine::harness::unique_scratch_root("phase0-history")
+                .join("telemetry.sqlite3"),
             |_| {},
         )
         .expect("recorder"),
@@ -531,6 +531,8 @@ fn replay<P: ModelProvider>(policy: P, seed: u64, budget: u32) -> Vec<Action> {
             // The grid world declares no spawn plan; this replay drives a provider directly and
             // never goes through the engine loop that would read it from the benchmark.
             process_spawn_available: false,
+            // Grid path: this replay drives a provider directly on the grid world.
+            game: None,
             observation: observation.clone(),
             history: window_of(&completed),
         };

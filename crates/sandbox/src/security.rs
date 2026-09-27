@@ -55,6 +55,15 @@ impl probelab_core::PolicyGate for DenyAllPolicyGate {
                 request: RequestedCapability::ToolUse("process_spawn_request".to_owned()),
                 integrity_event: IntegrityEventKind::PolicyViolation,
             },
+            // A game move never belongs at a deny-all policy gate: the gate authorises grid actions
+            // and nothing else, and a game decision reaching here means the engine handed a
+            // non-grid decision to a boundary that has no vocabulary for it. Refusing is the only
+            // safe reading, and it also fails closed for the right reason -- `DenyAll` holds no
+            // configuration under which any game move could be allowed.
+            ModelDecision::GameMove(_) => PolicyDecision::Deny {
+                request: RequestedCapability::ToolUse("game_move".to_owned()),
+                integrity_event: IntegrityEventKind::PolicyViolation,
+            },
         }
     }
 }

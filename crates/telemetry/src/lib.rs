@@ -9,10 +9,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use probelab_core::{
     Action, ActionOutcome, ActionResultKind, CapabilityDenial, CapabilityPermission, CompletedRun,
-    ContainmentStatus, IntegrityEventKind, IntegrityLevel, ModelCallFailure, ModelCallFailureKind,
-    ModelCallInfo, ModelRequest, Observation, ProcessAuthorization, ProcessExecution,
-    ProcessLifecycle, RequestedCapability, ResourceInfo, RunMetadata, StreamCapture,
-    TelemetryEvent, TelemetryRecorder, TerminationReason, TestResult, STREAM_PREVIEW_LIMIT,
+    ContainmentStatus, GameTelemetry, IntegrityEventKind, IntegrityLevel, ModelCallFailure,
+    ModelCallFailureKind, ModelCallInfo, ModelRequest, Observation, ProcessAuthorization,
+    ProcessExecution, ProcessLifecycle, RequestedCapability, ResourceInfo, RunMetadata,
+    StreamCapture, TelemetryEvent, TelemetryRecorder, TerminationReason, TestResult,
+    STREAM_PREVIEW_LIMIT,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,8 @@ pub struct NewTelemetryEvent {
     pub observation: Observation,
     /// Selected grid action, absent for a denied capability request.
     pub selected_action: Option<Action>,
+    /// The game board and move played, absent for every grid benchmark.
+    pub game: Option<GameTelemetry>,
     /// Non-executable capability request, absent for normal actions.
     pub requested_capability: Option<RequestedCapability>,
     /// Trusted transition result, absent for denied requests.
@@ -112,6 +115,10 @@ impl NewTelemetryEvent {
             // Telemetry records one turn's observation, not a rolling window, so there is no history
             // to revalidate here. The bound is enforced where history is built, in the engine.
             history: Vec::new(),
+            // A game turn is validated by its own request, which is not what this path re-checks, so
+            // the reconstructed request is explicitly grid-shaped. `game: None` is what routes it to
+            // the grid rules rather than the game rules.
+            game: None,
         }
         .validate()
         .map_err(TelemetryError::InvalidEvent)?;
@@ -260,6 +267,7 @@ impl NewTelemetryEvent {
             turn: self.turn,
             observation: self.observation,
             selected_action: self.selected_action,
+            game: self.game,
             requested_capability: self.requested_capability,
             action_outcome: self.action_outcome,
             reward: self.reward,
@@ -1034,6 +1042,7 @@ mod tests {
             turn: 1,
             observation: observation(1),
             selected_action: None,
+            game: None,
             requested_capability: None,
             action_outcome: None,
             reward: 0,
@@ -1053,6 +1062,7 @@ mod tests {
             turn,
             observation: observation(turn),
             selected_action: Some(Action::Wait),
+            game: None,
             requested_capability: None,
             action_outcome: Some(ActionOutcome {
                 action: Some(Action::Wait),
@@ -1089,6 +1099,7 @@ mod tests {
             turn,
             observation: observation(turn),
             selected_action: None,
+            game: None,
             requested_capability: None,
             action_outcome: None,
             reward: 0,
@@ -1205,6 +1216,66 @@ mod tests {
             [],
         );
         assert!(replacement.is_err());
+    }
+
+    /// A grid event's serialized bytes must not mention the game channel at all.
+    ///
+    /// This is the guard that lets the arena be added without invalidating published results. The
+    /// `game` field is `Option`, and an `Option` that always serialised would write `null` into every
+    /// grid event — changing the bytes that feed the replay digest and therefore every recorded run,
+    /// including the grid-world numbers this project has already published. `skip_serializing_if`
+    /// omits the key entirely, so grid events are byte-identical to before games existed.
+    ///
+    /// Asserting on the absence of the key is what makes that guarantee checkable. Relying on a test
+    /// suite staying green is not enough here, because a digest change would be *silent*: every test
+    /// would still pass, and only a number already in a document would have moved.
+    #[test]
+    fn a_grid_event_serializes_without_the_game_channel() {
+        let event = new_event(1).clone().into_event("run", "episode", 1, 0);
+        let json = serde_json::to_string(&event).expect("serialize a grid event");
+        assert!(
+            !json.contains("\"game\""),
+            "a grid event leaked the game channel into its bytes: {json}"
+        );
+        // And the field round-trips as absent rather than as a null the digest could pick up.
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("reparse");
+        assert!(
+            parsed.get("game").is_none(),
+            "the game key should be absent, not null: {json}"
+        );
+    }
+
+    /// A game event does carry the channel, and it changes the digest.
+    ///
+    /// The other half of the guard. If a game payload were dropped rather than serialised, the
+    /// absence check above would still pass and a match would replay to a different board.
+    #[test]
+    fn a_game_event_serializes_the_board_and_changes_the_digest() {
+        use probelab_core::{GameBoard, GameKind, GameMove, GameSide, GameTelemetry, Position};
+
+        let grid = new_event(1).clone().into_event("run", "episode", 1, 0);
+        let mut game = new_event(1).clone();
+        game.game = Some(GameTelemetry {
+            kind: GameKind::Battleship,
+            side: GameSide::First,
+            board: GameBoard::TicTacToe {
+                cells: vec![probelab_core::TicTacToeCell::First],
+            },
+            played: Some(GameMove::Battleship(Position::new(1, 2))),
+            ply: 1,
+        });
+        let game = game.into_event("run", "episode", 1, 0);
+
+        let grid_json = serde_json::to_string(&grid).expect("serialize grid");
+        let game_json = serde_json::to_string(&game).expect("serialize game");
+        assert!(
+            game_json.contains("\"game\""),
+            "a game event must carry its board, or a live match view has nothing to draw"
+        );
+        assert_ne!(
+            grid_json, game_json,
+            "a game payload that does not change the bytes would be dropped by the digest"
+        );
     }
 
     #[test]

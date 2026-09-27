@@ -73,6 +73,8 @@ fn request_stream() -> Vec<ModelRequest> {
             observation: observation.clone(),
             available_actions: sandbox.available_actions(),
             process_spawn_available: true,
+            // Grid path: the reference proof is about the grid strategies.
+            game: None,
             // The same bounded window the engine builds, oldest first. Unbounded history would make
             // this stream something no real run ever produces.
             history: window(&history),

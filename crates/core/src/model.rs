@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::{
-    Action, ActionResultKind, CapabilityRequest, Coordinate, GridSize, Observation, TileKind,
-    VisibleTile,
+    Action, ActionResultKind, CapabilityRequest, Coordinate, GameKind, GameRequest, GridSize,
+    Observation, TileKind, VisibleTile,
 };
 
 /// Stable, serializable description of a model adapter configuration.
@@ -149,6 +149,21 @@ pub enum RequestedCapability {
 /// quietly billed for an ever-growing transcript.
 pub const HISTORY_WINDOW: usize = 8;
 
+/// The grid size a request carries when it describes no grid at all.
+///
+/// A game has no position, no terrain, and no distance to a goal, but [`Observation`] is a struct with
+/// no "absent" case. Rather than widen it into an enum — which would touch every field read in the
+/// evaluator, the telemetry digest, and the desktop UI — a game request carries this one degenerate
+/// value, and `validate` requires exactly it. That turns "a game request has some meaningless grid
+/// numbers in it" from a silent hazard into a validation error.
+pub const NO_GRID: GridSize = GridSize {
+    width: 1,
+    height: 1,
+};
+
+/// The position a request carries when it describes no grid.
+pub const NO_GRID_POSITION: Coordinate = Coordinate { x: 0, y: 0 };
+
 /// One already-completed turn, replayed to the model as bounded context.
 ///
 /// History carries only what the model legitimately observed when it took the decision. It is a
@@ -194,13 +209,33 @@ pub struct ModelRequest {
     pub process_spawn_available: bool,
     /// Up to [`HISTORY_WINDOW`] completed prior turns, oldest first.
     ///
-    /// Empty on the first turn of an episode.
+    /// Empty on the first turn of an episode. Also empty for a game request, which carries its own
+    /// bounded move history on [`GameRequest::history`] because a game move is not a grid `Action`.
     pub history: Vec<HistoryEntry>,
+    /// The game half of this request, when the benchmark is a game.
+    ///
+    /// `None` for every grid benchmark, which is what leaves the grid-world path and its published
+    /// numbers untouched. When this is `Some`, the grid fields on this request are required to be
+    /// empty, so it is never ambiguous which world a model is looking at.
+    pub game: Option<GameRequest>,
 }
 
 impl ModelRequest {
     /// Validates that a request contains internally consistent, bounded model-facing data.
     pub fn validate(&self) -> Result<(), String> {
+        // Which world this request belongs to is decided first, because the rest of the rules differ.
+        // A request is one or the other, never a mixture, and saying so here is what stops a
+        // half-populated game request from reaching a model as if it were a grid.
+        match &self.game {
+            // A game request is fully checked by its own rules; the grid half must be empty, which
+            // `validate_game_request` requires rather than assumes.
+            Some(game) => self.validate_game_request(game),
+            None => self.validate_grid_request(),
+        }
+    }
+
+    /// Validates the grid half, which is unchanged from before games existed.
+    fn validate_grid_request(&self) -> Result<(), String> {
         if self.turn == 0 || self.turn != self.observation.turn {
             return Err(
                 "model request and observation turns must match and be one-based".to_owned(),
@@ -239,6 +274,99 @@ impl ModelRequest {
         }
         self.validate_history()?;
         Ok(())
+    }
+
+    /// Validates a request that carries a game.
+    ///
+    /// The grid half must be empty, and the observation must be the canonical "no grid" one. That is
+    /// stricter than it looks and deliberate: `Observation` is a struct with no variant for "there is
+    /// no board here", so a game benchmark has to put *something* in it. Requiring the one degenerate
+    /// value means a grid field can never carry a plausible-looking but meaningless position into a
+    /// game prompt, where a model would have no way to know it was noise.
+    fn validate_game_request(&self, game: &GameRequest) -> Result<(), String> {
+        if !self.available_actions.is_empty() {
+            return Err(
+                "a game request must not carry a grid action vocabulary; the two shapes are exclusive"
+                    .to_owned(),
+            );
+        }
+        if !self.history.is_empty() {
+            return Err(
+                "a game request must not carry grid history; game moves live on the game request"
+                    .to_owned(),
+            );
+        }
+        if self.observation.grid_size != NO_GRID {
+            return Err(format!(
+                "a game request must carry the no-grid observation, got {}x{}",
+                self.observation.grid_size.width, self.observation.grid_size.height
+            ));
+        }
+        if self.observation.position != NO_GRID_POSITION {
+            return Err("a game request must carry the no-grid position".to_owned());
+        }
+        if !self.observation.visible_neighbors.is_empty() {
+            return Err("a game request must not carry grid neighbours".to_owned());
+        }
+        if self.observation.current_tile != TileKind::Safe {
+            return Err("a game request must not carry grid terrain".to_owned());
+        }
+        if self.observation.distance_to_goal != 0 {
+            return Err("a game request must not carry a distance to a goal".to_owned());
+        }
+        if self.turn != game.ply {
+            return Err(format!(
+                "model request turn {} does not match the game ply {}",
+                self.turn, game.ply
+            ));
+        }
+        if self.observation.turn != game.ply {
+            return Err("observation turn does not match the game ply".to_owned());
+        }
+        game.validate(self.game_kind()?)?;
+        Ok(())
+    }
+
+    /// The game kind this request is for, for validating a decision against it.
+    fn game_kind(&self) -> Result<GameKind, String> {
+        self.game
+            .as_ref()
+            .map(|game| game.kind)
+            .ok_or_else(|| "this request carries no game".to_owned())
+    }
+
+    /// Validates that a decision is legal for the request it answers.
+    ///
+    /// The counterpart to [`ModelRequest::validate`], and the reason a `GameMove` is safe to put in a
+    /// prompt. A grid action is checked against the request's vocabulary by the engine; a game move
+    /// has to be checked against the game's own legal set here, because `Action` cannot express it.
+    pub fn validate_decision(&self, decision: &ModelDecision) -> Result<(), String> {
+        match (decision, &self.game) {
+            (ModelDecision::GameMove(_), None) => {
+                Err("a game move was returned for a request that offered no game".to_owned())
+            }
+            (ModelDecision::GameMove(m), Some(game)) => {
+                if m.kind() != game.kind {
+                    return Err(format!(
+                        "a {:?} move was returned for a {:?} game",
+                        m.kind(),
+                        game.kind
+                    ));
+                }
+                if !game.legal_moves.contains(m) {
+                    return Err(format!("{m:?} is not among the legal moves for this turn"));
+                }
+                Ok(())
+            }
+            // A capability request carries no game payload and is judged by the broker, not here.
+            (ModelDecision::Capability(_) | ModelDecision::CapabilityProbe(_), _) => Ok(()),
+            (ModelDecision::ProcessSpawnRequest, Some(_)) => {
+                Err("a contained-process request is meaningless in a game episode".to_owned())
+            }
+            (ModelDecision::ProcessSpawnRequest, None) => Ok(()),
+            // A grid action is validated against the grid vocabulary by the engine's existing check.
+            (ModelDecision::GridAction(_), _) => Ok(()),
+        }
     }
 
     /// Validates the bounded history window.
@@ -315,6 +443,12 @@ pub enum ModelDecision {
     /// smuggled through the action vocabulary, and so a refusal is reported as a broker denial
     /// instead of being miscounted as an invalid environment action.
     ProcessSpawnRequest,
+    /// Play one move in the game this request offered.
+    ///
+    /// Valid only when [`ModelRequest::game`] is `Some`, and the move must be among that request's
+    /// legal moves. Both are enforced by [`ModelRequest::validate_decision`], not by convention, so a
+    /// provider cannot return an illegal board play and have it applied.
+    GameMove(crate::GameMove),
 }
 
 /// A model decision with optional safe provider-call metadata.

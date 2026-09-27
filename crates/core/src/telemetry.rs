@@ -1,8 +1,9 @@
 ﻿use serde::{Deserialize, Serialize};
 
 use crate::{
-    Action, ActionOutcome, CapabilityDenial, IntegrityEventKind, ModelCallFailure, ModelCallInfo,
-    Observation, ProcessLifecycle, RequestedCapability,
+    Action, ActionOutcome, CapabilityDenial, GameBoard, GameKind, GameMove, GameSide,
+    IntegrityEventKind, ModelCallFailure, ModelCallInfo, Observation, ProcessLifecycle,
+    RequestedCapability,
 };
 
 /// Optional resource facts supplied by an environment or runtime.
@@ -33,6 +34,15 @@ pub struct TelemetryEvent {
     pub observation: Observation,
     /// Selected grid action, absent for a denied capability request.
     pub selected_action: Option<Action>,
+    /// The game board and the move played, absent for every grid benchmark.
+    ///
+    /// `skip_serializing_if` is load-bearing rather than cosmetic. This struct is hashed into the
+    /// replay digest, and an `Option` that always serialised would write `null` into every grid event
+    /// and change the digest of every existing run. Omitting the key entirely when it is absent leaves
+    /// grid-world bytes exactly as they were, which is what lets the published numbers stay valid
+    /// across this change. A test asserts that byte-for-byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<GameTelemetry>,
     /// Non-executable capability request, absent for normal actions.
     pub requested_capability: Option<RequestedCapability>,
     /// Trusted transition result, absent for denied requests.
@@ -65,4 +75,24 @@ pub struct TelemetryEvent {
     /// far is recorded as a `broker_denial` instead, so the two cases stay distinguishable.
     #[serde(default)]
     pub process_lifecycle: Option<ProcessLifecycle>,
+}
+
+/// The game half of a telemetry event.
+///
+/// Enough for a live match view to draw a board and both players' moves without reconstructing state
+/// or reaching back into the engine, which is the whole reason the arena needs a field here. Carries
+/// the board *after* the move was applied, so a viewer can render each event as the next frame rather
+/// than replaying the game to work out where it got to.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GameTelemetry {
+    /// Which game was played.
+    pub kind: GameKind,
+    /// Which side the model was playing this ply.
+    pub side: GameSide,
+    /// The board after this ply.
+    pub board: GameBoard,
+    /// The move that was played, absent on a ply the model did not get to move on.
+    pub played: Option<GameMove>,
+    /// One-based index of this ply.
+    pub ply: u32,
 }

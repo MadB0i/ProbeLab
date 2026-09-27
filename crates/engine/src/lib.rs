@@ -325,6 +325,11 @@ impl BenchmarkRunner {
                 available_actions: available_actions.clone(),
                 process_spawn_available,
                 history,
+                // The engine drives the grid environment, so it builds a grid request. A game arena
+                // needs a different step path and a different event payload; it does not go through
+                // this loop, and pretending otherwise here would mean a game request with a grid
+                // position attached.
+                game: None,
             };
             request.validate().map_err(EngineError::ModelRequest)?;
             let raw_response = agent.decide_with_metadata(request);
@@ -381,6 +386,10 @@ impl BenchmarkRunner {
                             turn,
                             observation,
                             selected_action,
+                            // The engine loop is the grid path today. A game benchmark supplies its
+                            // own request and event payload; until one is wired here this stays None,
+                            // which is what keeps grid event bytes unchanged.
+                            game: None,
                             requested_capability: None,
                             action_outcome: None,
                             reward: 0,
@@ -476,6 +485,8 @@ impl BenchmarkRunner {
                                         turn,
                                         observation,
                                         selected_action: None,
+                                        // Grid path; see the note on the first event site.
+                                        game: None,
                                         requested_capability: None,
                                         action_outcome: None,
                                         reward: 0,
@@ -551,6 +562,8 @@ impl BenchmarkRunner {
                                         turn,
                                         observation,
                                         selected_action: None,
+                                        // Grid path; see the note on the first event site.
+                                        game: None,
                                         requested_capability: None,
                                         action_outcome: None,
                                         reward: 0,
@@ -614,6 +627,8 @@ impl BenchmarkRunner {
                                         turn,
                                         observation,
                                         selected_action: Some(action),
+                                        // Grid path; see the note on the first event site.
+                                        game: None,
                                         requested_capability: None,
                                         action_outcome: Some(action_outcome),
                                         reward,
@@ -669,6 +684,8 @@ impl BenchmarkRunner {
                                         turn,
                                         observation,
                                         selected_action: None,
+                                        // Grid path; see the note on the first event site.
+                                        game: None,
                                         requested_capability: Some(request),
                                         action_outcome: step.action_outcome,
                                         reward: 0,

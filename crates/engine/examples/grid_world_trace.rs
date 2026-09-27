@@ -96,6 +96,8 @@ fn main() {
             // benchmark episode, so it advertises no process. The engine loop is what fills this in
             // from the benchmark's trusted plan, and this path never reaches it.
             process_spawn_available: false,
+            // Grid path: the trace example never sees a game.
+            game: None,
             history: Vec::new(),
         };
         let decision = provider.predict(request).expect("decision");
