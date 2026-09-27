@@ -227,10 +227,15 @@ pub async fn run_experiment(
     // place `completed` is written -- and it is written from the runner's own terminal reason rather
     // than from the absence of an error.
     if let Some(experiment) = result.experiment.as_ref() {
+        // `to_wire_json`, not `format!("{reason:?}").to_lowercase()`. The `Debug` rendering stored
+        // `containmentfailure { kind: verificationfailed }` in a TEXT column -- a Rust expression
+        // embedded in stored data, which no serde configuration could parse back, and which disagreed
+        // with the serde spelling `wire_format.rs` pins. This derives from the same derive the wire
+        // format uses, so a rename moves both.
         let reason_label = experiment
             .terminal_reason
             .as_ref()
-            .map(|reason| format!("{reason:?}").to_lowercase());
+            .map(probelab_lab::TerminalReason::to_wire_json);
         let terminal = match experiment.terminal_reason {
             Some(probelab_lab::TerminalReason::Completed) => {
                 probelab_telemetry::ExperimentLifecycle::Completed

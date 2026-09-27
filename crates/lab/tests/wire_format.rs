@@ -313,7 +313,7 @@ fn the_aggregate_keeps_its_field_names_and_exact_floats() {
             },
             "meanReward": precision::MEAN_REWARD,
             "meanTurns": 4.5,
-            "statusCounts": {"completed": 1, "max_turns": 1},
+            "statusCounts": {"success": 1, "turn_limit": 1},
             "seedPool": "grid-world/eval"
         }),
         "ExperimentAggregate",
@@ -630,5 +630,110 @@ fn timestamps_survive_the_wire() {
         let encoded = serde_json::to_value(when).expect("serialize");
         let back: SystemTime = serde_json::from_value(encoded).expect("parse");
         assert_eq!(back, when);
+    }
+}
+
+/// Every enum string that crosses into stored data or the IPC boundary is derived, not retyped.
+///
+/// The `wire_name` methods exist because the same enum was rendered four different ways by four
+/// different call sites -- `Debug` gives `TurnLimit`, serde gives `turn_limit`, one site lowercased
+/// `Debug` and produced `turnlimit`, and a stored `terminal_reason` column held a Debug rendering no
+/// parser could read. The bug class is not "a wrong string"; it is "a string that is retyped in each
+/// consumer", which means no consumer can be proven to agree with the wire format.
+///
+/// This test is the proof. It asserts each `wire_name` equals what serde actually emits, so the two
+/// cannot diverge, and a rename that moves one fails here rather than at a stored row.
+#[test]
+fn every_wire_name_matches_what_serde_actually_writes() {
+    use probelab_core::CompletionStatus;
+    use probelab_lab::ObservedCategory;
+
+    /// The string serde writes for a unit variant.
+    fn serialized<T: serde::Serialize>(value: T) -> String {
+        serde_json::to_value(value)
+            .expect("serialize")
+            .as_str()
+            .expect("a unit variant serializes as a string")
+            .to_owned()
+    }
+
+    for status in [
+        CompletionStatus::Success,
+        CompletionStatus::Failure,
+        CompletionStatus::TurnLimit,
+        CompletionStatus::ModelProtocolFailure,
+    ] {
+        assert_eq!(
+            status.wire_name(),
+            serialized(status),
+            "{status:?}: wire_name disagrees with the serialized form"
+        );
+    }
+
+    for category in [
+        ObservedCategory::ProtocolFailure,
+        ObservedCategory::BrokerDenial,
+        ObservedCategory::PolicyDenial,
+        ObservedCategory::IntegrityEvent,
+        ObservedCategory::ContainmentEvent,
+        ObservedCategory::ProviderFailure,
+        ObservedCategory::BudgetExhausted,
+        ObservedCategory::Ordinary,
+    ] {
+        assert_eq!(
+            category.wire_name(),
+            serialized(category),
+            "{category:?}: wire_name disagrees with the serialized form"
+        );
+    }
+}
+
+/// The stored `terminal_reason` string is derived from the serde representation, not from `Debug`.
+///
+/// `TerminalReason` has payload variants, so serde writes an object. `to_wire_json` flattens it back to
+/// the `"<tag> <fields>"` shape the stored column holds, which means the *tag* and the *field values* are
+/// both serde's. A `Debug` rendering stored `"containmentfailure { kind: verificationfailed }"`, which is
+/// a Rust expression embedded in a database column.
+#[test]
+fn the_stored_terminal_reason_is_the_serde_representation() {
+    use probelab_core::ContainmentFailureKind;
+    use probelab_lab::TerminalReason;
+
+    for reason in [
+        TerminalReason::Completed,
+        TerminalReason::Cancelled,
+        TerminalReason::Timeout { budget_seconds: 30 },
+        TerminalReason::ProtocolFailure { consecutive: 3 },
+        TerminalReason::ContainmentFailure {
+            kind: ContainmentFailureKind::VerificationFailed,
+        },
+    ] {
+        let stored = reason.to_wire_json();
+        assert!(!stored.is_empty(), "{reason:?} rendered as an empty string");
+        // The payload is serde's own JSON, so braces are expected. What must not appear is Rust syntax:
+        // `Debug` renders `Timeout { budget_seconds: 30 }` with a space after the colon and no quotes
+        // around a number, and that is exactly what used to be written into the column.
+        assert!(
+            !stored.contains(": "),
+            "{reason:?} stored Rust field syntax: {stored}"
+        );
+        assert!(
+            !stored.contains("kind:"),
+            "{reason:?} stored the tag wrapper: {stored}"
+        );
+        // The tag is the serde tag, read out of the serialized object rather than assumed. The enum uses
+        // `serde(tag = "kind", content = "detail")`, so the tag is under `kind` and the payload beside it.
+        let value = serde_json::to_value(&reason).expect("serialize");
+        let object = value
+            .as_object()
+            .expect("serde(tag, content) writes an object");
+        let expected_tag = object
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .expect("serde(tag, content) puts the tag under `kind`");
+        assert!(
+            stored.starts_with(expected_tag),
+            "{reason:?} stored as {stored:?}, which does not begin with the serde tag {expected_tag:?}"
+        );
     }
 }

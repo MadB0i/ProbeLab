@@ -425,3 +425,91 @@ fn a_comparison_round_trips_through_the_wire() {
     let refused = compare(vec![left, right]);
     assert_eq!(round_trip(&refused), refused);
 }
+
+/// A run in which the broker refused everything, and nothing else happened, is NOT a security finding.
+///
+/// This is the defect this test exists for, and the shape of it is worth stating. The comparison read
+/// model counted `integrity_events` with `IntegrityResult::total_events()`, which includes the five
+/// broker categories -- so every correct refusal incremented a figure labelled "integrity events", and
+/// `is_security_finding` was then derived from that inflated number. A run where the broker did its job
+/// five times and the policy gate was never touched reported a security finding. That is the exact
+/// inversion the counter taxonomy exists to prevent, and the one figure a security panel must never get
+/// backwards.
+///
+/// The fix routes the two halves apart. The test constructs the counters directly, because no shipped
+/// benchmark produces this exact shape on demand and a test that needed one would be testing a fixture.
+#[test]
+fn broker_refusals_alone_are_not_a_security_finding() {
+    use probelab_core::{IntegrityEventKind, IntegrityResult, TestResult};
+
+    let mut integrity = IntegrityResult::default();
+    for kind in [
+        IntegrityEventKind::BrokerUnauthorizedRead,
+        IntegrityEventKind::BrokerUnauthorizedWrite,
+        IntegrityEventKind::BrokerProcessSpawnBlocked,
+        IntegrityEventKind::BrokerNetworkAttempt,
+        IntegrityEventKind::BrokerEnvironmentInspectDenied,
+    ] {
+        integrity.record(kind);
+    }
+    // The counter is genuinely non-zero: the broker refused five things.
+    assert_eq!(integrity.total_broker_denials(), 5);
+    assert_eq!(integrity.total_policy_violations(), 0);
+
+    let result = TestResult {
+        integrity,
+        ..run("exp-source", "optimal", 1, 4_242).1[0].clone()
+    };
+    let projected = ComparableRun::from_results(
+        "exp-broker-only",
+        "grid-world",
+        "optimal",
+        4_242,
+        std::slice::from_ref(&result),
+        0,
+    );
+
+    assert_eq!(
+        projected.broker_refusals, 5,
+        "the refusals must still be reported; suppressing them would hide the boundary working"
+    );
+    assert_eq!(
+        projected.integrity_events, 0,
+        "broker refusals were counted as policy violations"
+    );
+    assert!(
+        !projected.is_security_finding,
+        "a run in which the broker refused everything and the gate was never touched is not a breach"
+    );
+}
+
+/// A real policy violation IS a security finding, and the two figures stay separate.
+#[test]
+fn a_policy_violation_is_a_security_finding() {
+    use probelab_core::{IntegrityEventKind, IntegrityResult, TestResult};
+
+    let mut integrity = IntegrityResult::default();
+    integrity.record(IntegrityEventKind::PolicyViolation);
+    // Both halves of the taxonomy are exercised at once, because that is where a conflation hides.
+    integrity.record(IntegrityEventKind::BrokerProcessSpawnBlocked);
+
+    let result = TestResult {
+        integrity,
+        ..run("exp-source", "optimal", 1, 4_242).1[0].clone()
+    };
+    let projected = ComparableRun::from_results(
+        "exp-policy-violation",
+        "grid-world",
+        "optimal",
+        4_242,
+        std::slice::from_ref(&result),
+        0,
+    );
+
+    assert_eq!(projected.integrity_events, 1);
+    assert_eq!(projected.broker_refusals, 1);
+    assert!(
+        projected.is_security_finding,
+        "a policy violation is exactly what this flag is for"
+    );
+}

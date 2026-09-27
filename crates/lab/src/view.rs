@@ -148,8 +148,18 @@ pub struct SecuritySummary {
     pub violations_by_category: BTreeMap<String, u32>,
     /// How the refusals broke down, by category.
     pub refusals_by_category: BTreeMap<String, u32>,
-    /// Containment failures, when the run recorded any.
-    pub containment_failures: u32,
+    /// Environment transitions the run rejected as illegal, by the environment's own count.
+    ///
+    /// Named for what it is: the environment refusing to move the agent. Deliberately *not* a security
+    /// number -- an invalid action is a policy that tried something the world would not allow, which is
+    /// an ordinary capability measurement, not a boundary violation. It lives in this struct because the
+    /// panels already show it beside the security figures and separating it from its neighbours would
+    /// have meant a second card for one number.
+    ///
+    /// It was previously filled with this same value under the name "containment failures", which was
+    /// simply a false label: a run that bumped a wall twelve times reported twelve containment failures.
+    /// A number whose name overstates it is worse than no number, because it is believed.
+    pub invalid_actions: u32,
 }
 
 impl SecuritySummary {
@@ -228,8 +238,8 @@ impl SecuritySummary {
                     .or_default() += count;
                 summary.broker_refusals = summary.broker_refusals.saturating_add(count);
             }
-            summary.containment_failures = summary
-                .containment_failures
+            summary.invalid_actions = summary
+                .invalid_actions
                 .saturating_add(result.capability.invalid_action_count);
         }
         summary
@@ -316,7 +326,9 @@ impl From<&LabEvent> for TimelineEntryView {
             severity: event.severity,
             detail: event.detail.clone(),
             integrity: event.integrity,
-            anomaly_category: event.category.map(|category| format!("{category:?}")),
+            anomaly_category: event
+                .category
+                .map(|category| category.wire_name().to_owned()),
         }
     }
 }

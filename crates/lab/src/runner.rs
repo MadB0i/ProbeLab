@@ -147,10 +147,14 @@ impl ExperimentAggregate {
         let mut total_reward = 0i64;
         let mut total_turns = 0i64;
         for result in results {
-            let status = format!("{:?}", result.capability.completion_status);
+            // `wire_name`, not `{:?}`. `Debug` gives `TurnLimit` and serde gives `turn_limit`, and this
+            // map crosses IPC -- so the previous `format!("{:?}")` put a third spelling into a payload the
+            // frontend parses. `scripts/check-feature-matrix.py` and the wire-format tests now pin the
+            // serde spelling, and this derives from it rather than retyping it.
+            let status = result.capability.completion_status.wire_name().to_owned();
             *status_counts.entry(status).or_default() += 1;
-            total_reward += result.capability.total_reward;
-            total_turns += i64::from(result.capability.turns_used);
+            total_reward = total_reward.saturating_add(result.capability.total_reward);
+            total_turns = total_turns.saturating_add(i64::from(result.capability.turns_used));
         }
         let divisor = episodes.max(1) as f64;
         Self {

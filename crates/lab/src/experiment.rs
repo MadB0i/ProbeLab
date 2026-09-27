@@ -134,6 +134,40 @@ pub enum TerminalReason {
 }
 
 impl TerminalReason {
+    /// The canonical wire spelling, identical to what `serde` writes.
+    ///
+    /// `serde` writes a struct variant as `{"protocol_failure":{"consecutive":3}}`, so this renders the
+    /// same JSON for the payload-carrying variants and a bare tag for the unit ones. It replaces
+    /// `format!("{reason:?}").to_lowercase()` in the desktop layer, which produced
+    /// `containmentfailure { kind: verificationfailed }` -- a `Debug` rendering stored in a
+    /// `terminal_reason TEXT` column, which no amount of serde configuration could parse back.
+    pub fn to_wire_json(&self) -> String {
+        // `#[serde(tag = "kind", content = "detail")]` is *adjacently* tagged, so every variant is an
+        // object `{"kind": "<tag>", "detail": <payload or null>}`. Both keys are named by the attribute
+        // rather than guessed, and a `null` detail means the variant carries no payload.
+        let value = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
+        let Some(object) = value.as_object() else {
+            return String::new();
+        };
+        let tag = object
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let detail = object
+            .get("detail")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        if tag.is_empty() || detail.is_null() {
+            tag
+        } else {
+            format!(
+                "{tag} {}",
+                serde_json::to_string(&detail).unwrap_or_default()
+            )
+        }
+    }
+
     /// A short label for the UI.
     pub fn label(&self) -> &'static str {
         match self {

@@ -161,10 +161,10 @@ function SecurityBlocks({ security }: { security: SecuritySummary }) {
         </p>
         <CategoryBreakdown title="By capability" entries={security.refusalsByCategory} />
       </section>
-      {security.containmentFailures > 0 ? (
+      {security.invalidActions > 0 ? (
         <section className="security-block security-block--violations">
           <h4>Invalid actions</h4>
-          <p className="security-count">{security.containmentFailures}</p>
+          <p className="security-count">{security.invalidActions}</p>
           <p className="security-gloss">
             Moves the environment rejected as illegal. A protocol measure, not a boundary finding.
           </p>

@@ -95,6 +95,26 @@ pub enum ObservedCategory {
     Ordinary,
 }
 
+impl ObservedCategory {
+    /// The canonical wire spelling, identical to what `serde` writes.
+    ///
+    /// `TimelineEntryView.anomaly_category` used `format!("{category:?}")`, putting `ProtocolFailure`
+    /// on the IPC wire while the sibling typed field `LabEvent.category` serialized as
+    /// `protocol_failure`. Two spellings of the same value in one payload, one of which nothing parses.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::ProtocolFailure => "protocol_failure",
+            Self::BrokerDenial => "broker_denial",
+            Self::PolicyDenial => "policy_denial",
+            Self::IntegrityEvent => "integrity_event",
+            Self::ContainmentEvent => "containment_event",
+            Self::ProviderFailure => "provider_failure",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::Ordinary => "ordinary",
+        }
+    }
+}
+
 /// A pattern worth surfacing, with the evidence that produced it.
 ///
 /// `category` is the *observed* classification and is never derived from the Brain's interpretation.

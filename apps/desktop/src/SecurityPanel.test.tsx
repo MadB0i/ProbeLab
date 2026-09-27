@@ -64,7 +64,7 @@ function report(overrides: Partial<SecurityLabReport> = {}): SecurityLabReport {
       brokerRefusals: 4,
       violationsByCategory: { sandbox_violation: 9 },
       refusalsByCategory: { broker_unauthorized_read: 4 },
-      containmentFailures: 0,
+      invalidActions: 0,
     },
     benchmarkId: "grid-world",
     ...overrides,
@@ -206,7 +206,7 @@ describe("SecurityPanel — results", () => {
           brokerRefusals: 0,
           violationsByCategory: {},
           refusalsByCategory: {},
-          containmentFailures: 0,
+          invalidActions: 0,
         },
       }),
     });

@@ -446,8 +446,11 @@ fn aggregate(label: &str, outcomes: &[EpisodeOutcome], confidence: f64) -> Aggre
 
     let mut status_counts: BTreeMap<String, usize> = BTreeMap::new();
     for outcome in outcomes {
+        // `wire_name`, not `format!("{:?}").to_lowercase()`. That produced `turnlimit` where the
+        // serialized form is `turn_limit`, so the engine's aggregate and the lab's aggregate -- which
+        // document themselves as sharing semantics -- used different keys for the same field.
         *status_counts
-            .entry(format!("{:?}", outcome.completion_status).to_lowercase())
+            .entry(outcome.completion_status.wire_name().to_owned())
             .or_insert(0) += 1;
     }
     let divisor = episodes.max(1) as f64;

@@ -62,7 +62,7 @@ function experiment(overrides: Partial<ExperimentView> = {}): ExperimentView {
       brokerRefusals: 0,
       violationsByCategory: {},
       refusalsByCategory: {},
-      containmentFailures: 0,
+      invalidActions: 0,
     },
     ...overrides,
   };
@@ -277,7 +277,7 @@ describe("BrainPanel — security taxonomy", () => {
             brokerRefusals: 7,
             violationsByCategory: { sandbox_violation: 2 },
             refusalsByCategory: { broker_unauthorized_write: 7 },
-            containmentFailures: 0,
+            invalidActions: 0,
           },
         }),
       }),

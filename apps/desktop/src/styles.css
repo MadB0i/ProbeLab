@@ -1600,9 +1600,13 @@ select:disabled {
   color: var(--faint);
 }
 
-.result-status:first-letter {
-  color: var(--green);
-}
+/*
+ * The `:first-letter` rule that used to live here coloured the "V" of VERIFIED green, so the word looked
+ * like a system badge. There is no verification behind it: the label reports that a result was stored,
+ * and nothing on this screen recomputes the digest or checks anything. A first-letter hack is also a
+ * fragile coupling to the label's text -- changing the word would silently change the colour, and a
+ * status colour that depends on a string is not a status.
+ */
 
 .result-hero {
   display: flex;

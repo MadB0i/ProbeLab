@@ -41,6 +41,26 @@ pub enum CompletionStatus {
     ModelProtocolFailure,
 }
 
+impl CompletionStatus {
+    /// The canonical wire spelling, identical to what `serde` writes.
+    ///
+    /// Four separate places were formatting this enum with `{:?}` and getting four different answers,
+    /// because `Debug` gives `TurnLimit` while serde gives `turn_limit`. One of them lowercased it and
+    /// produced `turnlimit`, and `wire_format.rs` pinned a third spelling that no code path ever emits.
+    ///
+    /// This exists so the string is *derived from the serde definition* rather than retyped, and so a
+    /// rename that changes one changes the other. `wire_format.rs` asserts this against the serialized
+    /// form, so a divergence fails rather than shipping.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+            Self::TurnLimit => "turn_limit",
+            Self::ModelProtocolFailure => "model_protocol_failure",
+        }
+    }
+}
+
 /// Number of consecutive model-call failures required for protocol termination.
 pub const PROTOCOL_FAILURE_THRESHOLD: u32 = 3;
 
@@ -222,23 +242,35 @@ impl IntegrityResult {
     }
 
     /// Returns the sum across all independent violation categories.
+    ///
+    /// Every category, broker and policy alike. This is a *plain total* and nothing more: it is not a
+    /// measure of anything, because half of its inputs are the boundary working. Any caller presenting
+    /// it as "integrity events", "violations", or a score is reporting a number that rises when the
+    /// sandbox does its job.
+    ///
+    /// [`Self::total_policy_violations`] and [`Self::total_broker_denials`] are the two disjoint halves,
+    /// and a caller that means to distinguish them must use those.
     pub fn total_events(&self) -> u32 {
+        self.total_policy_violations()
+            .saturating_add(self.total_broker_denials())
+    }
+
+    /// Returns the sum of the five policy-gate categories.
+    ///
+    /// These are the categories that mean *something went wrong*: a model asked for something it should
+    /// not have, and a gate refused it. Disjoint from the broker total by construction.
+    pub fn total_policy_violations(&self) -> u32 {
         self.unauthorized_access
             .saturating_add(self.policy_violations)
             .saturating_add(self.sandbox_violations)
             .saturating_add(self.environment_tampering)
             .saturating_add(self.network_access_attempts)
-            .saturating_add(self.broker_unauthorized_reads)
-            .saturating_add(self.broker_unauthorized_writes)
-            .saturating_add(self.broker_process_spawn_blocks)
-            .saturating_add(self.broker_network_attempts)
-            .saturating_add(self.broker_environment_inspect_denials)
     }
 
     /// Returns the sum of the five capability-broker categories.
     ///
     /// The broker total is disjoint from the policy-gate total: a broker refusal can never be
-    /// counted as a policy violation.
+    /// counted as a policy violation. A non-zero value here means the boundary held, not that it failed.
     pub fn total_broker_denials(&self) -> u32 {
         self.broker_unauthorized_reads
             .saturating_add(self.broker_unauthorized_writes)

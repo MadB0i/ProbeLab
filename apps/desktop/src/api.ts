@@ -194,7 +194,14 @@ export type SecuritySummary = {
   brokerRefusals: number;
   violationsByCategory: Record<string, number>;
   refusalsByCategory: Record<string, number>;
-  containmentFailures: number;
+  /**
+   * Environment transitions the run rejected as illegal.
+   *
+   * Not a security number, and the name is deliberate: this was `containmentFailures`, which overstated
+   * it. A policy that bumps a wall is making a capability mistake, not breaking containment, and a run
+   * that did it twelve times did not have twelve containment failures.
+   */
+  invalidActions: number;
 };
 
 /** A command-center error. Carries a stable code rather than only prose. */
@@ -595,7 +602,8 @@ export type SecurityLabReport = {
     brokerRefusals: number;
     violationsByCategory: Record<string, number>;
     refusalsByCategory: Record<string, number>;
-    containmentFailures: number;
+    /** Illegal environment transitions. Not containment failures -- see `SecuritySummary`. */
+    invalidActions: number;
   };
   benchmarkId: string;
 };

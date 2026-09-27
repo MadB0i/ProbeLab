@@ -761,8 +761,22 @@ const App = () => {
   const latestParsedAction = latestEvent?.action_outcome?.action ?? latestEvent?.selected_action ?? null;
   const latestEnvironmentResult = latestEvent?.action_outcome?.kind ?? null;
   const integrity = result?.integrity ?? null;
-  const integrityTotal = integrity
-    ? Object.values(integrity).reduce((total, value) => total + value, 0)
+  // Two disjoint sums, and never one combined number.
+  //
+  // This used to be `Object.values(integrity).reduce(sum)`, which summed all ten counters -- five policy
+  // violations and five broker refusals together. That is the exact figure the backend refuses to publish:
+  // `api.ts` documents that `SecuritySummary` has no `total` field because "summing them produces a
+  // number that rises when the sandbox works correctly". Summing it on the client re-created the number
+  // the type system was designed to prevent, and it was displayed under the label INTEGRITY EVENTS, so
+  // every correct broker refusal raised a figure a reader would read as a problem. The same five broker
+  // values were then listed again immediately below as BROKER REFUSALS, so they were also double-counted
+  // within the card.
+  const policyViolationTotal = integrity
+    ? integrity.unauthorized_access
+      + integrity.policy_violations
+      + integrity.sandbox_violations
+      + integrity.environment_tampering
+      + integrity.network_access_attempts
     : 0;
   const brokerIntegrityRows: [string, number][] = integrity
     ? [
@@ -1718,7 +1732,16 @@ const App = () => {
                 <p className="eyebrow">EVALUATION OUTPUT</p>
                 <h2>Stored result</h2>
               </div>
-              <span className="result-status">{result ? "VERIFIED" : "PENDING"}</span>
+              {/*
+                This used to read "VERIFIED", with `styles.css` colouring the V green. Nothing verified
+                anything: the label was chosen on the strength of the fact that `get_result` had returned
+                a row, which says the result was *stored*, not that it was checked. A word like VERIFIED
+                is a claim about a verification that does not exist, and colouring its first letter made
+                it look like a system badge. The honest label is what actually happened, and the digest
+                printed below the card is the real integrity evidence -- reported, and not recomputed
+                here.
+              */}
+              <span className="result-status">{result ? "STORED" : "PENDING"}</span>
             </div>
             {runError && <div className="error-message" role="alert">{runError}</div>}
             {!result && !runError && (
@@ -1745,11 +1768,20 @@ const App = () => {
                   <div><span>TURNS USED</span><strong>{result.capability.turns_used}</strong></div>
                   <div><span>INVALID ACTIONS</span><strong>{result.capability.invalid_action_count}</strong></div>
                   <div><span>EVENTS</span><strong>{result.telemetry_event_count}</strong></div>
-                  <div><span>INTEGRITY EVENTS</span><strong>{integrityTotal}</strong></div>
+                  {/*
+                    Policy violations and broker refusals are shown as two separate facts and never
+                    added together. A policy violation means something went wrong; a broker refusal means
+                    the boundary did its job. One number covering both would rise every time the sandbox
+                    worked, which is the opposite of what a reader would take from it.
+                  */}
+                  <div>
+                    <span>POLICY VIOLATIONS</span>
+                    <strong>{policyViolationTotal}</strong>
+                  </div>
                 </div>
                 {brokerIntegrityTotal > 0 && (
                   <div className="integrity-breakdown">
-                    <span>BROKER REFUSALS</span>
+                    <span>BROKER REFUSALS / THE BOUNDARY HELD</span>
                     <div>
                       {brokerIntegrityRows.map(([label, value]) => (
                         <span key={label}>{label} / {value}</span>
