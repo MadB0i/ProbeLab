@@ -1,11 +1,16 @@
 name: CI
 
+# The gate this workflow exists to be. Everything below is a check that has failed for real, or a
+# check whose absence let something real through. `docs/STATUS.md` section 9 lists the same commands
+# with their expected results, so the two cannot disagree about what "passing" means.
+
 on:
   push:
   pull_request:
 
 jobs:
   verify:
+    name: Build, lint, test, and audit
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -34,8 +39,8 @@ jobs:
         with:
           manifest-path: Cargo.lock
           command: check
-      # `cargo-deny-action` runs the policy in `deny.toml`, but duplicate detection is deliberately set
-      # to `warn` -- the Tauri tree carries two majors of `windows-sys`, `thiserror`, and `toml` that
+      # `cargo-deny-action` runs the policy in `deny.toml`, but duplicate detection is deliberately
+      # `warn` -- the Tauri tree carries two majors of `windows-sys`, `thiserror`, and `toml` that
       # ProbeLab does not own -- and a warn-level lint does not fail an action. This step requires a
       # clean exit instead, so a policy set to warn still fails the build. A gate that can be configured
       # into silence is not a gate, and the interesting part of a supply-chain check is the failures.
@@ -48,25 +53,34 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
         working-directory: apps/desktop
+      # `--all` rather than the bare form. The workspace root is a *virtual* manifest, so bare `cargo
+      # fmt` already covers every member and `--all` is equivalent -- but the explicit form states the
+      # intent, and the bare form would silently cover less if the manifest ever stopped being virtual.
       - name: Check Rust formatting
-        run: cargo fmt --check
-      - name: Test Rust workspace
-        run: cargo test --workspace --locked
-      - name: Lint Rust workspace
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: Build Rust workspace
+        run: cargo fmt --all --check
+      - name: Lint the Rust workspace
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      # `--all-targets` because a test target that does not compile is not a passing test suite, and
+      # `--all-features` so a feature-gated path cannot rot unnoticed.
+      - name: Test the Rust workspace
+        run: cargo test --workspace --all-targets --all-features --locked
+      - name: Build the Rust workspace
         run: cargo build --workspace --all-features --locked
       - name: Test the frontend
         # Previously absent, which meant the frontend suite was never run by CI at all. A gate that
         # silently skips half the tests is worse than no gate, because it reads as coverage.
         run: pnpm test
         working-directory: apps/desktop
-      - name: Build frontend
+      - name: Build the frontend
         run: pnpm build
         working-directory: apps/desktop
       - name: Check the feature matrix is current
-        # The matrix claims what is implemented. If it drifts, the claim is worthless, so CI checks that
-        # every capability it marks complete still has the tests it says it has.
+        # Reads the REAL `generate_handler![]` list and the real `invoke` calls in the frontend, and
+        # fails in both directions. The previous version grepped `#[tauri::command]`, which marks a
+        # definition rather than a registration -- so nine commands that were defined, exported, called
+        # by the UI, tested, and documented were absent from the handler, leaving three panels dead in
+        # the built application while this check passed. A gate that reads the wrong list is worse
+        # than no gate, because it reads as coverage.
         run: python3 scripts/check-feature-matrix.py
       - name: Audit wire-format stability
         # A serialization defect once shipped as `SecurityProbe` where the wire format is
@@ -75,15 +89,28 @@ jobs:
         # spellings against hand-written literals, so a rename fails here instead of reaching a
         # stored row.
         #
-        # The previous filter here was `--exact security::serialization`, which matched zero tests
-        # and passed. A gate that can silently stop testing anything is worse than no gate, because
-        # it reads as coverage. The target name is used instead, so deleting the file fails the step
-        # rather than quietly emptying it.
+        # The target name is used rather than an `--exact` filter. A previous filter here was
+        # `--exact security::serialization`, which matched zero tests and passed. A gate that can
+        # silently stop testing anything is worse than no gate, because it reads as coverage -- and
+        # deleting the file would empty the step rather than fail it.
         run: cargo test --locked --workspace --all-features --test wire_format
+      - name: Audit the IPC boundary
+        # Malformed payloads, invalid enums, invalid numbers, missing state, poisoned state, backend
+        # failure, and serialization failure. The frontend is untrusted input, so the boundary is
+        # tested with what a stale, buggy, or hostile build actually sends. Named as a target for the
+        # same reason as the step above.
+        run: cargo test --locked -p probelab-desktop --all-features --test ipc_boundary
+      - name: Audit the adversarial self-tests
+        # Live loopback servers that misbehave: redirects, truncated bodies, multi-megabyte
+        # responses, silence, and a credential the provider echoes back. Plus the replay-corruption
+        # surface and the distinction the whole security story rests on -- a blocked probe is a
+        # passing test, and a model that violates the boundary is a finding.
+        run: cargo test --locked -p probelab-lab --all-features --test adversarial
       - name: Audit comparison honesty
         # The comparison feature's risk is not a wrong number, it is a confident number about runs
         # that were never comparable. These tests assert the refusals and the absence handling
-        # directly, so a change that makes the comparison more permissive fails visibly.
+        # directly, so a change that makes the comparison more permissive fails visibly. They also
+        # assert that broker refusals alone are not a security finding, which was once the case.
         run: cargo test --locked -p probelab-lab --all-features --test comparison
       - name: Audit structural security guarantees
         # The architectural tests that assert the Brain, Runner, Arena, and Replay cannot authorize,
@@ -98,10 +125,12 @@ jobs:
           cargo test -p probelab-desktop --locked --lib security::tests::no_command_can_declare_a_breach_or_reclassify_an_outcome
           cargo test -p probelab-desktop --locked --lib arena::tests::no_command_can_steer_an_authorization_or_a_result
           cargo test -p probelab-desktop --locked --lib brain::tests::no_command_can_override_an_authorization_decision
+          cargo test -p probelab-desktop --locked --lib tests::every_command_the_frontend_invokes_is_registered
       - name: Fail on any step error
         run: echo "all gate steps passed"
 
   containment-windows:
+    name: Windows OS containment
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -123,20 +152,27 @@ jobs:
         with:
           workspaces: . -> target
       - name: Check Rust formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - name: Test Windows OS containment
+        # 30 tests, 9 of which launch a real child under a real AppContainer identity. These are the
+        # only checks of the OS-level guarantees in `docs/STATUS.md` section 3, and they cannot run
+        # anywhere else.
         run: cargo test -p probelab-sandbox --locked
       - name: Lint Windows OS containment
-        run: cargo clippy -p probelab-sandbox --all-targets --locked -- -D warnings
-      - name: Test Rust workspace
+        run: cargo clippy -p probelab-sandbox --all-targets --all-features --locked -- -D warnings
+      - name: Audit Windows process identity isolation
+        # The spawner always requests an AppContainer identity and fails closed without one. These are
+        # the tests that hold that guarantee in place, and they only run on Windows because that is
+        # where the containment code is live.
+        run: cargo test -p probelab-sandbox --locked --test containment_identity
+        continue-on-error: false
+      - name: Test the Rust workspace
+        # `--exclude probelab-desktop` on the build step below: Tauri needs webview2 and the Linux
+        # system libraries, and a Windows runner has webview2 but not a configured build target for
+        # the desktop binary's link step. The desktop *library* is still tested above, because every
+        # command surface and the IPC boundary target live in it.
         run: cargo test --workspace --all-targets --all-features --locked
       - name: Lint the Rust workspace
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Build the Rust workspace
         run: cargo build --workspace --all-features --locked --exclude probelab-desktop
-      - name: Audit Windows process identity isolation
-        # P8b10's guarantee: the spawner always requests an AppContainer identity and fails closed
-        # without one. These are the tests that hold that guarantee in place, and they only run on
-        # Windows because that is where the containment code is live.
-        run: cargo test -p probelab-sandbox --locked --test containment_identity
-        continue-on-error: false
