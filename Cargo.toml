@@ -20,6 +20,11 @@ edition = "2021"
 rust-version = "1.97"
 license = "MIT"
 repository = "https://github.com/MadB0i/ProbeLab"
+# Not published, and not publishable as written: every member depends on its siblings by `path`, which
+# crates.io rejects. Declaring `publish = false` states that rather than leaving it implied, and it is
+# also what lets `deny.toml`'s `allow-wildcard-paths` apply -- cargo-deny only grants that exemption to
+# crates that are not published, because a published crate cannot have a path dependency at all.
+publish = false
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

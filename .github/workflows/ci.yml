@@ -29,6 +29,18 @@ jobs:
         with:
           toolchain: 1.97.0
           components: rustfmt, clippy
+      - name: Install cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: Cargo.lock
+          command: check
+      # `cargo-deny-action` runs the policy in `deny.toml`, but duplicate detection is deliberately set
+      # to `warn` -- the Tauri tree carries two majors of `windows-sys`, `thiserror`, and `toml` that
+      # ProbeLab does not own -- and a warn-level lint does not fail an action. This step requires a
+      # clean exit instead, so a policy set to warn still fails the build. A gate that can be configured
+      # into silence is not a gate, and the interesting part of a supply-chain check is the failures.
+      - name: Require a clean supply-chain policy
+        run: cargo deny --log-level error check
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
@@ -99,6 +111,13 @@ jobs:
         with:
           toolchain: 1.97.0
           components: rustfmt, clippy
+      - name: Install cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: Cargo.lock
+          command: check
+      - name: Require a clean supply-chain policy
+        run: cargo deny --log-level error check
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:

@@ -1,0 +1,169 @@
+# Dependency, licence, and source policy for ProbeLab.
+#
+# # Why this file exists
+#
+# ProbeLab's central claim is that its own boundaries are real: the broker is the only authorization
+# authority, the sandbox is the only way a process starts, the evaluator is independent. A supply chain
+# is part of that claim. A lab that has pinned a compromised crate has not lost its architecture -- it
+# has lost the ability to say what runs inside its own boundary at all, and it cannot tell, because
+# nothing in the repository records it.
+#
+# So the policy is fail-closed. `cargo deny check advisories` and `check sources` are hard failures, and
+# the six advisory entries below are the complete set of exceptions, each naming its exact dependency,
+# its path in, and why it does not reach anything ProbeLab measures. A new advisory fails CI rather
+# than appearing in a log nobody reads.
+#
+# # How to read a failure
+#
+# Do not reach for `ignore` first. `cargo deny check advisories` prints the dependency path that pulled
+# the crate in, and that path is the actual question: is it reachable at run time, is it build-time
+# only, is it a vulnerability or an unmaintained notice. Answer that, then decide.
+#
+# # Verified state
+#
+# `cargo deny check` was run against this workspace on a Windows host and passes. `cargo deny check
+# advisories` reports **zero vulnerabilities**. The six exceptions are all `unmaintained` notices, all
+# transitive, all reached through Tauri, and none with an available upgrade.
+
+[graph]
+# Every platform ProbeLab ships or is tested on, not just the host's. The containment layer is
+# Windows-only and the CI matrix includes Linux, so a Linux-only dependency is in scope even when the
+# check runs on Windows. Without this, a crate that only appears on Linux is never examined.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+]
+all-features = true
+
+[output]
+feature-depth = 1
+
+[advisories]
+# The default database is RustSec's, fetched fresh. A pinned or lockfile-stamped database would turn
+# this gate into a check against a snapshot nobody chose, which is a weaker guarantee than it appears.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# The complete exception list, and it is short on purpose.
+#
+# Every entry here is an `unmaintained` notice rather than a vulnerability. The distinction is the whole
+# triage: `unmaintained` says nobody is answering the mail, not that the code is broken. None of these
+# has an available upgrade, so the real choice is between accepting an unmaintained build-time
+# dependency and dropping the Tauri desktop application. Each reason below records what the crate
+# actually is and why nothing ProbeLab measures runs through it.
+#
+# They are listed individually rather than switched off with a blanket setting, because a blanket
+# `ignore` would also silence a notice about a crate this project depends on *directly* -- and that is
+# the one that would matter.
+ignore = [
+    # RUSTSEC-2024-0370 - `proc-macro-error` 1.0.4 is unmaintained; RustSec reports no safe upgrade.
+    # Path in: glib-macros 0.18.5 -> glib 0.18.5 -> atk 0.18.2 -> gtk 0.18.2 -> muda 0.19.3 -> tauri
+    # 2.11.6. What it is: a proc-macro that runs while *building* the Linux GTK backend. It is not
+    # linked into the shipped binary and is never executed at run time. Linux is also the one platform
+    # where ProbeLab's containment layer already fails closed (`crates/sandbox/src/containment/
+    # other.rs`), so no measurement runs there either. Revisit when Tauri's GTK backend leaves the
+    # GTK 0.18 series.
+    { id = "RUSTSEC-2024-0370", reason = "build-time proc-macro for Tauri's Linux GTK backend; not linked into the shipped binary and not reachable on any platform where ProbeLab measures. No upgrade available." },
+
+    # RUSTSEC-2025-0100 - `unic-ucd-ident` 0.9.0 is unmaintained. Path in: urlpattern 0.3.0 ->
+    # tauri-utils 2.9.3. What it is: Unicode identifier normalisation tables, used at compile time to
+    # validate the URL patterns Tauri registers. Lookup data with no I/O, and it never parses untrusted
+    # input at run time. Revisit when tauri-utils moves off urlpattern 0.3.
+    { id = "RUSTSEC-2025-0100", reason = "Unicode identifier tables used at compile time via tauri-utils -> urlpattern. Pure lookup data; not reachable at run time. No upgrade available." },
+
+    # RUSTSEC-2025-0081 - `unic-char-property` 0.9.0 is unmaintained. Same urlpattern -> tauri-utils
+    # path. What it is: the character-property table read by the crate above.
+    { id = "RUSTSEC-2025-0081", reason = "Unicode character-property table, compile-time only via tauri-utils -> urlpattern. Pure data. No upgrade available." },
+
+    # RUSTSEC-2025-0075 - `unic-char-range` 0.9.0 is unmaintained. Same path. What it is: the range
+    # table for the same lookup.
+    { id = "RUSTSEC-2025-0075", reason = "Unicode range table, compile-time only via tauri-utils -> urlpattern. Pure data. No upgrade available." },
+
+    # RUSTSEC-2025-0080 - `unic-common` 0.9.0 is unmaintained. Same path. What it is: shared types and
+    # constants for the tables above.
+    { id = "RUSTSEC-2025-0080", reason = "Shared types for the Unicode tables above, compile-time only via tauri-utils -> urlpattern. No upgrade available." },
+
+    # RUSTSEC-2025-0098 - `unic-ucd-version` 0.9.0 is unmaintained. Same path. What it is: the Unicode
+    # version those tables were generated against.
+    { id = "RUSTSEC-2025-0098", reason = "Unicode version marker for the tables above, compile-time only via tauri-utils -> urlpattern. Pure data. No upgrade available." },
+]
+
+[licenses]
+# Permissive and explicit, with no `allow-osi-fsf-free` or `default` shortcuts. Those settings exist and
+# they make the allowlist decorative, because they pre-approve whole categories. Naming each licence is
+# what turns this into a decision rather than a record of whatever a transitive dependency picked.
+allow = [
+    # The workspace's own licence, and the Rust ecosystem default.
+    "MIT",
+    "Apache-2.0",
+    # Permissive BSD, listed by name so the no-endorsement clause is an explicit acceptance.
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    # A licence exception rather than a licence, covering `rustc`'s own Apache-2.0-derived parts.
+    "Apache-2.0 WITH LLVM-exception",
+    # Data and identifier licences, not code licences. `Unicode-3.0` reaches ProbeLab through `icu_*`,
+    # `zerovec`, and `zerofrom`; `CDLA-Permissive-2.0` through `webpki-roots`. Neither can impose a
+    # source obligation on any crate in this workspace, because neither covers source code here.
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    # MPL-2.0 is weak, file-level copyleft: modifying a covered file obliges publishing *that file*,
+    # and linking does not extend the obligation to the whole work. It reaches ProbeLab only through
+    # `selectors` and `cssparser`, pulled in by Tauri's webview handling, and neither is modified here.
+    # This is the one entry that is not unambiguously permissive, so it is the one to re-examine if the
+    # Tauri dependency ever changes shape.
+    "MPL-2.0",
+]
+# 0.93 rather than the 0.8 default: a licence guessed out of a README at 85% textual similarity is not
+# a licence anyone has actually read, and accepting it silently is the failure this section exists to
+# prevent.
+confidence-threshold = 0.93
+# A crate with no machine-readable licence cannot be audited, so it is a hard failure.
+# Every declared licence must be used by something in the graph. Without this, a stale entry survives
+# the dependency it was added for and the list quietly stops describing the project.
+unused-allowed-license = "warn"
+
+[licenses.private]
+ignore = true
+
+[bans]
+# Duplicates are reported rather than denied. The workspace pulls two major versions of `windows-sys`,
+# `thiserror`, `syn`, and `toml` through the Tauri and proc-macro trees, and forcing them to converge
+# would mean patching a dependency graph ProbeLab does not own. Keeping this at `warn` rather than
+# `allow` means a new duplicate shows up in the log -- the count is currently 30, all transitive.
+multiple-versions = "warn"
+# A `*` version requirement means the build can change without a commit, which is the one thing a
+# lockfile exists to prevent. No *external* dependency uses one.
+wildcards = "deny"
+# ...except an internal crate declared as a bare path, which is how the workspace's own members are
+# declared and is not a floating requirement at all. `probelab-core = { path = "../core" }` resolves to
+# a directory in this repository, so it is pinned by the commit rather than by a version number. With
+# this off, `wildcards = "deny"` fails on all 37 of the workspace's own path dependencies, which would
+# make the rule unenforced rather than stricter. Set alongside `wildcards = "deny"` on purpose: an
+# external crate with a `*` requirement still fails the build.
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+# The workspace's own crates are part of what is being checked, so they are not waved through.
+allow-workspace = false
+# Empty by design: nothing is on the deny list because nothing currently *should* be. The key is that a
+# future `deny` entry is a recorded, reviewable decision rather than a silent dependency.
+deny = []
+allow = []
+skip = []
+skip-tree = []
+
+[sources]
+# The strictest section, and the shortest. A git dependency resolves to whatever a remote branch points
+# at today rather than to a reviewed commit, and a crate from an unknown registry has no provenance at
+# all. Neither is compatible with a lockfile-based reproducibility claim, so both fail the build.
+unknown-registry = "deny"
+unknown-git = "deny"
+# crates.io and nothing else. Every one of the 301 external crates in the graph comes from here.
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

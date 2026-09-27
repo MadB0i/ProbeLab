@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Seeded grid-world environment and capability sandbox for ProbeLab"
 
 [dependencies]

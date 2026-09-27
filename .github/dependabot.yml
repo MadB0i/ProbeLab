@@ -1,0 +1,95 @@
+# Dependency updates.
+#
+# # Why two ecosystems are configured
+#
+# ProbeLab's dependency surface is a Tauri/Rust tree of about 300 external crates plus a small React
+# frontend. Both are pinned by lockfile, both are reachable from a security boundary, and a version
+# bump in either can change what runs inside the sandbox without touching a line of ProbeLab's own
+# code. So both are watched.
+#
+# # Why this is grouped
+#
+# One pull request per ecosystem rather than one per crate. The Rust tree is deep enough that per-crate
+# updates would arrive as a stream of patches that individually mean nothing and collectively cannot be
+# reviewed. A grouped update is reviewable: the diff is a lockfile, `cargo deny check` runs on it, and
+# the full gate runs on it.
+#
+# # Interaction with `deny.toml`
+#
+# These are deliberately not configured to auto-merge. A new advisory fails `cargo deny check` in CI,
+# and whether an update fixes it, breaks something else, or pulls in a new licence is a decision that
+# should be made by reading `deny.toml` rather than by a bot. The six justified advisory exceptions in
+# that file are exactly the kind of thing an auto-merge would quietly undo.
+
+version: 2
+
+updates:
+  # Cargo. The lockfile is committed and `--locked` is used throughout CI, so an update is only a
+  # lockfile change until someone decides it is wanted.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: tuesday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 4
+    # Grouped: one reviewable lockfile diff instead of a stream of individually meaningless bumps.
+    groups:
+      rust-toolchain:
+        applies-to: version-updates
+        patterns:
+          - "rust"
+      # The Tauri stack moves together and a partial bump usually does not compile. Grouped so the
+      # review is of a coherent set rather than of whichever half landed first.
+      tauri:
+        applies-to: version-updates
+        patterns:
+          - "tauri"
+          - "tauri-*"
+          - "wry"
+          - "muda"
+          - "winit"
+      # Everything else transitively. Grouped because a lone `bitflags` bump is not a reviewable change.
+      rust-transitive:
+        applies-to: version-updates
+        patterns:
+          - "*"
+    ignore:
+      # The toolchain is pinned by `rust-toolchain.toml` and `Cargo.toml`'s `rust-version`, and both are
+      # verified deliberately. An automated toolchain bump would move the compiler out from under a
+      # pin that was chosen on purpose, so it stays a human decision.
+      - dependency-name: "probelab-*"
+      # The workspace members themselves are never updated by Dependabot; they are not external.
+      - dependency-name: "probelab-desktop"
+
+  # pnpm, for `apps/desktop`. `pnpm-lock.yaml` is committed and CI installs with `--frozen-lockfile`.
+  - package-ecosystem: npm
+    directory: /apps/desktop
+    schedule:
+      interval: weekly
+      day: tuesday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 4
+    groups:
+      frontend:
+        applies-to: version-updates
+        patterns:
+          - "*"
+
+  # GitHub Actions. `cargo-deny-action` is a security gate, so a compromised or hijacked tag on it
+  # would be a supply-chain attack on the supply-chain check itself.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: tuesday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 4
+    groups:
+      actions:
+        applies-to: version-updates
+        patterns:
+          - "*"
