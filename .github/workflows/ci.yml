@@ -41,12 +41,41 @@ jobs:
       - name: Test Rust workspace
         run: cargo test --workspace --locked
       - name: Lint Rust workspace
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Build Rust workspace
-        run: cargo build --workspace --locked
+        run: cargo build --workspace --all-features --locked
+      - name: Test the frontend
+        # Previously absent, which meant the frontend suite was never run by CI at all. A gate that
+        # silently skips half the tests is worse than no gate, because it reads as coverage.
+        run: pnpm test
+        working-directory: apps/desktop
       - name: Build frontend
         run: pnpm build
         working-directory: apps/desktop
+      - name: Check the feature matrix is current
+        # The matrix claims what is implemented. If it drifts, the claim is worthless, so CI checks that
+        # every capability it marks complete still has the tests it says it has.
+        run: python3 scripts/check-feature-matrix.py
+      - name: Audit serialization round-trips
+        # A serialization defect once shipped as `SecurityProbe` where the wire format is
+        # `security_probe`. These are named separately so a regression there is obvious in the log
+        # rather than buried among unrelated assertions.
+        run: cargo test --workspace --locked -- --exact security::serialization
+      - name: Audit structural security guarantees
+        # The architectural tests that assert the Brain, Runner, Arena, and Replay cannot authorize,
+        # execute, or bypass enforcement. Run as a named step so a failure reads as a security
+        # regression rather than as an ordinary test failure.
+        run: |
+          cargo test -p probelab-lab --locked --test runner not_a_security_authority
+          cargo test -p probelab-lab --locked --test arena the_arena_is_not_a_capability_authority
+          cargo test -p probelab-lab --locked --test replay replay_holds_no_execution_or_authorization_capability
+          cargo test -p probelab-sandbox --locked --test containment_identity
+          cargo test -p probelab-model-adapters --locked --test provider_boundary
+          cargo test -p probelab-desktop --locked --lib security::tests::no_command_can_declare_a_breach_or_reclassify_an_outcome
+          cargo test -p probelab-desktop --locked --lib arena::tests::no_command_can_steer_an_authorization_or_a_result
+          cargo test -p probelab-desktop --locked --lib brain::tests::no_command_can_override_an_authorization_decision
+      - name: Fail on any step error
+        run: echo "all gate steps passed"
 
   containment-windows:
     runs-on: windows-latest
@@ -68,9 +97,15 @@ jobs:
         run: cargo test -p probelab-sandbox --locked
       - name: Lint Windows OS containment
         run: cargo clippy -p probelab-sandbox --all-targets --locked -- -D warnings
-      - name: Test the Rust workspace
-        run: cargo test --workspace --locked --exclude probelab-desktop
+      - name: Test Rust workspace
+        run: cargo test --workspace --all-targets --all-features --locked
       - name: Lint the Rust workspace
-        run: cargo clippy --workspace --all-targets --locked --exclude probelab-desktop -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Build the Rust workspace
-        run: cargo build --workspace --locked --exclude probelab-desktop
+        run: cargo build --workspace --all-features --locked --exclude probelab-desktop
+      - name: Audit Windows process identity isolation
+        # P8b10's guarantee: the spawner always requests an AppContainer identity and fails closed
+        # without one. These are the tests that hold that guarantee in place, and they only run on
+        # Windows because that is where the containment code is live.
+        run: cargo test -p probelab-sandbox --locked --test containment_identity
+        continue-on-error: false

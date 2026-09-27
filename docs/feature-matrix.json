@@ -1,0 +1,258 @@
+{
+  "$comment": [
+    "A machine-readable claim about what the product implements. CI runs",
+    "scripts/check-feature-matrix.py, which verifies that every capability marked 'complete' names a",
+    "Tauri command that exists and test files that exist. A capability is only 'complete' when the",
+    "product can actually reach it and a test actually covers it.",
+    "",
+    "Status values are deliberately three-way. 'partial' exists so a half-finished capability is",
+    "visible rather than being rounded up to 'complete' or hidden entirely."
+  ],
+  "schemaVersion": 1,
+  "generatedBy": "scripts/check-feature-matrix.py",
+  "capabilities": [
+    {
+      "id": "grid-world",
+      "area": "benchmark",
+      "status": "complete",
+      "command": "run_experiment",
+      "summary": "Partially observable grid planning with a replayable seed.",
+      "tests": [
+        "crates/engine/tests/vertical_slice.rs",
+        "crates/lab/tests/runner.rs"
+      ]
+    },
+    {
+      "id": "sandbox-process",
+      "area": "benchmark",
+      "status": "complete",
+      "command": "run_experiment",
+      "summary": "A capability-gated task where the process capability is real and executed; filesystem, network, and environment capabilities are authorized and refused at execution time, not executed.",
+      "tests": [
+        "crates/engine/tests/sandbox_process_quality.rs",
+        "crates/lab/tests/runner.rs"
+      ]
+    },
+    {
+      "id": "agent-registry",
+      "area": "orchestration",
+      "status": "complete",
+      "command": "list_agents",
+      "summary": "One authoritative agent description that the UI renders and the runner builds through, with per-agent game compatibility.",
+      "tests": [
+        "crates/lab/tests/agents.rs"
+      ]
+    },
+    {
+      "id": "benchmark-registry",
+      "area": "orchestration",
+      "status": "complete",
+      "command": "list_benchmark_details",
+      "summary": "Benchmarks declare their capability-execution mode and replay support in the registry rather than in UI copy.",
+      "tests": [
+        "crates/benchmarks/src/lib.rs"
+      ]
+    },
+    {
+      "id": "brain-panel",
+      "area": "ui",
+      "status": "complete",
+      "command": "brain_panel",
+      "summary": "A read-only projection of the real orchestrator: phase, plan decisions, monitoring signals, and the experiment's own event timeline.",
+      "tests": [
+        "crates/lab/tests/view.rs",
+        "apps/desktop/src-tauri/src/brain.rs",
+        "apps/desktop/src/BrainPanel.test.tsx"
+      ]
+    },
+    {
+      "id": "runner",
+      "area": "orchestration",
+      "status": "complete",
+      "command": "run_experiment",
+      "summary": "Turns a plan into episodes, results, a timeline, and a terminal state. Holds no broker, no policy, and no containment handle, so it is structurally incapable of authorizing.",
+      "tests": [
+        "crates/lab/tests/runner.rs"
+      ]
+    },
+    {
+      "id": "arena-tictactoe",
+      "area": "arena",
+      "status": "complete",
+      "command": "play_arena_match",
+      "summary": "A real match through the engine's play_match, with per-ply board history from the engine's own telemetry. Two policies are registered, one a perfect ceiling.",
+      "tests": [
+        "crates/engine/tests/arena_tictactoe.rs",
+        "crates/lab/tests/arena.rs",
+        "apps/desktop/src/ArenaPanel.test.tsx"
+      ]
+    },
+    {
+      "id": "arena-connect-four",
+      "area": "arena",
+      "status": "not-implemented",
+      "command": null,
+      "summary": "Schema exists in GameBoard and GameKind; no engine implementation, so it is not offered rather than offered and left to fail.",
+      "tests": []
+    },
+    {
+      "id": "arena-rps",
+      "area": "arena",
+      "status": "not-implemented",
+      "command": null,
+      "summary": "Schema exists; no engine implementation.",
+      "tests": []
+    },
+    {
+      "id": "arena-battleship",
+      "area": "arena",
+      "status": "not-implemented",
+      "command": null,
+      "summary": "Schema exists; no engine implementation.",
+      "tests": []
+    },
+    {
+      "id": "arena-human-seat",
+      "area": "arena",
+      "status": "not-implemented",
+      "command": null,
+      "summary": "No human-turn path. A human player would be a second execution path with its own state transitions, in a panel whose value is that the environment is the only thing that moves the board.",
+      "tests": []
+    },
+    {
+      "id": "security-lab",
+      "area": "security",
+      "status": "complete",
+      "command": "run_security_sweep",
+      "summary": "Runs the registry's six security probes through the real broker and sandbox path and reports which layer acted. A caught attempt is a successful test, not a vulnerability.",
+      "tests": [
+        "crates/lab/tests/security.rs",
+        "apps/desktop/src-tauri/src/security.rs",
+        "apps/desktop/src/SecurityPanel.test.tsx"
+      ]
+    },
+    {
+      "id": "replay",
+      "area": "replay",
+      "status": "complete",
+      "command": "replay_arena_match",
+      "summary": "Reconstructs recorded frames deterministically. Holds no provider, broker, launcher, or engine, so it cannot call a model or execute anything.",
+      "tests": [
+        "crates/lab/tests/replay.rs",
+        "apps/desktop/src/ReplayPanel.test.tsx"
+      ]
+    },
+    {
+      "id": "comparison",
+      "area": "ui",
+      "status": "not-implemented",
+      "command": null,
+      "summary": "No comparison panel. Would need stored per-experiment results first.",
+      "tests": []
+    },
+    {
+      "id": "settings",
+      "area": "ui",
+      "status": "not-implemented",
+      "command": null,
+      "summary": "No settings panel. Provider configuration is currently per-run.",
+      "tests": []
+    },
+    {
+      "id": "provider-openai-compatible",
+      "area": "provider",
+      "status": "complete",
+      "command": "get_provider_status",
+      "summary": "The OpenAI-compatible chat-completions path, verified working against a local Ollama. Also reaches vLLM, LM Studio, and llama.cpp where they expose /v1.",
+      "tests": [
+        "crates/model-adapters/src/lib.rs"
+      ]
+    },
+    {
+      "id": "provider-anthropic",
+      "area": "provider",
+      "status": "complete",
+      "command": "get_provider_status",
+      "summary": "The Anthropic Messages API: version header, top-level system prompt, and multi-block content joined so a truncated-looking reply is not misreported as unparseable.",
+      "tests": [
+        "crates/model-adapters/src/anthropic.rs"
+      ]
+    },
+    {
+      "id": "provider-gemini",
+      "area": "provider",
+      "status": "complete",
+      "command": "get_provider_status",
+      "summary": "The Gemini generateContent API, with the model name constrained so it cannot redirect a request out of the intended endpoint.",
+      "tests": [
+        "crates/model-adapters/src/gemini.rs",
+        "crates/model-adapters/tests/provider_boundary.rs"
+      ]
+    },
+    {
+      "id": "provider-ollama-native",
+      "area": "provider",
+      "status": "not-implemented",
+      "command": null,
+      "summary": "Deliberately absent. The verified OpenAI-compatible path already reaches Ollama; a native /api/chat adapter would add a second thing to test without adding a capability.",
+      "tests": []
+    },
+    {
+      "id": "provider-opencode",
+      "area": "provider",
+      "status": "not-implemented",
+      "command": null,
+      "summary": "Deliberately absent. OpenCode is a coding agent, not a model endpoint; there is no API to point at.",
+      "tests": []
+    },
+    {
+      "id": "capability-broker",
+      "area": "security",
+      "status": "complete",
+      "command": "run_experiment",
+      "summary": "The only capability authorization authority. Review, grant, and refuse filesystem, network, process, and environment requests under an explicit policy.",
+      "tests": [
+        "crates/broker/tests/broker.rs"
+      ]
+    },
+    {
+      "id": "process-containment",
+      "area": "security",
+      "status": "complete",
+      "command": "run_experiment",
+      "summary": "Windows AppContainer containment: a derived per-run SID, a designated writable directory, protected paths, job limits, and a fail-closed refusal when the identity cannot be placed in force. Not complete OS isolation.",
+      "tests": [
+        "crates/sandbox/tests/appcontainer.rs",
+        "crates/sandbox/tests/containment_identity.rs"
+      ]
+    },
+    {
+      "id": "experiment-harness",
+      "area": "orchestration",
+      "status": "partial",
+      "command": null,
+      "summary": "The multi-episode Harness with disjoint seed pools and Wilson intervals exists and is used by benchmark quality tests, but the Runner does not use it. The Runner's own loop is what the product runs.",
+      "tests": [
+        "crates/engine/tests/benchmark_quality.rs"
+      ]
+    },
+    {
+      "id": "ui-navigation",
+      "area": "ui",
+      "status": "partial",
+      "command": null,
+      "summary": "Six real panels render in one column. There is no navigation shell, so every panel is reachable but none can be focused. No placeholder panels exist.",
+      "tests": []
+    },
+    {
+      "id": "persistence-recovery",
+      "area": "orchestration",
+      "status": "partial",
+      "command": null,
+      "summary": "Results and telemetry persist to SQLite and a completed run survives a reload. An experiment interrupted by a crash is not resumed, and no interrupted-run marker is written.",
+      "tests": [
+        "apps/desktop/src-tauri/src/lib.rs"
+      ]
+    }
+  ]
+}

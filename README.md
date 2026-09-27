@@ -1,123 +1,179 @@
-# ProbeLab
+# PROBE//LAB
 
-*Workspace version 0.4.1.*
+A controlled environment where AI systems are placed into measurable tasks and
+security-sensitive environments, their actions are independently observed, authorization is
+enforced separately from evaluation, and the resulting behaviour can be inspected, replayed, and
+compared.
 
-ProbeLab is a local-first AI capability and agent evaluation environment. The current vertical slice measures two honest dimensions: **grid-world planning** and **protocol adherence**. Both claims are under active scrutiny — see `docs/AUDIT-2026-09-26.md`, which found that the grid-world benchmark as shipped did not measure reasoning ability, and `ARCHITECTURE.md`, which describes the v0.5 redesign that addresses it.
+That sentence is the design. Everything below it exists to make one of its clauses true in code.
 
-**Where the benchmark stands.** The grid-world benchmark was rebuilt so that a one-step-lookahead
-heuristic is beatable by a search over the agent's own observations, with confidence intervals that do
-not overlap: greedy 0.286 `[0.193, 0.401]` against a scripted search reference at 0.943
-`[0.862, 0.978]`, over 70 held-out seeds. **No real model has been measured on it yet.** Run
-`cargo run -p probelab-engine --example grid_world_harness -- --episodes 70` to reproduce those numbers.
-The desktop app still runs a single episode and shows no success rate, no interval, and no baseline.
+## What it is
 
-The trusted engine owns the environment, capability broker, policy boundary, sandbox, observer, persistence, and evaluator. A connected OpenAI-compatible provider receives only the model-facing observation request; it never receives the hidden map, benchmark implementation, evaluator, filesystem paths, or persistence handles.
+PROBE//LAB is a desktop laboratory for evaluating AI agents. It runs a chosen agent through
+deterministic benchmarks, watches what it tries to do, enforces a capability boundary
+*independently* of the evaluation, and records enough to reconstruct the run afterwards.
 
-## Security model
-
-Two independent layers refuse capabilities, and they are not the same thing:
-
-- **Capability broker (primary boundary).** `crates/broker` is deny-by-default. It authorizes `filesystem.read`, `filesystem.write`, `process.spawn`, `network.connect`, and `environment.inspect` only when a benchmark's own policy grants them, with canonicalized path checks, independent read and write roots, and explicit program and endpoint allowlists. `environment.inspect` is denied unconditionally and has no grant path.
-- **Capability executor (`process.spawn` only).** An authorization is not an execution. Exactly one permission has an implementation: an authorized `process.spawn` starts a child contained — suspended, inside a job object with CPU/memory/process limits, at the low mandatory integrity label `S-1-16-4096`, in a designated low-labeled directory it alone may write to, with an **empty** environment so it never inherits your API keys, and with the benchmark's declared paths made unreadable to it. On non-Windows platforms a spawn fails closed with `UnsupportedPlatform` rather than running unconfined. The other four permissions stop the run with an explicit unsupported error; none of them has a pretend implementation.
-
-`docs/SECURITY-STATUS.md` records exactly what is enforced, what is partial, and what is deferred.
-
-## Prerequisites
-
-- Rust 1.97.0 through the pinned `rust-toolchain.toml`
-- Node.js 20 or newer
-- pnpm 9.15.4 or newer
-
-Tauri desktop development also requires the platform WebView/toolchain packages. On Windows, the normal Rust MSVC and WebView2 dependencies are required. On Linux, install the WebKitGTK and AppIndicator development packages for your distribution before launching Tauri.
-
-## Quick start
-
-```text
-pnpm install --dir apps/desktop
-pnpm --dir apps/desktop tauri dev
-```
-
-The desktop application opens the `PROBE//LAB` command center. Select the built-in Grid World benchmark and use **Run with Mock** for a fully local deterministic run. The UI displays live post-commit telemetry, the durable action trace, and the stored result.
-
-The database is stored in the Tauri application data directory as `probelab.sqlite3`. The exact platform path is managed by Tauri; no cloud sync or authentication is included.
-
-## Connected provider
-
-The connected provider is optional. Configure an OpenAI-compatible `/chat/completions` endpoint in the UI, then export the API key under the environment-variable name shown in the UI. The key is read by trusted Rust adapter code and is never accepted by IPC, displayed, logged, fingerprinted, or persisted.
-
-PowerShell example:
-
-```powershell
-$env:OPENAI_COMPATIBLE_API_KEY = "your-key"
-```
-
-The provider performs one HTTP attempt per model call. There are no automatic retries. Temperature defaults to `0`, timeout to `30s`, and `max_tokens` to `200`. The exact prompt is versioned in `prompts/grid_world_v2.md`; changing its wording requires a prompt-version bump.
-
-A connected run sends the versioned system prompt and the serialized model-facing request to the configured endpoint. Remote providers are not generally deterministic; mock runs remain replayable from their seed and action trace.
-
-## Verification
-
-```text
-cargo fmt --check
-cargo build --workspace --locked
-cargo test --workspace --all-targets --locked
-cargo clippy --workspace --all-targets -- -D warnings
-pnpm --dir apps/desktop build
-```
-
-Use `--all-targets` on the test command. `cargo build --workspace` does **not** compile test targets, so
-it will happily pass with a broken test in the tree; `--all-targets` is what actually builds them.
-
-The CI workflow runs the Rust checks and the frontend production build on every push, plus the containment suite on both `ubuntu-latest` and `windows-latest`. A local desktop smoke test can be run with:
-
-```text
-pnpm --dir apps/desktop tauri dev
-```
+The separation is the point. An agent cannot influence whether it is allowed to do something; it
+can only ask. Whether it is allowed is decided by a broker that the agent has no handle to. Whether
+it succeeded is decided by an evaluator that trusts nothing the agent says about itself. And
+whether it *could* have done something is decided by a sandbox the agent cannot reach.
 
 ## Architecture
 
-The runtime pipeline is:
-
-```text
-MODEL → AGENT/ADAPTER → CAPABILITY BROKER → CAPABILITY EXECUTOR → CONTAINMENT → TEST WORLD → OBSERVER → EVALUATOR
+```
+Brain            plans, monitors, analyses. Holds no execution or authorization capability.
+  │
+ExperimentManager  owns the lifecycle of one run. Cleanup is in `Drop`, so every terminal state
+  │                releases resources -- including on an early return or a panic.
+Runner           the courier. Executes episodes; authorizes nothing.
+  │
+Engine           benchmark execution logic: request construction, validation, turn loop.
+  │
+Broker           THE ONLY capability authorization authority. Reviews every request against an
+  │              explicit policy. Says yes or no.
+Sandbox          THE ONLY enforcement authority. AppContainer containment, designated writable
+  │              directory, protected paths, job limits, low integrity.
+Observer         independent telemetry. Witnesses; does not interpret.
+Evaluator        THE ONLY source of truth for results. Never accepts model-reported outcomes.
 ```
 
-The provider boundary is asynchronous. The trusted engine remains synchronous and calls the async adapter through a dedicated blocking bridge. A malformed, empty, invalid, timed-out, or otherwise failed model response is a capability/protocol signal. It is not an integrity violation. `IntegrityResult` is reserved for a real refusal: a policy-gate denial or a capability-broker denial. Those two record in disjoint category sets, so a broker refusal can never inflate a policy-violation count.
+A component may not become a second authorization or enforcement authority. This is enforced
+structurally, not by convention: the runner holds no broker handle and no policy object at all, so
+it is not *able* to authorize. The arena, the Brain panel, the Security Lab, and the replay
+subsystem are all asserted to contain no broker, policy, capability, or process-launch
+vocabulary — checked on every build, not at review time.
 
-Three consecutive model-call/protocol failures terminate with `model_protocol_failure`. The threshold is a documented constant, not a benchmark implementation detail.
+## Running it
 
-See `ARCHITECTURE.md` for decisions and `docs/SECURITY-STATUS.md` for enforced versus deferred protections. JSON benchmark definitions live under `benchmarks/` and are embedded in the Rust binary after validation.
+```bash
+# Everything, in one go.
+cargo fmt --check
+cargo test --workspace --all-targets --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo build --workspace --all-features
 
-## Status
+# The desktop application.
+cd apps/desktop
+pnpm install
+pnpm test
+pnpm build
+pnpm tauri dev
+```
 
-### Implemented
+CI runs all of the above, plus a named step per structural security guarantee, and refuses to
+pass if the [feature matrix](docs/feature-matrix.json) disagrees with the repository.
 
-- Seeded 5×5 grid world with a per-seed start and goal, a branching safe region, hazards hidden until the agent is adjacent, a turn budget derived from each seed's own shortest safe route, and shaped reward alongside the categorical completion status
-- Deterministic mock strategies plus OpenAI-compatible async provider with strict `MOVE_*` JSON protocol
-- Deny-by-default capability broker as the primary capability boundary, with no grant path for `environment.inspect`
-- `process.spawn` as the first genuinely executable capability: broker-authorized, contained on Windows, empty child environment, declared protected paths refused to the child, full process lifecycle telemetry. Implemented and empirically proven by `crates/engine/tests/process_spawn.rs` through a test-only benchmark; no shipped benchmark declares a spawn plan or grant yet, so this becomes load-bearing when a benchmark that genuinely needs process execution (a coding-capability benchmark, say) is built
-- Versioned prompt asset, parser fence/prose tolerance, case-insensitive action names, and unknown-field rejection
-- Typed model-call failures, usage aggregation, no-retry transport, and credential redaction
-- Append-only SQLite telemetry, per-event commits, replay digest, and immutable result/run-metadata storage
-- Independent capability/protocol adherence and integrity evaluation
-- Tauri IPC with mock/connected controls and live React telemetry/action-trace rendering
+## What is actually implemented
 
-### Partial
+The honest list. Anything not here does not exist, and the UI does not offer it.
 
-- The broker decides authorization, but only `process.spawn` is performed. Authorized filesystem and network capabilities still stop the run.
-- A contained child keeps its parent's user and privileges. It is refused writes outside its designated directory and reads of the benchmark's declared protected paths, but it can still open network connections, load native code, and read anything else its user can read.
-- There is no Linux or macOS containment, so a spawn on those platforms fails closed.
-- Connected runs are local-first but disclose the model-facing observation to the configured provider.
-- Run metadata and action traces are durable, but there is no cross-process trace verifier or remote-provider replay guarantee.
-- The desktop application has no run cancellation or API-spend/rate-limit control.
+### Benchmarks
 
-### Deferred
+| Benchmark | Status | Notes |
+|---|---|---|
+| Grid World | Implemented | Partially observable planning on a replayable seed. |
+| Sandbox Process | Implemented | A real contained process. `filesystem.*`, `network.connect`, and `environment.inspect` are **authorized and refused at execution time** — not executed. Only `process.spawn` has a real executor. |
 
-- Executing authorized `filesystem.read`, `filesystem.write`, and `network.connect`
-- Syscall-level and platform-wide OS sandboxing (seccomp/namespaces on Linux, AppContainer/restricted tokens, filesystem virtualization, network isolation)
-- Ollama-specific or other provider-specific adapters beyond the OpenAI-compatible adapter
-- Auth, multi-user support, cloud sync, and additional capability dimensions
+### Arena
 
-## License
+| Game | Status |
+|---|---|
+| Tic-Tac-Toe | Implemented, with a perfect minimax ceiling and a first-legal floor. |
+| Connect Four | Schema only. Not offered. |
+| Rock Paper Scissors | Schema only. Not offered. |
+| Battleship | Schema only. Not offered. |
 
-MIT. See `LICENSE`.
+A game appears in the UI only when it actually plays. Per-ply board history comes from the
+engine's own telemetry, so the board shown is a recording — the frontend holds no game state.
+
+There is no human seat, and none was invented. `play_match` is atomic: a match runs agent
+against agent to completion, so there is never a turn for a user to take.
+
+### Providers
+
+| Provider | Protocol |
+|---|---|
+| OpenAI-compatible | Chat Completions. Verified working against a local Ollama. Also reaches vLLM, LM Studio, and llama.cpp where they expose `/v1`. |
+| Anthropic | Messages API. Multi-block content joined, so a reply split across blocks is not misreported as unparseable. |
+| Gemini | `generateContent`. The model name is constrained, because it goes into a URL path. |
+
+Deliberately absent: a native Ollama adapter (the verified OpenAI-compatible path already reaches
+it — a second adapter would be a second thing to test for no new capability), and an OpenCode
+provider (a coding agent, not a model endpoint; there is no API to point at).
+
+Keys are read from the environment at call time, never stored, never sent to the frontend, and
+redacted from anything that could reach a log or a result bundle.
+
+### Security probes
+
+Six, all pre-existing in the agent registry and all executed through the real broker and sandbox
+path: evaluator-access, policy-violation, sandbox-violation, environment-tampering, network, and
+forbidden-action-spam.
+
+The Security Lab reports **which layer acted**, because the distinction is the substance:
+
+- the policy gate recorded an attempt and denied it → the boundary held;
+- the broker refused a capability request → enforcement working;
+- neither → nothing was tested, which is *not* a pass.
+
+A security probe is a **test of the boundary**, not a subject under evaluation. An attempt it
+provokes is evidence the enforcement layers work. The same recorded event is a genuine finding when
+a model under evaluation produces it, which is why the Brain panel reports it as a finding and the
+Security Lab does not. There is no combined "security events" number, because such a number rises
+as the sandbox works correctly.
+
+## Replay
+
+Replay reconstructs recorded data. It does not re-run a match, re-query a model, or contact any
+provider. It holds no engine, no broker, and no process launcher, so it cannot execute or authorize
+anything — asserted structurally.
+
+- A recording that captured every intermediate board is **re-executable**: you can step it.
+- A recording that captured only an event stream is **inspection only**: you can read what was
+  reported and when. The intermediate states were never recorded and are not reconstructed.
+
+Where a recording is incomplete, the gap is named rather than filled. Interpolation would be
+fabricating history.
+
+## Reproducibility
+
+Every completed run records a benchmark identity and version, an agent identity, a seed, a
+configuration fingerprint, a prompt-template version, a replay digest, and a token count where the
+provider supplied one.
+
+Distinguish two things that are easy to conflate:
+
+- **Deterministic replay** — reconstructing a recorded run. Always reproduces.
+- **Rerunning an external model** — a new measurement. An external model's output is not
+  guaranteed to repeat, and PROBE//LAB does not claim it is. Its digests are recorded so a
+  difference is visible, not so it can be waved away.
+
+## Limitations
+
+Stated plainly, because a laboratory that hides its limits is not one you can rely on.
+
+- **AppContainer containment is not complete OS isolation.** It restricts the token and package
+  access. It says nothing about every kernel surface, and no test claims otherwise.
+- **`filesystem.read`, `filesystem.write`, and `network.connect` are authorization-only.** The broker
+  authorizes and the execution is refused at run time. Only `process.spawn` really executes.
+- **Containment is Windows-only.** Other platforms are honestly unsupported rather than faked.
+- **An interrupted experiment is not resumed.** A crash mid-run leaves the recorded data intact but
+  writes no interrupted marker, so a half-run is not currently distinguishable from an abandoned
+  one.
+- **The multi-episode `Harness` is not on the product's path.** It is used by the benchmark quality
+  tests; the `Runner` has its own loop, and the UI runs that.
+- **The command center is one scrolling column**, not a navigable shell. Every panel is reachable;
+  none can be focused.
+- **External model nondeterminism** is not reproducible, by anyone.
+- **No comparison or settings panel exists yet.**
+- **No human seat in the arena**, and no LLM-powered Brain. The Brain is deterministic
+  orchestration — it has no model behind it and does not pretend to.
+
+See [docs/feature-matrix.json](docs/feature-matrix.json) for the machine-readable version, which CI
+checks against the repository.
+
+## Further reading
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — the component contracts and why each one is where it is
+- [SECURITY.md](SECURITY.md) — trust boundaries, containment, and the integrity taxonomy
+- [docs/feature-matrix.json](docs/feature-matrix.json) — what is implemented, verified by CI
