@@ -37,7 +37,7 @@ section 9.
 | Area | State | Evidence |
 | --- | --- | --- |
 | Rust workspace builds, lints, formats | verified | `cargo build --workspace --all-features --locked`, `clippy -D warnings`, `cargo fmt --check` |
-| 720 Rust tests | passing | `cargo test --workspace --all-targets --all-features --locked` |
+| 731 Rust tests | passing | `cargo test --workspace --all-targets --all-features --locked` |
 | 180 frontend tests | passing | `pnpm test` in `apps/desktop` |
 | Windows process containment | verified | 30 tests in `crates/sandbox/tests/`, including 9 that launch a real child under a real AppContainer identity |
 | Dependency and licence policy | verified | `cargo deny check` — advisories, bans, licences, sources all `ok` |
@@ -46,6 +46,7 @@ section 9.
 | IPC command registration | verified | `every_command_the_frontend_invokes_is_registered` compares the frontend's real `invoke` calls against the real `generate_handler!` list |
 | Feature matrix | verified | `python scripts/check-feature-matrix.py` |
 | Adversarial self-tests | passing | `crates/lab/tests/adversarial.rs`, 24 tests including live loopback servers |
+| End-to-end user paths | passing | `crates/lab/tests/end_to_end.rs`, 11 tests across experiment, security, arena, settings, comparison, and provider |
 
 ### 2.1 Supply chain
 
@@ -424,7 +425,7 @@ Expected on the host named above:
 | --- | --- |
 | `cargo fmt --all --check` | clean |
 | `cargo clippy ... -D warnings` | clean |
-| `cargo test --workspace --all-targets --all-features --locked` | **720 passed, 0 failed** |
+| `cargo test --workspace --all-targets --all-features --locked` | **731 passed, 0 failed** |
 | `cargo build --workspace --all-features --locked` | success |
 | `cargo deny --log-level error check` | `advisories ok, bans ok, licenses ok, sources ok` |
 | `python scripts/check-feature-matrix.py` | consistent |
