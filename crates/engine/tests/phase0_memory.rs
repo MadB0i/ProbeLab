@@ -157,6 +157,10 @@ fn synthetic_stream() -> Vec<ModelRequest> {
                 Action::Right,
                 Action::Wait,
             ],
+            // The grid-world benchmark declares no spawn plan, so no process is on offer. Stated
+            // here rather than defaulted so a change to the benchmark would surface as a mismatch
+            // in these phase-0 controls instead of passing silently.
+            process_spawn_available: false,
             history: Vec::new(),
         });
     }
@@ -524,6 +528,9 @@ fn replay<P: ModelProvider>(policy: P, seed: u64, budget: u32) -> Vec<Action> {
             episode_id: "phase0-replay".to_owned(),
             turn,
             available_actions: sandbox.available_actions(),
+            // The grid world declares no spawn plan; this replay drives a provider directly and
+            // never goes through the engine loop that would read it from the benchmark.
+            process_spawn_available: false,
             observation: observation.clone(),
             history: window_of(&completed),
         };

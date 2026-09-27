@@ -92,6 +92,10 @@ fn main() {
             turn,
             observation: observation.clone(),
             available_actions: available.clone(),
+            // The trace example drives a provider directly for diagnosis rather than running a
+            // benchmark episode, so it advertises no process. The engine loop is what fills this in
+            // from the benchmark's trusted plan, and this path never reaches it.
+            process_spawn_available: false,
             history: Vec::new(),
         };
         let decision = provider.predict(request).expect("decision");

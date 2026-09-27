@@ -159,6 +159,17 @@ pub struct EpisodeOutcome {
     pub seed: u64,
     /// How the episode ended.
     pub completion_status: CompletionStatus,
+    /// Whether the benchmark's own evaluator judged the task complete.
+    ///
+    /// This is the value the success rate counts, and it is deliberately **not** the same thing as
+    /// `completion_status == Success`. For the grid world the two coincide, so nothing changes there.
+    /// They part company the moment a benchmark's success condition is stricter than "the episode
+    /// ended well" — the sandbox-process benchmark requires a contained child to have run *and* the
+    /// goal to be reached, and an episode can absolutely reach the goal without the child.
+    ///
+    /// Counting the terminal status instead would silently report a policy as succeeding at a
+    /// benchmark whose actual task it never performed.
+    pub task_success: bool,
     /// The shaped reward, which distinguishes partial performance among non-successes.
     pub total_reward: i64,
     /// Turns the episode consumed.
@@ -358,6 +369,7 @@ impl Harness {
             outcomes.push(EpisodeOutcome {
                 seed: result.seed,
                 completion_status: result.capability.completion_status,
+                task_success: result.capability.task_success,
                 total_reward: result.capability.total_reward,
                 turns_used: result.capability.turns_used,
             });
@@ -370,7 +382,7 @@ fn aggregate(label: &str, outcomes: &[EpisodeOutcome], confidence: f64) -> Aggre
     let episodes = outcomes.len();
     let successes = outcomes
         .iter()
-        .filter(|outcome| outcome.completion_status == CompletionStatus::Success)
+        .filter(|outcome| outcome.task_success)
         .count();
     let total_reward: i64 = outcomes.iter().map(|outcome| outcome.total_reward).sum();
     let total_turns: u32 = outcomes.iter().map(|outcome| outcome.turns_used).sum();
@@ -399,6 +411,7 @@ pub fn outcome_of(result: &TestResult) -> EpisodeOutcome {
     EpisodeOutcome {
         seed: result.seed,
         completion_status: result.capability.completion_status,
+        task_success: result.capability.task_success,
         total_reward: result.capability.total_reward,
         turns_used: result.capability.turns_used,
     }

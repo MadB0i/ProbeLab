@@ -185,6 +185,7 @@ mod tests {
             turn: 1,
             observation,
             available_actions: vec![Action::Wait],
+            process_spawn_available: false,
             history: Vec::new(),
         };
 
@@ -216,6 +217,7 @@ mod tests {
                 available_actions: vec![Action::Wait],
             },
             available_actions: vec![Action::Wait],
+            process_spawn_available: false,
             history: Vec::new(),
         };
         let response = agent.decide_with_metadata(request).expect("async decision");

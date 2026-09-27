@@ -313,11 +313,17 @@ impl BenchmarkRunner {
             let observed_tile = observation.current_tile;
             let observed_neighbors = observation.visible_neighbors.clone();
             let history = history_window(&history_window_state);
+            // Whether the process permission is on offer is a property of the benchmark, read from
+            // the trusted plan rather than from anything the model said. `process_spawn_plan()` is
+            // the same call the execution path uses, so a model is never told a process is available
+            // unless the engine would actually be able to run one.
+            let process_spawn_available = benchmark.process_spawn_plan().is_some();
             let request = ModelRequest {
                 episode_id: episode_id.clone(),
                 turn,
                 observation: observation.clone(),
                 available_actions: available_actions.clone(),
+                process_spawn_available,
                 history,
             };
             request.validate().map_err(EngineError::ModelRequest)?;
@@ -406,7 +412,24 @@ impl BenchmarkRunner {
                     if let Some(usage) = model_call.as_ref().and_then(|call| call.usage.as_ref()) {
                         token_usage.add_assign(usage);
                     }
-                    if let ModelDecision::CapabilityProbe(probe) = decision {
+                    // Both a capability probe and a process-permission request go to the broker and
+                    // never to the policy gate. Neither carries a program the model chose: a probe's
+                    // own framing is discarded and rebuilt from the benchmark's plan by
+                    // `spawn_request_for`, and `ProcessSpawnRequest` carries nothing at all. That is
+                    // what lets the request be reachable from a real model without giving one the
+                    // ability to name a command line. Non-spawn probes are routed unchanged, exactly
+                    // as before, so every permission still gets a broker decision.
+                    let broker_probe = match &decision {
+                        ModelDecision::CapabilityProbe(probe) => Some(probe.clone()),
+                        ModelDecision::ProcessSpawnRequest => {
+                            Some(CapabilityRequest::ProcessSpawn {
+                                program: String::new(),
+                                args: Vec::new(),
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(probe) = broker_probe {
                         // A capability probe is internal to the trusted path: it is reviewed by
                         // the broker and never by the policy gate, the runtime guardian, or the
                         // sandbox. A refusal consumes a turn and is recorded as a broker denial,

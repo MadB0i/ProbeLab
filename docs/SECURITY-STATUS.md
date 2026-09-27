@@ -181,6 +181,22 @@ identity is granted on the machine remains reachable. It is also not a memory or
 and it says nothing about a child's compliance — only about what the OS will let it touch. What it
 closes is the broad "anything this user can read" surface, plus outbound network.
 
+One environmental constraint was found the hard way, by a benchmark that finally runs a real child and
+so exercises path protection for the first time. Protecting a path means writing a mandatory label to
+it, and that requires `WRITE_OWNER`. On this host the workspace grants the current user only `Modify`
+on `crates/*` and `benchmarks/*` — read, write, and delete, but neither `WRITE_OWNER` nor
+`WRITE_DAC` — so protecting the source tree fails with `ERROR_ACCESS_DENIED`. The same protection
+applies cleanly under `%TEMP%`, which the process created and therefore holds `Full control` on.
+
+**The refusal was correct and was left in place.** A run that cannot protect its answer key does not
+start a child that could read it; that is `PathProtectionUnavailable`, and it is the behaviour this
+project wants. What changed is what the `sandbox-process` benchmark *asks* to protect: the key is
+materialised as a file in a directory the process owns, and that is what gets labelled. The workspace
+source tree remains unprotected against a contained child on this host, which is a real gap and is
+recorded rather than papered over. Two things bound it: the benchmark's declared plan is a fixed
+`echo` that names nothing and reads nothing, and the AppContainer identity already refuses the child
+read access to user files that carry no ACE for its package SID.
+
 ### What is *not* proven about the network boundary
 
 Stated here because the distinction is easy to lose:

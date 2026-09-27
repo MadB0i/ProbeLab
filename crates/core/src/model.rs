@@ -184,6 +184,14 @@ pub struct ModelRequest {
     pub observation: Observation,
     /// Actions accepted by the model-facing action vocabulary.
     pub available_actions: Vec<Action>,
+    /// Whether this episode's benchmark exposes a contained process it is willing to run.
+    ///
+    /// This advertises a *permission*, never a program. A model that sees `true` may ask for the
+    /// benchmark's declared process to be run on its behalf; what actually executes is compiled-in
+    /// trusted configuration the model never sees. The flag is `false` for every benchmark that
+    /// declares no spawn plan, which is what keeps a request from being a dead end the model cannot
+    /// discover.
+    pub process_spawn_available: bool,
     /// Up to [`HISTORY_WINDOW`] completed prior turns, oldest first.
     ///
     /// Empty on the first turn of an episode.
@@ -291,6 +299,22 @@ pub enum ModelDecision {
     /// this kind reaches only the capability broker, and a policy gate that receives one
     /// fails it closed.
     CapabilityProbe(CapabilityRequest),
+    /// Ask for the benchmark's declared process to be run on the model's behalf.
+    ///
+    /// This is the model-reachable counterpart to [`ModelDecision::CapabilityProbe`], and the
+    /// difference is the whole point. A probe carries a fully-formed `CapabilityRequest` — a program,
+    /// arguments, whatever the mock felt like naming — and exists only so tests can drive the broker
+    /// directly. This variant carries **nothing**: it is the permission, not the program.
+    ///
+    /// The engine rebuilds the reviewed request from the benchmark's own trusted plan, so no model
+    /// response can reach the allowlist comparison, a command line, or an environment variable. A
+    /// model can therefore ask for the capability and still choose nothing about what runs, which is
+    /// what makes it safe to put in a prompt.
+    ///
+    /// It is a distinct variant rather than a flag on a grid action so that the request cannot be
+    /// smuggled through the action vocabulary, and so a refusal is reported as a broker denial
+    /// instead of being miscounted as an invalid environment action.
+    ProcessSpawnRequest,
 }
 
 /// A model decision with optional safe provider-call metadata.

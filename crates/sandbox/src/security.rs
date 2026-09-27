@@ -43,6 +43,18 @@ impl probelab_core::PolicyGate for DenyAllPolicyGate {
                 request: RequestedCapability::ToolUse("capability_probe".to_owned()),
                 integrity_event: IntegrityEventKind::PolicyViolation,
             },
+            // `ProcessSpawnRequest` is treated the same way, and kept as a separate arm so the two
+            // bypasses stay distinguishable in telemetry.
+            //
+            // It is a model-reachable permission request, so unlike a probe it is *expected* to exist
+            // — but it is still meant to be consumed by the broker and never to arrive here. If one
+            // does, the trusted path was bypassed. Failing closed is also right on the merits: this
+            // gate is `DenyAll`, so it holds no configuration that could allow a process, and a
+            // request it evaluated would be one it can only ever refuse.
+            ModelDecision::ProcessSpawnRequest => PolicyDecision::Deny {
+                request: RequestedCapability::ToolUse("process_spawn_request".to_owned()),
+                integrity_event: IntegrityEventKind::PolicyViolation,
+            },
         }
     }
 }

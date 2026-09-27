@@ -244,7 +244,64 @@ pub fn parse_action_response(
     raw: &str,
     available_actions: &[Action],
 ) -> Result<Action, ActionProtocolError> {
+    let object = single_action_object(raw.trim())?.ok_or(ActionProtocolError::Malformed)?;
+    let normalized = object.action.to_ascii_uppercase();
+    let action = match normalized.as_str() {
+        "MOVE_UP" => Action::Up,
+        "MOVE_DOWN" => Action::Down,
+        "MOVE_LEFT" => Action::Left,
+        "MOVE_RIGHT" => Action::Right,
+        "WAIT" => Action::Wait,
+        _ => return Err(ActionProtocolError::UnknownAction),
+    };
+    if available_actions.contains(&action) {
+        Ok(action)
+    } else {
+        Err(ActionProtocolError::OutOfVocabulary)
+    }
+}
+
+/// The action name a model emits to ask for the benchmark's declared process to be run.
+///
+/// It is a *permission* request and carries no program, argument, or environment variable. The engine
+/// supplies all of those from the benchmark's trusted plan, so nothing a model writes here can reach
+/// a command line.
+pub const REQUEST_PROCESS_ACTION: &str = "REQUEST_PROCESS";
+
+/// Parses one model response into a decision, including a process-permission request.
+///
+/// Kept separate from [`parse_action_response`] so the grid action vocabulary stays exactly the five
+/// movements. Folding the request in would mean either widening that vocabulary — which every
+/// environment would then have to advertise and defend — or special-casing a token inside a parser
+/// whose whole job is mapping a name to a grid action.
+///
+/// A request is only accepted when the episode actually offers one. A model that asks for a process
+/// in a benchmark that declares no spawn plan gets `UnknownAction`, the same treatment as any other
+/// invented token, rather than a special "not permitted" error. That keeps the model-facing protocol
+/// uniform: the model is told what is available and gets the ordinary failure for anything else.
+pub fn parse_decision_response(
+    raw: &str,
+    available_actions: &[Action],
+    process_spawn_available: bool,
+) -> Result<ModelDecision, ActionProtocolError> {
     let trimmed = raw.trim();
+    if process_spawn_available {
+        if let Some(object) = single_action_object(trimmed)? {
+            if object.action.eq_ignore_ascii_case(REQUEST_PROCESS_ACTION) {
+                return Ok(ModelDecision::ProcessSpawnRequest);
+            }
+        }
+    }
+    parse_action_response(raw, available_actions).map(ModelDecision::GridAction)
+}
+
+/// Extracts the single action object from a response, or `None` when the response is not a
+/// well-formed single object.
+///
+/// Sharing this with [`parse_action_response`] keeps the tolerance rules identical — prose and code
+/// fences around one object are fine, a second JSON value is not — so a response cannot be accepted
+/// by one path and rejected by the other for a formatting difference.
+fn single_action_object(trimmed: &str) -> Result<Option<ActionObject>, ActionProtocolError> {
     if trimmed.is_empty() {
         return Err(ActionProtocolError::Empty);
     }
@@ -270,20 +327,7 @@ pub fn parse_action_response(
             ActionProtocolError::Malformed
         }
     })?;
-    let normalized = object.action.to_ascii_uppercase();
-    let action = match normalized.as_str() {
-        "MOVE_UP" => Action::Up,
-        "MOVE_DOWN" => Action::Down,
-        "MOVE_LEFT" => Action::Left,
-        "MOVE_RIGHT" => Action::Right,
-        "WAIT" => Action::Wait,
-        _ => return Err(ActionProtocolError::UnknownAction),
-    };
-    if available_actions.contains(&action) {
-        Ok(action)
-    } else {
-        Err(ActionProtocolError::OutOfVocabulary)
-    }
+    Ok(Some(object))
 }
 
 fn json_object_end(input: &str, start: usize) -> Option<usize> {
@@ -348,6 +392,11 @@ struct PromptRequest<'a> {
     turn: u32,
     observation: PromptObservation<'a>,
     available_actions: Vec<&'static str>,
+    /// Whether `REQUEST_PROCESS` is on offer. Carried explicitly rather than folded into
+    /// `available_actions`, because it is a permission and not a movement: the grid vocabulary stays
+    /// exactly the five actions every environment defines, and no environment has to defend a
+    /// pseudo-move it never meant to offer.
+    process_spawn_available: bool,
 }
 
 impl<'a> From<&'a ModelRequest> for PromptRequest<'a> {
@@ -375,6 +424,7 @@ impl<'a> From<&'a ModelRequest> for PromptRequest<'a> {
                 .iter()
                 .map(|action| protocol_action_name(*action))
                 .collect(),
+            process_spawn_available: request.process_spawn_available,
         }
     }
 }
@@ -416,6 +466,34 @@ pub fn configuration_fingerprint(config: &OpenAiCompatibleConfig) -> String {
 
 const GRID_WORLD_PROMPT: &str = include_str!("../../../prompts/grid_world_v2.md");
 
+/// The system prompt for episodes whose benchmark exposes a contained process.
+///
+/// A second template rather than an amended one, deliberately. The grid-world prompt is versioned and
+/// its published numbers — greedy 0.286 against lookahead 0.943 over 70 held-out seeds — were measured
+/// with `grid_world_v2` exactly as written. Editing that file to mention a process it never offers
+/// would invalidate those numbers without changing what the grid world does, so the process
+/// benchmark gets its own version instead and the grid-world template stays byte-identical.
+const SANDBOX_PROCESS_PROMPT: &str = include_str!("../../../prompts/sandbox_process_v1.md");
+
+/// The versioned name of the process-capability prompt template.
+pub const SANDBOX_PROCESS_PROMPT_TEMPLATE_VERSION: &str = "sandbox_process_v1";
+
+/// Picks the system prompt and its version for one request.
+fn prompt_for(process_spawn_available: bool) -> (&'static str, &'static str) {
+    if process_spawn_available {
+        (
+            SANDBOX_PROCESS_PROMPT,
+            SANDBOX_PROCESS_PROMPT_TEMPLATE_VERSION,
+        )
+    } else {
+        (GRID_WORLD_PROMPT, GRID_WORLD_PROMPT_TEMPLATE_VERSION)
+    }
+}
+
+fn prompt_template_version_for(process_spawn_available: bool) -> &'static str {
+    prompt_for(process_spawn_available).1
+}
+
 /// An OpenAI-compatible asynchronous chat-completions provider.
 pub struct OpenAiCompatibleProvider {
     config: OpenAiCompatibleConfig,
@@ -456,7 +534,7 @@ impl OpenAiCompatibleProvider {
         );
         parameters.insert(
             "prompt_template_version".to_owned(),
-            serde_json::Value::String(GRID_WORLD_PROMPT_TEMPLATE_VERSION.to_owned()),
+            serde_json::Value::String(prompt_template_version_for(false).to_owned()),
         );
         parameters.insert(
             "environment_version".to_owned(),
@@ -499,6 +577,10 @@ impl OpenAiCompatibleProvider {
                 "model request could not be serialized",
             )
         })?;
+        // The system prompt is chosen from the same flag the model is shown, so a request can never be
+        // sent under a template that does not describe the action the model is being offered. The
+        // version travels back in the call metadata so a result bundle says which template ran.
+        let (system_prompt, template_version) = prompt_for(request.process_spawn_available);
         let endpoint = self.config.endpoint().map_err(|_| {
             ModelCallFailure::new(
                 ModelCallFailureKind::Configuration,
@@ -511,7 +593,7 @@ impl OpenAiCompatibleProvider {
             "max_tokens": self.config.max_tokens,
             "stream": false,
             "messages": [
-                {"role": "system", "content": GRID_WORLD_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": request_json},
             ],
         });
@@ -604,8 +686,12 @@ impl OpenAiCompatibleProvider {
             });
         };
         let sanitized_content = sanitize_response_text(&content, &api_key);
-        let action = match parse_action_response(&content, &request.available_actions) {
-            Ok(action) => action,
+        let decision = match parse_decision_response(
+            &content,
+            &request.available_actions,
+            request.process_spawn_available,
+        ) {
+            Ok(decision) => decision,
             Err(error) => {
                 let kind = match error {
                     ActionProtocolError::Empty => ModelCallFailureKind::EmptyResponse,
@@ -630,11 +716,11 @@ impl OpenAiCompatibleProvider {
             }
         };
         Ok(ModelResponse {
-            decision: ModelDecision::GridAction(action),
+            decision,
             call: Some(ModelCallInfo {
                 provider: "openai-compatible".to_owned(),
                 model: self.config.model.clone(),
-                prompt_template_version: GRID_WORLD_PROMPT_TEMPLATE_VERSION.to_owned(),
+                prompt_template_version: template_version.to_owned(),
                 request_id,
                 finish_reason: choice
                     .finish_reason
@@ -1732,10 +1818,11 @@ fn orthogonal(cell: (u8, u8), grid_size: GridSize) -> Vec<(u8, u8)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        configuration_fingerprint, parse_action_response, ActionProtocolError, MockModelConfig,
-        MockModelProvider, OpenAiCompatibleConfig, OpenAiCompatibleConfigError,
-        OpenAiCompatibleProvider, PromptRequest, GRID_WORLD_PROMPT,
-        GRID_WORLD_PROMPT_TEMPLATE_VERSION,
+        configuration_fingerprint, parse_action_response, parse_decision_response, prompt_for,
+        prompt_template_version_for, ActionProtocolError, MockModelConfig, MockModelProvider,
+        OpenAiCompatibleConfig, OpenAiCompatibleConfigError, OpenAiCompatibleProvider,
+        PromptRequest, GRID_WORLD_PROMPT, GRID_WORLD_PROMPT_TEMPLATE_VERSION,
+        REQUEST_PROCESS_ACTION, SANDBOX_PROCESS_PROMPT,
     };
     use probelab_core::{
         Action, AsyncModelProvider, Coordinate, GridSize, ModelCallFailureKind, ModelDecision,
@@ -1787,6 +1874,105 @@ mod tests {
         assert_eq!(
             parse_action_response("{\"action\":\"WAIT\"}", &[]),
             Err(ActionProtocolError::OutOfVocabulary),
+        );
+    }
+
+    /// The process request is model-reachable, and only when the episode actually offers one.
+    #[test]
+    fn the_process_request_parses_only_when_the_episode_offers_one() {
+        let available = [Action::Up, Action::Wait];
+
+        // Offered: the request is a first-class decision.
+        assert_eq!(
+            parse_decision_response("{\"action\":\"REQUEST_PROCESS\"}", &available, true),
+            Ok(ModelDecision::ProcessSpawnRequest),
+        );
+        // Case-insensitive, like every other action name.
+        assert_eq!(
+            parse_decision_response("{\"action\":\"request_process\"}", &available, true),
+            Ok(ModelDecision::ProcessSpawnRequest),
+        );
+        // The same tolerance a movement gets, because both go through one extractor.
+        assert_eq!(
+            parse_decision_response(
+                "Sure! ```json\n{\"action\":\"REQUEST_PROCESS\"}\n```",
+                &available,
+                true,
+            ),
+            Ok(ModelDecision::ProcessSpawnRequest),
+        );
+
+        // Not offered: refused as an unknown action, exactly like any other invented token. It does
+        // not get a bespoke "permission denied" error, because a model should not be able to tell
+        // the difference between "that does not exist" and "that is refused here".
+        assert_eq!(
+            parse_decision_response("{\"action\":\"REQUEST_PROCESS\"}", &available, false),
+            Err(ActionProtocolError::UnknownAction),
+        );
+
+        // The request is not a grid action and never becomes one.
+        assert_eq!(
+            parse_decision_response("{\"action\":\"MOVE_UP\"}", &available, true),
+            Ok(ModelDecision::GridAction(Action::Up)),
+        );
+        assert_eq!(
+            parse_action_response("{\"action\":\"REQUEST_PROCESS\"}", &available),
+            Err(ActionProtocolError::UnknownAction),
+            "the grid vocabulary must not grow a process pseudo-action"
+        );
+    }
+
+    /// The two decision paths agree on formatting, so a response cannot be accepted by one and
+    /// rejected by the other for a difference in how it was wrapped.
+    #[test]
+    fn the_process_request_shares_the_grid_parser_tolerance_and_refusals() {
+        let available = [Action::Wait];
+        for raw in [
+            "",
+            "[]",
+            "{}",
+            "{\"action\":\"WAIT\",\"extra\":true}",
+            "{\"action\":\"WAIT\"}{\"action\":\"REQUEST_PROCESS\"}",
+        ] {
+            assert_eq!(
+                parse_decision_response(raw, &available, true),
+                parse_action_response(raw, &available).map(ModelDecision::GridAction),
+                "the two paths disagreed about {raw:?}"
+            );
+        }
+    }
+
+    /// The request is advertised in the prompt exactly when it is offered, and the grid-world
+    /// template stays byte-identical.
+    ///
+    /// The second half matters as much as the first. The grid-world prompt's published numbers were
+    /// measured with it as written, so a benchmark that offers a process must not be able to change
+    /// what the grid world asks a model. Asserting the token is *absent* there is what keeps that
+    /// number meaningful, and it fails loudly if someone amends the file to mention a process the grid
+    /// world never offers.
+    #[test]
+    fn the_process_request_is_advertised_only_by_the_prompt_that_offers_it() {
+        assert!(
+            SANDBOX_PROCESS_PROMPT.contains(REQUEST_PROCESS_ACTION),
+            "the process prompt must document the action it offers"
+        );
+        assert!(
+            !GRID_WORLD_PROMPT.contains(REQUEST_PROCESS_ACTION),
+            "the grid-world prompt must not mention a process it never offers, or its published \
+             numbers stop describing what was measured"
+        );
+        assert_eq!(
+            prompt_template_version_for(false),
+            GRID_WORLD_PROMPT_TEMPLATE_VERSION
+        );
+        assert_eq!(
+            prompt_template_version_for(true),
+            super::SANDBOX_PROCESS_PROMPT_TEMPLATE_VERSION
+        );
+        assert_ne!(
+            prompt_for(false).0,
+            prompt_for(true).0,
+            "a benchmark that offers a process must not be sent the grid-world instructions"
         );
     }
 
@@ -2170,6 +2356,7 @@ mod tests {
                 Action::Right,
                 Action::Wait,
             ],
+            process_spawn_available: false,
             history: Vec::new(),
         }
     }

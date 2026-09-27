@@ -619,6 +619,7 @@ fn b4_a_request_carrying_an_over_long_history_is_refused_rather_than_truncated()
             ..base.clone()
         },
         available_actions: base.available_actions.clone(),
+        process_spawn_available: false,
         history: Vec::new(),
     };
     request.history = (0..=HISTORY_WINDOW)

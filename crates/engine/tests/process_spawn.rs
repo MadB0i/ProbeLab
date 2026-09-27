@@ -187,6 +187,16 @@ fn probe_spawn(program: &str) -> ModelDecision {
     })
 }
 
+/// The model asks for the process permission the way a *real* model can: by naming nothing.
+///
+/// This is the model-reachable request. The contrast with [`probe_spawn`] is the whole point — a
+/// probe carries a program and arguments chosen by whatever produced it, whereas this variant has no
+/// fields at all, so there is nothing for a model to put a command line into. That is what makes it
+/// safe to document in a prompt.
+fn request_process() -> ModelDecision {
+    ModelDecision::ProcessSpawnRequest
+}
+
 fn comspec() -> String {
     std::env::var("ComSpec").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".to_owned())
 }
@@ -349,6 +359,111 @@ fn the_reviewed_request_is_the_benchmarks_plan_and_not_the_models_framing() {
         "the benchmark's own authorized plan is what ran"
     );
     assert_eq!(completed.result.integrity.broker_process_spawn_blocks, 0);
+}
+
+// ---------------------------------------------------------------------------
+// The model-reachable request. This is the part a real provider can actually produce.
+// ---------------------------------------------------------------------------
+
+/// A model that asks for the process permission — naming nothing — reaches containment.
+///
+/// This is the test the whole phase turns on. Before it, `CapabilityProbe` was the only way to ask
+/// for a spawn and it is deliberately unreachable from any real provider, so a benchmark could
+/// declare a plan, grant the program, and still never be asked. `ProcessSpawnRequest` carries no
+/// fields, so there is nothing in it for a model to abuse, and the request the broker reviewed is
+/// rebuilt from the benchmark's own plan.
+///
+/// The pairing with the probe-based test above is what makes the claim checkable: both produce a
+/// spawn, and neither can put a model-chosen program on the command line.
+#[test]
+fn a_model_can_ask_for_the_process_permission_and_reach_containment() {
+    let root = temporary_root("model-request");
+    let protected = protected_dir(&root, "evaluator");
+    let benchmark = SpawnBenchmark::granting(
+        &comspec(),
+        &["/D", "/C", "echo requested-by-a-real-model"],
+        vec![protected],
+        SUGGESTED_TIMEOUT,
+    );
+
+    let result = run(
+        &benchmark,
+        Box::new(ScriptedAgent::new(vec![
+            request_process(),
+            ModelDecision::GridAction(Action::Wait),
+        ])),
+        &root,
+    );
+    let (completed, observed) = match result {
+        Ok(value) => value,
+        // Without OS containment the authorized spawn fails closed, which is still the correct
+        // outcome: the request was understood and the run stopped rather than pretending.
+        Err(EngineError::ProcessContainment(failure)) => {
+            assert_eq!(failure.kind, ContainmentFailureKind::UnsupportedPlatform);
+            remove_root(&root);
+            return;
+        }
+        Err(other) => panic!("unexpected engine error: {other:?}"),
+    };
+    remove_root(&root);
+
+    let lifecycles: Vec<&ProcessLifecycle> = observed.iter().filter_map(lifecycle_of).collect();
+    assert_eq!(
+        lifecycles.len(),
+        1,
+        "the permission request did not reach containment exactly once: {lifecycles:?}"
+    );
+    assert!(
+        matches!(lifecycles[0].decision, ProcessAuthorization::Authorized),
+        "the benchmark's declared plan was authorized"
+    );
+    assert_eq!(
+        completed.result.integrity.broker_process_spawn_blocks, 0,
+        "an authorized request must not also be counted as blocked"
+    );
+    assert_eq!(
+        completed.result.integrity.policy_violations, 0,
+        "the request must be consumed by the broker and never reach the deny-all policy gate"
+    );
+    assert_eq!(
+        completed.result.integrity.sandbox_violations, 0,
+        "asking for a permission the benchmark offers is not a sandbox violation"
+    );
+}
+
+/// A request in a benchmark that declares no plan is refused, and starts nothing.
+///
+/// The model-reachable request must not become a way to probe for what is installed. With no plan
+/// there is nothing to rebuild the reviewed request from, so the broker sees an empty program, the
+/// allowlist comparison fails, and the refusal is recorded as a broker denial — the same treatment a
+/// named probe gets. Nothing is asked of the operating system.
+#[test]
+fn a_process_request_in_a_benchmark_with_no_plan_is_refused_and_starts_nothing() {
+    let root = temporary_root("no-plan");
+    let benchmark = SpawnBenchmark::granting_nothing();
+    let (completed, observed) = run(
+        &benchmark,
+        Box::new(ScriptedAgent::new(vec![request_process()])),
+        &root,
+    )
+    .expect("the run completes");
+    remove_root(&root);
+
+    let denial = observed
+        .iter()
+        .find_map(|event| event.broker_denial.as_ref())
+        .expect("a broker denial was recorded");
+    assert_eq!(denial.permission, CapabilityPermission::ProcessSpawn);
+    assert_eq!(
+        denial.integrity_event,
+        IntegrityEventKind::BrokerProcessSpawnBlocked
+    );
+    assert_eq!(completed.result.integrity.broker_process_spawn_blocks, 1);
+    assert_eq!(completed.result.integrity.policy_violations, 0);
+    assert!(
+        observed.iter().all(|event| lifecycle_of(event).is_none()),
+        "a request in a benchmark with no plan must not reach the operating system"
+    );
 }
 
 // ---------------------------------------------------------------------------

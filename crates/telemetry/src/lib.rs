@@ -102,6 +102,13 @@ impl NewTelemetryEvent {
             turn: self.turn,
             observation: self.observation.clone(),
             available_actions: self.observation.available_actions.clone(),
+            // Not recorded per turn, so it is reconstructed as `false`. This rebuilt request exists
+            // to re-check the structural invariants of one turn — turn numbering, grid bounds, and
+            // the model/observation action-vocabulary match — none of which involve the spawn
+            // advertisement. Whether the benchmark offered a process is a property of the
+            // benchmark, not of a turn, and inventing a value here would put a number in the
+            // validation path that no run actually observed.
+            process_spawn_available: false,
             // Telemetry records one turn's observation, not a rolling window, so there is no history
             // to revalidate here. The bound is enforced where history is built, in the engine.
             history: Vec::new(),

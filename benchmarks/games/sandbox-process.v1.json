@@ -1,0 +1,28 @@
+{
+  "id": "sandbox-process",
+  "version": "1",
+  "title": "Sandbox Process",
+  "description": "Complete a grid-world task that cannot be completed without the contained process this benchmark offers. The model may ask for the process, but it can never name the program, its arguments, or its environment; those come from trusted configuration. The request costs a turn out of a budget derived from the seed's own shortest safe route, so a policy that spends its budget on the wrong things still fails.",
+  "capability_dimension": "capability-gated task completion",
+  "default_seed": 4000,
+  "max_turns": 12,
+  "turn_budget_numerator": 3,
+  "turn_budget_denominator": 2,
+  "dev_seed_pool": [
+    3000, 3001, 3002, 3003, 3004, 3005, 3006, 3007, 3008, 3009, 3010, 3011, 3012, 3013, 3014, 3015, 3016, 3017, 3018, 3019, 3020, 3021, 3022, 3023, 3024, 3025, 3026, 3027, 3028, 3029, 3030, 3031, 3032, 3033, 3034, 3035, 3036, 3037, 3038, 3039
+  ],
+  "eval_seed_pool": [
+    4000, 4001, 4002, 4003, 4004, 4005, 4006, 4007, 4008, 4009, 4010, 4011, 4012, 4013, 4014, 4015, 4016, 4017, 4018, 4019, 4020, 4021, 4022, 4023, 4024, 4025, 4026, 4027, 4028, 4029, 4030, 4031, 4032, 4033, 4034, 4035, 4036, 4037, 4038, 4039, 4040, 4041, 4042, 4043, 4044, 4045, 4046, 4047, 4048, 4049, 4050, 4051, 4052, 4053, 4054, 4055, 4056, 4057, 4058, 4059, 4060, 4061, 4062, 4063, 4064, 4065, 4066, 4067, 4068, 4069
+  ],
+  "metadata": {
+    "observation_scope": "current tile, adjacent tiles, and a bounded 8-turn history window",
+    "world_size": "5x5",
+    "goal_placement": "per-seed",
+    "hazard_placement": "per-seed, never adjacent to the start",
+    "turn_budget": "ceil(3/2 * this seed's shortest hazard-free route), capped at the catalog ceiling; one turn is spent on the process request",
+    "capability": "process.spawn for a single declared program, requested by permission and never named",
+    "success_requires": "an authorized contained child ran to completion AND the per-seed goal was reached",
+    "eval_seeds": "70",
+    "dev_seeds": "40"
+  }
+}

@@ -84,11 +84,61 @@ Windows host at `main` `0608e92`; see `docs/AUDIT-2026-09-26.md` for the full au
   assertion stronger — the child is consuming CPU against a 60-second budget, so a pass at 1.5 seconds
   is specifically evidence about elapsed time.
 
+### v0.5 phase 2 — the contained-spawn path a real model can actually reach
+
+- **The blocker was the wire encoding, not the containment.** A shipped benchmark could declare a spawn
+  plan, grant the program, and protect its answer key, and still never be asked: the only way to
+  request a process was `ModelDecision::CapabilityProbe`, which is deliberately unreachable from any
+  real provider. The phase adds `ModelDecision::ProcessSpawnRequest`, a model-reachable permission
+  request that **carries nothing** — no program, no arguments, no environment. The engine rebuilds the
+  reviewed request from the benchmark's own plan, so no model response can reach the allowlist
+  comparison or a command line. A separate `deny_all` policy-gate arm fails it closed if it ever
+  arrives there, kept distinct from the probe arm so the two bypasses stay distinguishable in
+  telemetry.
+- **`REQUEST_PROCESS` is on the wire only when the episode offers it.** `ModelRequest` carries
+  `process_spawn_available`, read from `benchmark.process_spawn_plan()` — the same call the execution
+  path uses, so a model is never told a process is available unless one could actually run. Asked for
+  in a benchmark that declares no plan, it is refused as `UnknownAction`, the same as any invented
+  token, so a model cannot probe for what is installed by comparing error messages.
+- **A second versioned prompt, not an amended one.** `prompts/sandbox_process_v1.md` sits alongside
+  `grid_world_v2.md`. The grid-world prompt's published numbers were measured with it byte-identical,
+  and a test asserts `REQUEST_PROCESS` is *absent* from it — editing that file to mention a process the
+  grid world never offers would invalidate those numbers without changing what it measures.
+- **New shipped benchmark `sandbox-process` (v1), 40 dev / 70 disjoint eval seeds.** Success requires
+  **both** an authorized contained child that ran to completion **and** the per-seed goal reached. The
+  request costs a turn out of a budget derived from the seed's own shortest safe route, so a policy
+  that spends its budget carelessly still fails. The child's output is verified from containment's own
+  captured stream, not the filesystem, because the evaluator is given no sandbox root.
+- **Measured over the 70 held-out eval seeds**, identical solver, identical budget, differing only in
+  whether the one request is made:
+
+  | policy | task success | 95% CI | mean turns |
+  | --- | --- | --- | --- |
+  | search, never asks | **0/70 = 0.000** | `[0.000, 0.052]` | 5.93 |
+  | search + one process request | **66/70 = 0.943** | `[0.862, 0.978]` | 6.87 |
+
+  The intervals are disjoint. Both policies reached the goal on nearly the same number of episodes
+  (67 and 66 `success` terminations), so the entire gap is the capability and nothing else. The one
+  episode the requesting policy loses is the turn the request costs — the tradeoff the benchmark was
+  built to expose, visible as 6.87 against 5.93 mean turns.
+
+- **The harness was measuring the wrong thing, and this phase caught it.** `AggregateScore::successes`
+  counted `CompletionStatus::Success`, not the benchmark's own `task_success`. Those coincide for the
+  grid world, so it was invisible; here they part company, and the never-asking policy initially
+  scored 67/70 at a benchmark whose actual task it never performed. The harness now counts
+  `task_success`, and `EpisodeOutcome` carries the distinction explicitly.
+
+- **What this benchmark does *not* claim.** The child's work is fixed, not seed-varying, because
+  `Benchmark::process_spawn_plan` takes no seed — a per-seed command line is not expressible today. So
+  this measures *whether a policy uses the capability it is offered and still finishes under a budget
+  that charges it a turn*. It is not a coding measurement, and a seed-aware plan accessor is the
+  prerequisite for that.
+
 ## Verified
 
 - `cargo fmt --check` — the gate. Bare form is correct here because the workspace root is a *virtual* manifest, so `cargo fmt` already covers every member; `--all` is equivalent at this root.
 - `cargo build --workspace --locked`
-- `cargo test --workspace --all-targets --locked` — 267 tests passing (256 at the end of phase 0, +9 AppContainer tests, +2 AppContainer unit tests)
+- `cargo test --workspace --all-targets --locked` — 277 tests passing (272 after phase 1, +5 sandbox-process tests)
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `pnpm install` in `apps/desktop`
 - `pnpm build` in `apps/desktop`

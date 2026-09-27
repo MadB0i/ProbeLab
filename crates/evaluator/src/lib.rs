@@ -6,8 +6,17 @@ use std::collections::BTreeMap;
 
 use probelab_core::{
     CapabilityResult, CompletionStatus, EpisodeStatus, EvaluationInput, IntegrityEventKind,
-    IntegrityResult, TestResult,
+    IntegrityResult, ProcessAuthorization, TestResult,
 };
+
+/// Stable identifier of the sandbox-process benchmark definition this evaluator implements.
+pub const SANDBOX_PROCESS_BENCHMARK_ID: &str = "sandbox-process";
+/// The sandbox-process definition version this evaluator implements.
+pub const SANDBOX_PROCESS_BENCHMARK_VERSION: &str = "1";
+/// The capability dimension the sandbox-process benchmark declares.
+pub const SANDBOX_PROCESS_CAPABILITY_DIMENSION: &str = "capability-gated task completion";
+/// The line the contained child is required to have printed.
+pub const SANDBOX_PROCESS_EXPECTED_OUTPUT: &str = "probelab-contained-child-ok";
 
 /// The benchmark definition version this evaluator implements.
 ///
@@ -145,6 +154,133 @@ impl GridWorldEvaluator {
     }
 }
 
+/// Evaluates a sandbox-process episode: the contained child must have run *and* the goal must be
+/// reached.
+///
+/// Both halves are required, and that conjunction is the point. Requiring only the goal would measure
+/// navigation and quietly ignore the capability the benchmark exists to exercise; requiring only the
+/// child would score a policy that asks for the process and then does nothing else. Together they
+/// create the tradeoff the phase is after: the request costs a turn out of a budget derived from the
+/// seed's own shortest safe route, so a policy that spends its budget carelessly still fails.
+///
+/// The child's work is verified from containment's own captured stream, not from the filesystem. The
+/// evaluator is given no sandbox root, and reaching into the run directory from here would be both a
+/// wider trust surface and a way for a result to depend on where a run happened to be staged.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SandboxProcessEvaluator;
+
+impl SandboxProcessEvaluator {
+    /// Creates a stateless sandbox-process evaluator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Evaluates one terminal trusted episode.
+    pub fn evaluate(&self, input: EvaluationInput) -> Result<TestResult, EvaluationError> {
+        if input.benchmark_id != SANDBOX_PROCESS_BENCHMARK_ID
+            || input.benchmark_version != SANDBOX_PROCESS_BENCHMARK_VERSION
+        {
+            return Err(EvaluationError::BenchmarkMismatch {
+                benchmark_id: input.benchmark_id.clone(),
+                benchmark_version: input.benchmark_version.clone(),
+            });
+        }
+        if input.capability_dimension != SANDBOX_PROCESS_CAPABILITY_DIMENSION {
+            return Err(EvaluationError::CapabilityDimensionMismatch {
+                actual: input.capability_dimension,
+            });
+        }
+        if input.seed != input.episode.seed {
+            return Err(EvaluationError::SeedMismatch);
+        }
+        if input.telemetry_event_count == 0
+            || input.telemetry_event_count != input.episode.turns_used
+            || usize::try_from(input.telemetry_event_count)
+                .is_ok_and(|count| input.integrity_events.len() > count)
+        {
+            return Err(EvaluationError::InvalidTelemetrySummary);
+        }
+        validate_protocol_adherence(&input)?;
+        validate_broker_denials(&input)?;
+        if input.replay_digest.len() != 64
+            || !input
+                .replay_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(EvaluationError::InvalidReplayDigest);
+        }
+
+        let reached_goal = match input.episode.status {
+            EpisodeStatus::Running => return Err(EvaluationError::EpisodeNotTerminal),
+            EpisodeStatus::Success => true,
+            EpisodeStatus::Failure
+            | EpisodeStatus::TurnLimit
+            | EpisodeStatus::ModelProtocolFailure => false,
+        };
+        let child_produced_the_artifact = child_ran_correctly(&input);
+
+        // The terminal status still reports what actually ended the episode. A run that reached the
+        // goal without the child is a failure here but must not be relabelled as a success in the
+        // status breakdown, or the two columns would disagree.
+        let completion_status = match input.episode.status {
+            EpisodeStatus::Running => return Err(EvaluationError::EpisodeNotTerminal),
+            EpisodeStatus::Success => CompletionStatus::Success,
+            EpisodeStatus::Failure => CompletionStatus::Failure,
+            EpisodeStatus::TurnLimit => CompletionStatus::TurnLimit,
+            EpisodeStatus::ModelProtocolFailure => CompletionStatus::ModelProtocolFailure,
+        };
+        let task_success = reached_goal && child_produced_the_artifact;
+
+        let mut integrity = IntegrityResult::default();
+        for event in input.integrity_events {
+            integrity.record(event);
+        }
+
+        Ok(TestResult {
+            schema_version: 2,
+            benchmark_id: input.benchmark_id,
+            benchmark_version: input.benchmark_version,
+            model: input.model,
+            seed: input.seed,
+            capability: CapabilityResult {
+                dimension: SANDBOX_PROCESS_CAPABILITY_DIMENSION.to_owned(),
+                task_success,
+                total_reward: input.episode.total_reward,
+                turns_used: input.episode.turns_used,
+                invalid_action_count: input.episode.invalid_action_count,
+                completion_status,
+                protocol_adherence: input.protocol_adherence,
+            },
+            integrity,
+            telemetry_event_count: input.telemetry_event_count,
+            replay_digest: input.replay_digest,
+            reproducibility: input.reproducibility,
+        })
+    }
+}
+
+/// Whether a contained child ran and produced the artifact the benchmark declares.
+///
+/// Requires an **authorized** lifecycle — a denial is not a run — and checks the exit code and the
+/// captured stream. The stream is containment's own record of what the child wrote, captured into the
+/// designated directory, so this reads a trusted observation rather than anything a model reported.
+fn child_ran_correctly(input: &EvaluationInput) -> bool {
+    input.process_lifecycles.iter().any(|lifecycle| {
+        if !matches!(lifecycle.decision, ProcessAuthorization::Authorized) {
+            return false;
+        }
+        let Some(execution) = lifecycle.execution.as_ref() else {
+            return false;
+        };
+        execution.exit_code == Some(0)
+            && execution
+                .stdout
+                .preview
+                .contains(SANDBOX_PROCESS_EXPECTED_OUTPUT)
+    })
+}
+
 fn validate_protocol_adherence(input: &EvaluationInput) -> Result<(), EvaluationError> {
     let protocol = &input.protocol_adherence;
     let has_any_protocol_count = protocol.total_model_calls != 0
@@ -257,6 +393,12 @@ fn validate_process_lifecycles(input: &EvaluationInput) -> Result<(), Evaluation
 impl probelab_core::Evaluator for GridWorldEvaluator {
     fn evaluate(&self, input: EvaluationInput) -> Result<TestResult, String> {
         GridWorldEvaluator::evaluate(self, input).map_err(|error| error.to_string())
+    }
+}
+
+impl probelab_core::Evaluator for SandboxProcessEvaluator {
+    fn evaluate(&self, input: EvaluationInput) -> Result<TestResult, String> {
+        SandboxProcessEvaluator::evaluate(self, input).map_err(|error| error.to_string())
     }
 }
 
