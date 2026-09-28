@@ -33,6 +33,8 @@ import type {
   TimelineEntryView,
 } from "./api";
 
+import { BrainStateDiagram } from "./BrainStateDiagram";
+
 /**
  * Formats a success fraction, or refuses to.
  *
@@ -55,6 +57,11 @@ export function brainStateLabel(state: string): string {
 /** Human wording for a lifecycle state. */
 export function lifecycleLabel(state: string): string {
   return state.replace(/_/g, " ").toUpperCase();
+}
+
+/** A fraction as a percentage, for the confidence interval row. */
+function percent(fraction: number): string {
+  return `${(fraction * 100).toFixed(1)}%`;
 }
 
 /** Human wording for a terminal reason, which the backend tags as `snake_case{kind,detail}`. */
@@ -288,6 +295,31 @@ function ExperimentBody({ experiment }: { experiment: ExperimentView }) {
           <dt>Score</dt>
           <dd className={score.known ? "score-known" : "score-unknown"}>{score.text}</dd>
         </div>
+        {/*
+          The Wilson interval the backend computes for every run.
+
+          This row was absent, which meant the backend sent a confidence interval across the bridge on
+          every experiment and no component read it. A 3-episode run scoring 33% is a point estimate
+          with a lower bound near 6%, and printing the point alone is the single most misleading thing
+          a small-sample panel can do -- it looks like a measurement of the model rather than a
+          measurement of three episodes.
+
+          The row is only rendered when an episode actually completed. With none, `successRate` is a
+          ratio of zero rather than a score of zero, and an interval around a ratio of zero would be a
+          number about nothing. `Score` above already says no score exists.
+        */}
+        {experiment.aggregate.episodes > 0 ? (
+          <div>
+            <dt>Confidence</dt>
+            <dd className="score-known">
+              {percent(experiment.aggregate.successInterval.lower)} to{" "}
+              {percent(experiment.aggregate.successInterval.upper)}{" "}
+              <span className="interval-confidence">
+                at {Math.round(experiment.aggregate.successInterval.confidence * 100)}%
+              </span>
+            </dd>
+          </div>
+        ) : null}
         <div>
           <dt>Lifecycle</dt>
           <dd>{lifecycleLabel(experiment.lifecycle)}</dd>
@@ -462,26 +494,6 @@ export function BrainPanel({
           </section>
 
           <section className="brain-section">
-            <h3>Monitoring</h3>
-            {model.signals.length === 0 ? (
-              <p className="panel-note">
-                Nothing to report. Signals appear only when there is something to count — a clean run
-                shows no rows rather than a page of zeros.
-              </p>
-            ) : (
-              <ul className="brain-signals">
-                {model.signals.map((signal) => (
-                  <li key={signal.id} className={`brain-signal ${signalTone(signal)}`}>
-                    <span className="signal-label">{signal.label}</span>
-                    <span className="signal-count">{signal.count}</span>
-                    <span className="signal-meaning">{interpretationText(signal)}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-
-          <section className="brain-section">
             <h3>Security</h3>
             <SecurityBlocks security={experiment.security} />
           </section>
@@ -509,6 +521,22 @@ export function BrainPanel({
               </ul>
             </section>
           ) : null}
+
+          {/*
+            The lifecycle and the counted signals, drawn from the read model.
+
+            This is where the signals used to live as a standalone "Monitoring" section. They are the
+            same data -- the diagram's counters *are* the monitoring rows -- and having both rendered
+            every signal meant a run with three signals printed each one twice, in two different visual
+            registers, with no way to tell which was authoritative. Merged, the bars are a gain rather
+            than a second copy, and the section is titled for what the Brain is rather than for a
+            feature.
+
+            Placed after the anomalies because the anomalies are the conclusions and this is the
+            mechanism that reached them. See `BrainStateDiagram.tsx` for why it is a state machine and
+            not a neural network.
+          */}
+          <BrainStateDiagram model={model} />
 
           <section className="brain-section">
             <h3>Event timeline</h3>

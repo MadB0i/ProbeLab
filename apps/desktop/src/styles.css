@@ -195,15 +195,27 @@ a:focus-visible {
 }
 
 .status-light.warning,
-.pulse-dot {
+.status-light.degraded {
   color: var(--amber);
   background: var(--amber);
+}
+
+/*
+ * `stable` is the state the app is in almost all the time, and it had no rule of its own: it fell
+ * through to the base colour, which happened to be the right answer for the wrong reason. Naming it
+ * means the three states the UI can actually produce -- stable, syncing, degraded, running -- are all
+ * a deliberate choice rather than one of them being an omission.
+ */
+.status-light.stable {
+  color: var(--green);
+  background: var(--green);
 }
 
 .status-light.active {
   color: var(--cyan);
   background: var(--cyan);
 }
+
 
 .main-content {
   display: grid;
@@ -1222,7 +1234,15 @@ select:disabled {
   border-color: var(--violet);
   background: transparent;
   color: var(--violet);
+  /*
+   * The primary run button transitions its background; this one snapped between states because it
+   * had no transition at all. Matching the primary's timing is what makes the pair feel like one
+   * control rather than a button and its rougher sibling.
+   */
+  transition: background 160ms ease, box-shadow 160ms ease, border-color 160ms ease,
+    color 160ms ease;
 }
+
 
 .run-button-secondary:hover:not(:disabled) {
   background: rgba(168, 140, 255, 0.12);
@@ -1358,6 +1378,16 @@ select:disabled {
   background: #182235;
 }
 
+/*
+ * A sweep of light travelling along the filled part of the progress bar.
+ *
+ * This is gated on `.is-running` rather than animated unconditionally, because an idle progress bar
+ * sweeping light across zero percent asserts that work is happening. It ran before any run, and kept
+ * running after one finished, which is the specific thing a "live feed" should never do.
+ *
+ * The bar is also the only place this is used: motion here is a claim about measurement in flight, and
+ * a decorative loop cannot make that claim.
+ */
 .progress-track::after {
   position: absolute;
   top: 0;
@@ -1366,8 +1396,14 @@ select:disabled {
   width: 20%;
   background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.7), transparent);
   content: "";
+  opacity: 0;
+  pointer-events: none;
+}
+
+.is-running .progress-track::after {
   animation: scan 2.4s ease-in-out infinite;
 }
+
 
 .progress-fill {
   height: 100%;
@@ -1393,9 +1429,18 @@ select:disabled {
   font-size: 11px;
 }
 
-.pulse-dot {
-  animation: pulse 1.8s ease-in-out infinite;
-}
+/*
+ * The dot beside "LIVE FEED" no longer pulses, and the rule that animated it is gone.
+ *
+ * It is `aria-hidden`, so the text beside it is what a screen reader announces and what carries the
+ * meaning. A 1.8s opacity loop on a decorative dot conveyed nothing to anyone: sighted users read it
+ * as decoration, and the actual live/idle state came from the label. Its shape and colour are already
+ * set by the shared `.status-light, .pulse-dot` rule above.
+ *
+ * The one animation left in this panel is the progress sweep, gated on `.is-running`, because it is a
+ * claim about measurement actually in flight. A loop that cannot be wrong is a loop that means nothing.
+ */
+
 
 .grid-label {
   color: var(--faint);
@@ -1794,10 +1839,13 @@ select:disabled {
   50%, 100% { transform: translateX(700%); }
 }
 
-@keyframes pulse {
-  0%, 100% { opacity: 0.5; }
-  50% { opacity: 1; }
-}
+/*
+ * `pulse` used to live here and had no remaining users. It is kept out rather than left as dead CSS:
+ * an unused keyframe is an invitation for the next person to wire motion to something that does not
+ * mean anything, and there is now a single animation in the product with an explicit claim attached
+ * to it.
+ */
+
 
 @media (max-width: 1120px) {
   .control-grid {
@@ -2198,8 +2246,177 @@ select:disabled {
   color: var(--amber);
 }
 .tone-info {
+  color: var(--cyan);
+}
+
+/*
+ * # The Brain diagram
+ *
+ * A lifecycle of five states and a set of counters, both read from the read model. Styling notes that
+ * are load-bearing rather than cosmetic:
+ *
+ * - `.is-current` is the only state that animates, and only with a slow opacity breath. Nothing here
+ *   pulses, spins, or fires along a path, because the Brain is a state machine and a diagram that
+ *   implied computation it does not do would be the dishonest kind of impressive.
+ * - `currentColor` is used throughout so a step inherits its own tone and the two cannot disagree.
+ * - The counters keep the violation/refusal split the whole panel is built around: a bar for a
+ *   correct refusal is green and a bar for a violation is red, and they are never summed.
+ */
+
+.brain-diagram .brain-lifecycle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+}
+
+.brain-lifecycle-step {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--faint);
+}
+
+.brain-lifecycle-step .lifecycle-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.brain-lifecycle-step.is-passed {
+  border-color: var(--line-strong);
   color: var(--muted);
 }
+
+/*
+ * Drawn as a ring rather than a filled dot so "this is where the Brain is" is legible without relying
+ * on the glow, and so the state reads at a glance even where the animation is suppressed.
+ */
+.brain-lifecycle-step.is-current {
+  border-color: var(--cyan);
+  background: rgba(84, 229, 225, 0.08);
+  color: var(--cyan);
+  animation: brain-breathe 3.2s ease-in-out infinite;
+}
+
+.brain-lifecycle-step.is-current .lifecycle-dot {
+  box-shadow: 0 0 0 3px rgba(84, 229, 225, 0.18);
+}
+
+@keyframes brain-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.68; }
+}
+
+.brain-diagram-unknown {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.brain-counters h4 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.brain-counters ul {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.brain-counters li {
+  display: grid;
+  gap: 4px;
+  color: currentcolor;
+}
+
+.counter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.counter-label {
+  font-size: 11px;
+  color: var(--text);
+}
+
+.counter-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: currentcolor;
+}
+
+/*
+ * A 4px bar on a dimmed track. Zero counts render a zero-width bar rather than a minimum-width stub,
+ * so "nothing counted" looks like nothing counted.
+ */
+.counter-bar {
+  display: block;
+  height: 4px;
+  min-width: 0;
+  border-radius: 2px;
+  background: currentcolor;
+  box-shadow: 0 0 8px currentcolor;
+  transition: width 260ms ease;
+}
+
+.counter-bar::before {
+  content: "";
+}
+
+.brain-counters li {
+  position: relative;
+}
+
+/* The track, drawn behind the bar so a short bar still reads as a proportion of something. */
+.brain-counters li::before {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  z-index: 0;
+}
+
+.brain-counters li > * {
+  position: relative;
+  z-index: 1;
+}
+
+.counter-meaning {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/*
+ * The confidence level, subordinate to the interval it qualifies. A 95% in the same weight as the
+ * bounds would read as part of the measurement rather than a property of how it was computed.
+ */
+.interval-confidence {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 
 .brain-authority {
   margin: 0 0 14px;
@@ -3454,7 +3671,14 @@ select:disabled {
   background: transparent;
   color: var(--cyan);
   cursor: pointer;
+  /*
+   * The stepper's buttons stepped through frames with a visible jump between states. These are
+   * frequent, small, and adjacent, so the snap drew the eye to the chrome instead of the frame
+   * changing -- which is the opposite of what a replay control should emphasise.
+   */
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
+
 
 .replay-step:hover:not(:disabled) {
   border-color: var(--cyan-dim);

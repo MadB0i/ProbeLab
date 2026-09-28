@@ -920,3 +920,84 @@ fn a_containment_failure_halts_but_a_timeout_does_not() {
     let info = LabEvent::new(0, "x", EventSource::Experiment, Severity::Info, "");
     assert!(!info.severity.halts_run());
 }
+
+/// The Brain's state machine has five reachable states, and the enum has six variants.
+///
+/// `BrainState::Running` is never assigned to a `LabBrain`. It appears in `label()` and in two
+/// read-model tests that construct a projection directly, which is exactly why it looks like a live
+/// state during a code review. Nothing in the workspace assigns it.
+///
+/// This matters beyond tidiness because the frontend draws a lifecycle diagram. A diagram with a
+/// node the product cannot enter is a small lie about how the system works, and the honest fix is to
+/// leave the node out and say why -- not to quietly widen the list. The paired frontend assertion is
+/// `the_brain_never_enters_running` in `BrainStateDiagram.test.tsx`.
+///
+/// If this test ever fails because `Running` *is* now reachable, that is a good outcome: it means
+/// someone wired up a state the enum already had. The right response is to update the diagram, not to
+/// delete the test.
+#[test]
+fn the_brain_enters_five_states_and_never_running() {
+    use probelab_lab::ObservedCategory;
+
+    let mut brain = LabBrain::new();
+    let mut reached: Vec<BrainState> = vec![brain.state()];
+
+    // Drive the same public surface a runner drives, in the order a runner drives it. `make_plan` is
+    // the only way into `Preparing`, and it needs the real registries rather than a stand-in.
+    brain
+        .make_plan(
+            &PlanRequest {
+                benchmark_id: Some("grid-world".to_owned()),
+                target_agent: Some("optimal".to_owned()),
+                probe_agents: Vec::new(),
+                episodes: Some(1),
+                root_seed: Some(7),
+            },
+            &probelab_benchmarks::BenchmarkRegistry::built_in(),
+            &probelab_lab::AgentRegistry::built_in(),
+            &ProbeRegistry::built_in(),
+            probelab_benchmarks::PlatformRequirement::Any,
+        )
+        .expect("the built-in registries can plan a grid-world run");
+    reached.push(brain.state());
+
+    brain.observe(&BrainEvent {
+        episode: 0,
+        turn: 0,
+        category: ObservedCategory::Ordinary,
+        label: "a turn happened".to_owned(),
+    });
+    reached.push(brain.state());
+
+    brain.begin_analysis();
+    reached.push(brain.state());
+
+    brain.complete();
+    reached.push(brain.state());
+
+    assert_eq!(
+        reached,
+        vec![
+            BrainState::Planning,
+            BrainState::Preparing,
+            BrainState::Observing,
+            BrainState::Analyzing,
+            BrainState::Completed,
+        ],
+        "the Brain's lifecycle is these five states in this order"
+    );
+
+    // The property, stated directly: nothing above was ever `Running`.
+    assert!(
+        !reached.contains(&BrainState::Running),
+        "Running became reachable; update REACHABLE_STATES in BrainStateDiagram.tsx to match"
+    );
+
+    // And the enum really does still have the variant, so this test is not passing because someone
+    // deleted it and quietly changed the meaning of the diagram.
+    assert_eq!(
+        BrainState::Running.label(),
+        "RUNNING",
+        "the dead variant is still in the enum; this test is about reachability, not removal"
+    );
+}

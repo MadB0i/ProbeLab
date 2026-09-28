@@ -697,12 +697,31 @@ const App = () => {
 
   const strategy =
     strategies.find((item) => item.value === selectedStrategy) ?? strategies[0] ?? null;
-  const maxTurns = benchmark?.max_turns ?? 30;
-  const progress = latestEvent
-    ? Math.min(100, Math.round((latestEvent.turn / maxTurns) * 100))
-    : runState === "starting"
-      ? 4
-      : 0;
+  /*
+   * Progress is a *turn* fraction, not an episode fraction, and the two were being labelled as
+   * whichever suited the copy. `latestEvent.turn` over the benchmark's `max_turns` is what this
+   * number has always been, and "EPISODE PROGRESS" over it was wrong: an experiment at 40% here may
+   * have finished every episode it was asked for, or be on the first of thirty. The label says what
+   * the number is.
+   *
+   * `maxTurns` is read from the benchmark that actually ran, via the selected benchmark rather than
+   * `benchmarks[0]`. Against the wrong benchmark's ceiling a full run reads as 100% or 15% depending
+   * on which one the array happened to hold first.
+   */
+  const maxTurns = benchmark?.max_turns ?? null;
+  const progress =
+    latestEvent && maxTurns && maxTurns > 0
+      ? Math.min(100, Math.round((latestEvent.turn / maxTurns) * 100))
+      : runState === "starting"
+        ? 4
+        : 0;
+  /*
+   * True only when the denominator is a real ceiling from the running benchmark. With no benchmark
+   * there is no turn budget to be a fraction of, and showing a percentage against a made-up `30`
+   * would be inventing a limit the backend never set.
+   */
+  const progressIsTurnFraction = latestEvent !== null && maxTurns !== null && maxTurns > 0;
+
   const grid = useMemo(() => buildGrid(telemetry), [telemetry]);
   const isRunning = runState === "starting" || runState === "running" || runState === "finalizing";
   const systemStatus = benchmarksError || listenerError
@@ -1274,7 +1293,18 @@ const App = () => {
   const runBenchmark = () => startRun(mockModelConfig);
   const runConnected = () => startRun(connectedModelConfig);
 
-  const systemTone = systemStatus === "DEGRADED" ? "warning" : systemStatus === "RUNNING" ? "active" : "stable";
+  /*
+   * The four states the header can actually be in, each with a tone. `stable` and `syncing` share a
+   * green dot, because neither is a problem and the text beside the dot already says which is which;
+   * `degraded` is a real fault and says so in colour too.
+   */
+  const systemTone =
+    systemStatus === "DEGRADED"
+      ? "degraded"
+      : systemStatus === "RUNNING"
+        ? "active"
+        : "stable";
+
 
   const viewbrainPanel = (
     <>
@@ -1581,7 +1611,14 @@ const App = () => {
   );
   const viewworkspaceGrid = (
         <section className="workspace-grid">
-          <div className="panel progress-card">
+            {/*
+              `is-running` gates the sweep animation. It is on the card rather than the track so the
+              whole panel carries the state, and so the animation cannot run against a bar that is
+              sitting at zero between runs.
+            */}
+            <div
+              className={isRunning ? "panel progress-card is-running" : "panel progress-card"}
+            >
             <div className="panel-heading">
               <div>
                 <p className="eyebrow">LIVE RUN</p>
@@ -1592,22 +1629,45 @@ const App = () => {
             <div className="progress-hero">
               <div>
                 <span className="progress-value">{progress.toString().padStart(2, "0")}%</span>
-                <span className="progress-caption">EPISODE PROGRESS</span>
+                {/*
+                  Turn progress, stated as such. With no running benchmark there is no turn ceiling to
+                  be a percentage of, so the caption says that instead of inventing a denominator.
+                */}
+                <span className="progress-caption">
+                  {progressIsTurnFraction ? "TURN PROGRESS" : "NO TURN BUDGET"}
+                </span>
               </div>
               <div className="turn-readout">
                 <span>TURN</span>
                 <strong>{latestEvent?.turn.toString().padStart(2, "0") ?? "00"}</strong>
-                <span>/ {maxTurns.toString().padStart(2, "0")}</span>
+                <span>/ {maxTurns === null ? "--" : maxTurns.toString().padStart(2, "0")}</span>
               </div>
             </div>
-            <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label="Episode progress">
+            {/*
+              `aria-valuetext` carries what the percentage is *of*, because a bare
+              `aria-valuenow=40` on a bar labelled "Episode progress" told a screen reader 40 episodes
+              out of some unnamed number, which is not a quantity that exists.
+            */}
+            <div
+              className="progress-track"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={progress}
+              aria-label="Turn progress within the benchmark's turn budget"
+              aria-valuetext={
+                progressIsTurnFraction
+                  ? `Turn ${latestEvent?.turn} of ${maxTurns}`
+                  : "No turn budget reported yet"
+              }
+            >
               <div className="progress-fill" style={{ width: `${progress}%` }} />
             </div>
             <div className="progress-footer">
               <span>{latestEvent ? `EPISODE ${latestEvent.episode_id}` : "WAITING FOR FIRST OBSERVATION"}</span>
               <span>{latestEvent ? `${latestEvent.reward >= 0 ? "+" : ""}${latestEvent.reward} REWARD` : "NO REWARD YET"}</span>
             </div>
-          </div>
+            </div>
 
           <div className="panel visualization-card">
             <div className="panel-heading">
