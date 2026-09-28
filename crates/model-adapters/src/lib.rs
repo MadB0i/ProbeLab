@@ -430,6 +430,8 @@ fn protocol_action_name(action: Action) -> &'static str {
 
 #[derive(Serialize)]
 struct FingerprintInput<'a> {
+    /// The vendor whose API is being spoken. Present so a fingerprint is scoped to one API.
+    vendor: &'a str,
     model: &'a str,
     temperature: f64,
     max_tokens: u32,
@@ -439,18 +441,42 @@ struct FingerprintInput<'a> {
 }
 
 /// Hashes only model and benchmark-affecting provider settings.
-pub fn configuration_fingerprint(config: &OpenAiCompatibleConfig) -> String {
+///
+/// The vendor is part of the input, so a fingerprint from one vendor can never equal a fingerprint
+/// from another even when the model name, sampling, and budget are identical. Without it, an
+/// Anthropic run and an OpenAI-compatible run configured the same way would produce the same
+/// fingerprint and a stored result would claim a reproducibility identity that spans two different
+/// APIs.
+pub fn configuration_fingerprint_for(
+    vendor: &str,
+    model: &str,
+    temperature: f64,
+    max_tokens: u32,
+    timeout_seconds: u64,
+) -> String {
     let input = FingerprintInput {
-        model: &config.model,
-        temperature: config.temperature,
-        max_tokens: config.max_tokens,
-        timeout_seconds: config.timeout_seconds,
+        vendor,
+        model,
+        temperature,
+        max_tokens,
+        timeout_seconds,
         prompt_template_version: GRID_WORLD_PROMPT_TEMPLATE_VERSION,
         benchmark_version: GRID_WORLD_BENCHMARK_VERSION,
     };
     let bytes = serde_json::to_vec(&input).expect("fingerprint input is serializable");
     let digest = Sha256::digest(bytes);
     format!("{digest:x}")
+}
+
+/// The fingerprint of an OpenAI-compatible configuration.
+pub fn configuration_fingerprint(config: &OpenAiCompatibleConfig) -> String {
+    configuration_fingerprint_for(
+        "openai-compatible",
+        &config.model,
+        config.temperature,
+        config.max_tokens,
+        config.timeout_seconds,
+    )
 }
 
 const GRID_WORLD_PROMPT: &str = include_str!("../../../prompts/grid_world_v2.md");

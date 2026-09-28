@@ -28,8 +28,8 @@ use crate::transport::{
     TransportConfigError,
 };
 use crate::{
-    configuration_fingerprint, parse_decision_response, prompt_for, prompt_template_version_for,
-    OpenAiCompatibleConfig,
+    configuration_fingerprint, configuration_fingerprint_for, parse_decision_response, prompt_for,
+    prompt_template_version_for, OpenAiCompatibleConfig, GRID_WORLD_ENVIRONMENT_VERSION,
 };
 
 /// The API version this adapter speaks.
@@ -340,6 +340,36 @@ impl GeminiProvider {
             "credential_env".to_owned(),
             serde_json::Value::String(self.config.api_key_env.clone()),
         );
+        /*
+         * The three reproducibility fields, which were absent here for the same reason they were absent
+         * in the Anthropic adapter: the engine reads them out of the descriptor to build
+         * `ReproducibilityMetadata`, and a key that is not inserted arrives as an empty string rather
+         * than as an error. A recorded Gemini run therefore stored three blanks where the
+         * OpenAI-compatible adapter stored real values, and read as though the prompt version and
+         * configuration were known but unfilled.
+         *
+         * The same shared `configuration_fingerprint` is used, so a fingerprint means the same thing
+         * across vendors. `prompt_template_version_for(false)` is the non-spawning template, which is
+         * the only one this adapter sends.
+         */
+        parameters.insert(
+            "configuration_fingerprint".to_owned(),
+            serde_json::Value::String(configuration_fingerprint_for(
+                "gemini",
+                &self.config.model,
+                self.config.temperature,
+                self.config.max_tokens,
+                self.config.timeout_seconds,
+            )),
+        );
+        parameters.insert(
+            "prompt_template_version".to_owned(),
+            serde_json::Value::String(prompt_template_version_for(false).to_owned()),
+        );
+        parameters.insert(
+            "environment_version".to_owned(),
+            serde_json::Value::String(GRID_WORLD_ENVIRONMENT_VERSION.to_owned()),
+        );
         ModelDescriptor {
             adapter: "gemini-generate-content-v1".to_owned(),
             strategy: self.config.model.clone(),
@@ -522,6 +552,65 @@ fn elapsed_ms(started: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three reproducibility fields the engine reads out of the descriptor.
+    ///
+    /// Absent here for the same reason they were absent in the Anthropic adapter, and absence is
+    /// invisible: the engine's `descriptor_string` filters empty values, so a missing key and a blank
+    /// one both became an empty string in the stored result. A recorded Gemini run reported no prompt
+    /// template version, no configuration fingerprint, and no environment version.
+    #[test]
+    fn the_descriptor_carries_every_reproducibility_field() {
+        let provider = GeminiProvider::new(GeminiConfig::default()).expect("valid config");
+        let descriptor = provider.descriptor_value();
+        for field in [
+            "configuration_fingerprint",
+            "prompt_template_version",
+            "environment_version",
+        ] {
+            let value = descriptor
+                .parameters
+                .get(field)
+                .unwrap_or_else(|| panic!("{field} is missing from the descriptor"))
+                .as_str()
+                .unwrap_or_else(|| panic!("{field} is not a string"));
+            assert!(!value.trim().is_empty(), "{field} is present but blank");
+        }
+    }
+
+    #[test]
+    fn the_fingerprint_moves_when_the_configuration_does() {
+        let base = GeminiConfig::default();
+        let build = |config: GeminiConfig| {
+            GeminiProvider::new(config)
+                .expect("valid config")
+                .descriptor_value()
+        };
+        let read = |descriptor: &probelab_core::ModelDescriptor| {
+            descriptor.parameters["configuration_fingerprint"]
+                .as_str()
+                .expect("a string")
+                .to_owned()
+        };
+
+        assert_eq!(read(&build(base.clone())), read(&build(base.clone())));
+        assert_ne!(
+            read(&build(base.clone())),
+            read(&build(GeminiConfig {
+                model: "gemini-other".to_owned(),
+                ..base.clone()
+            })),
+            "the model is model-affecting"
+        );
+        assert_ne!(
+            read(&build(base.clone())),
+            read(&build(GeminiConfig {
+                max_tokens: base.max_tokens + 64,
+                ..base.clone()
+            })),
+            "the token budget is model-affecting"
+        );
+    }
 
     #[test]
     fn the_default_configuration_is_valid_and_names_the_real_api() {

@@ -30,8 +30,9 @@ use crate::transport::{
     validate_model, validate_sampling, validate_timeout, TransportConfigError,
 };
 use crate::{
-    configuration_fingerprint, parse_decision_response, prompt_for, prompt_template_version_for,
-    ActionProtocolError, OpenAiCompatibleConfig,
+    configuration_fingerprint, configuration_fingerprint_for, parse_decision_response, prompt_for,
+    prompt_template_version_for, ActionProtocolError, OpenAiCompatibleConfig,
+    GRID_WORLD_ENVIRONMENT_VERSION,
 };
 
 /// The `anthropic-version` this adapter speaks.
@@ -307,6 +308,40 @@ impl AnthropicProvider {
             "credential_env".to_owned(),
             serde_json::Value::String(self.config.api_key_env.clone()),
         );
+        /*
+         * The three reproducibility fields.
+         *
+         * These were simply absent here, and the engine reads them out of the descriptor to build
+         * `ReproducibilityMetadata`. Absent meant empty, so a recorded Anthropic run stored three
+         * blank strings where the OpenAI-compatible adapter stored real values -- and nothing
+         * complained, because a blank reproducibility field is a string like any other. The result
+         * read as though the prompt version and configuration were known and simply had not been
+         * filled in, which is worse than not having the adapter at all.
+         *
+         * `configuration_fingerprint` is the same function the OpenAI-compatible path uses, so a
+         * fingerprint means the same thing across vendors: model, sampling, timeout, prompt template,
+         * and benchmark version. `prompt_template_version_for(false)` is the non-spawning template,
+         * which is the only one this adapter can send -- `prompt_for` is called with the same flag at
+         * request time, so the recorded version is the version that ran.
+         */
+        parameters.insert(
+            "configuration_fingerprint".to_owned(),
+            serde_json::Value::String(configuration_fingerprint_for(
+                "anthropic",
+                &self.config.model,
+                self.config.temperature,
+                self.config.max_tokens,
+                self.config.timeout_seconds,
+            )),
+        );
+        parameters.insert(
+            "prompt_template_version".to_owned(),
+            serde_json::Value::String(prompt_template_version_for(false).to_owned()),
+        );
+        parameters.insert(
+            "environment_version".to_owned(),
+            serde_json::Value::String(GRID_WORLD_ENVIRONMENT_VERSION.to_owned()),
+        );
         ModelDescriptor {
             adapter: "anthropic-messages-v1".to_owned(),
             strategy: self.config.model.clone(),
@@ -508,6 +543,107 @@ pub fn anthropic_adapter_fingerprint() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three reproducibility fields the engine reads out of the descriptor to build
+    /// `ReproducibilityMetadata`.
+    ///
+    /// They were absent from this adapter, and absence is invisible: the engine's
+    /// `descriptor_string` filters empty values, so a missing key and a blank one both became an empty
+    /// string in the stored result. A recorded Anthropic run therefore reported no prompt template
+    /// version, no configuration fingerprint, and no environment version, and read as though those
+    /// facts were known and simply not filled in.
+    #[test]
+    fn the_descriptor_carries_every_reproducibility_field() {
+        let provider = AnthropicProvider::new(AnthropicConfig::default()).expect("valid config");
+        let descriptor = provider.descriptor_value();
+        for field in [
+            "configuration_fingerprint",
+            "prompt_template_version",
+            "environment_version",
+        ] {
+            let value = descriptor
+                .parameters
+                .get(field)
+                .unwrap_or_else(|| panic!("{field} is missing from the descriptor"))
+                .as_str()
+                .unwrap_or_else(|| panic!("{field} is not a string"));
+            assert!(!value.trim().is_empty(), "{field} is present but blank");
+        }
+    }
+
+    #[test]
+    fn the_fingerprint_moves_when_the_configuration_does() {
+        let base = AnthropicConfig::default();
+        let build = |config: AnthropicConfig| {
+            AnthropicProvider::new(config)
+                .expect("valid config")
+                .descriptor_value()
+        };
+        let unchanged = build(base.clone());
+        let same = build(base.clone());
+        let hotter = build(AnthropicConfig {
+            temperature: base.temperature + 0.5,
+            ..base.clone()
+        });
+        let other_model = build(AnthropicConfig {
+            model: "claude-other".to_owned(),
+            ..base.clone()
+        });
+
+        let read = |descriptor: &probelab_core::ModelDescriptor| {
+            descriptor.parameters["configuration_fingerprint"]
+                .as_str()
+                .expect("a string")
+                .to_owned()
+        };
+
+        assert_eq!(
+            read(&unchanged),
+            read(&same),
+            "the same config must fingerprint the same"
+        );
+        assert_ne!(
+            read(&unchanged),
+            read(&hotter),
+            "temperature is model-affecting"
+        );
+        assert_ne!(
+            read(&unchanged),
+            read(&other_model),
+            "the model is model-affecting"
+        );
+    }
+
+    #[test]
+    fn the_fingerprint_differs_from_another_vendors_for_the_same_settings() {
+        // A fingerprint is a reproducibility identity. If two vendors hashing identical settings
+        // produced the same value, a stored result would claim an identity spanning two APIs.
+        let config = OpenAiCompatibleConfig {
+            model: "shared-model".to_owned(),
+            temperature: 0.5,
+            max_tokens: 256,
+            timeout_seconds: 30,
+            ..OpenAiCompatibleConfig::default()
+        };
+        let anthropic = configuration_fingerprint_for(
+            "anthropic",
+            &config.model,
+            config.temperature,
+            config.max_tokens,
+            config.timeout_seconds,
+        );
+        let gemini = configuration_fingerprint_for(
+            "gemini",
+            &config.model,
+            config.temperature,
+            config.max_tokens,
+            config.timeout_seconds,
+        );
+        let openai = configuration_fingerprint(&config);
+        assert_ne!(anthropic, gemini);
+        assert_ne!(anthropic, openai);
+        assert_ne!(gemini, openai);
+    }
 
     #[test]
     fn the_default_configuration_is_valid_and_names_the_real_api() {
