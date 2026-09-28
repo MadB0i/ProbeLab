@@ -2593,7 +2593,33 @@ select:disabled {
   min-width: 0;
 }
 
+/*
+ * A run the wall-clock budget cut short.
+ *
+ * Amber, not red: nothing failed, and the backend recorded the truncation as its own terminal reason
+ * rather than folding it into a completion. It is a qualification on the numbers above it, so it is
+ * styled as a caution rather than an error -- and the wording carries the same distinction, saying the
+ * sample was smaller than planned rather than that the model performed badly.
+ *
+ * A left rule rather than a full border so it reads as a note attached to the facts below, not as
+ * another card competing with them for attention.
+ */
+.brain-truncation {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--amber);
+  background: rgba(255, 176, 32, 0.07);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.brain-truncation strong {
+  color: var(--amber);
+}
+
 .brain-facts dt {
+
   font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;

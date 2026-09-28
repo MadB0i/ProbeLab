@@ -245,6 +245,14 @@ pub struct ExperimentRun {
     pub timeline: LabTimeline,
     /// The Brain's panel after the run: state, counts, and findings.
     pub brain_panel: crate::brain::BrainPanel,
+    /// Wall-clock milliseconds the run actually took, or None if it was never measured.
+    ///
+    /// Present because a budget-truncated run is only legible with it. The terminal reason says the
+    /// budget expired; this says how long the run had, which is what makes "12 of 30 episodes in 30
+    /// minutes against a real model" a reading rather than a shrug. It was previously discarded, so
+    /// the panel had an elapsed field that could never be populated and no way to distinguish a fast
+    /// mock from a slow connected run.
+    pub elapsed_ms: Option<u64>,
     /// Whether the experiment reached a terminal state.
     pub terminal_reason: Option<TerminalReason>,
     /// The aggregate over the completed episodes.
@@ -560,6 +568,9 @@ impl LabRunner {
             failures,
             brain_panel: brain.panel(),
             timeline: manager.timeline.clone(),
+            // s_millis saturates rather than panicking on a duration too large for u64, so a
+            // pathological run records a large number instead of taking the process down.
+            elapsed_ms: u64::try_from(started.elapsed().as_millis()).ok(),
             terminal_reason: manager.record().terminal_reason.clone(),
         })
     }

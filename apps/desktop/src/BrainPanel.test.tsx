@@ -506,3 +506,118 @@ describe("payloads the backend actually produced", () => {
   });
 });
 
+
+/**
+ * A run the wall-clock budget cut short must say so, above the numbers.
+ *
+ * This is the failure mode connected-model measurement introduces. A deterministic mock runs thirty
+ * episodes in a second; a real model at a few seconds per turn can exhaust a thirty-minute budget
+ * inside two or three. The backend already records the truncation as its own terminal reason rather
+ * than folding it into a completion, so the score is not wrong -- but "2 completed of 30" in a column
+ * that also holds "3 completed of 3" reads as a 6% model rather than a sample two-thirds unmeasured.
+ */
+describe("a truncated run says it was truncated", () => {
+  const truncated = (overrides: Partial<ExperimentView> = {}): ExperimentView => ({
+    ...experiment(),
+    episodesRequested: 30,
+    episodesCompleted: 2,
+    episodesFailed: 0,
+    terminalReason: { kind: "timeout", detail: { budget_seconds: 1800 } },
+    meanSuccessFraction: 0.5,
+    ...overrides,
+  });
+
+  it("states the shortfall and names the budget", () => {
+    renderPanel({ model: model({ experiment: truncated() }) });
+
+    const notice = screen.getByRole("status");
+    expect(notice).toHaveTextContent(/2 of 30 episodes/i);
+    expect(notice).toHaveTextContent(/30m/);
+    // The sentence that stops this being read as a score: the number describes the episodes that
+    // finished, not the plan.
+    expect(notice).toHaveTextContent(/only the 2 episodes that finished/i);
+    expect(notice).toHaveTextContent(/not the 30 that were planned/i);
+  });
+
+  it("does not claim the model scored badly", () => {
+    // The whole point of the wording. A reader who takes away "the model scored 6%" has been told
+    // something the run never established.
+    renderPanel({ model: model({ experiment: truncated() }) });
+    const notice = screen.getByRole("status");
+    expect(notice).toHaveTextContent(/smaller sample than the plan asked for/i);
+    expect(notice).not.toHaveTextContent(/model scored 6%/i);
+  });
+
+  it("says nothing when the run completed everything it was asked to", () => {
+    // Noise on a healthy run is its own kind of dishonesty, so the notice is absent, not dimmed.
+    renderPanel({ model: model({ experiment: truncated({ terminalReason: { kind: "completed" } }) }) });
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("distinguishes a budget expiry that arrived after the last episode", () => {
+    // Every planned episode was attempted, so the sample is not small -- the budget simply expired
+    // during the final one. Saying "smaller sample" here would be wrong.
+    renderPanel({
+      model: model({ experiment: truncated({ episodesCompleted: 30, episodesRequested: 30 }) }),
+    });
+    const notice = screen.getByRole("status");
+    expect(notice).toHaveTextContent(/every planned episode was attempted/i);
+    expect(notice).not.toHaveTextContent(/smaller sample/i);
+  });
+
+  it("still warns when the backend reported no budget figure", () => {
+    // The shortfall is the load-bearing part. A missing budget is an absence, not a reason to stay
+    // silent about a run that is smaller than its plan.
+    renderPanel({
+      model: model({ experiment: truncated({ terminalReason: { kind: "timeout" } }) }),
+    });
+    const notice = screen.getByRole("status");
+    expect(notice).toHaveTextContent(/2 of 30 episodes/i);
+    expect(notice).not.toHaveTextContent(/budget was/i);
+  });
+
+  it("counts failed episodes as attempted, so a run that failed loudly is not called truncated", () => {
+    // `episodesCompleted + episodesFailed` is what was attempted. Reading only `episodesCompleted`
+    // would report a shortfall for a run that in fact tried every episode and failed them.
+    renderPanel({
+      model: model({
+        experiment: truncated({ episodesCompleted: 0, episodesFailed: 30, episodesRequested: 30 }),
+      }),
+    });
+    const notice = screen.getByRole("status");
+    expect(notice).toHaveTextContent(/every planned episode was attempted/i);
+  });
+});
+
+/**
+ * Elapsed time, which the panel had a field for and no way to fill.
+ *
+ * `elapsedMs` was hardcoded to `None` in the read model, so the row could never appear. It matters
+ * for the same reason the truncation notice does: a fast mock and a slow connected run look identical
+ * without it.
+ */
+describe("elapsed time", () => {
+  it("shows the duration when the backend measured one", () => {
+    renderPanel({ model: model({ experiment: experiment({ elapsedMs: 4_500 }) }) });
+    // Seconds are rounded: this is a reading, not a stopwatch, and a measured 4.5s saying "4.5s"
+    // implies a precision the runner does not have.
+    expect(screen.getByText("5s")).toBeInTheDocument();
+  });
+
+  it("formats minutes, and minutes with seconds", () => {
+    const { unmount } = renderPanel({
+      model: model({ experiment: experiment({ elapsedMs: 120_000 }) }),
+    });
+    expect(screen.getByText("2m")).toBeInTheDocument();
+    unmount();
+
+    renderPanel({ model: model({ experiment: experiment({ elapsedMs: 90_000 }) }) });
+    expect(screen.getByText("1m 30s")).toBeInTheDocument();
+  });
+
+  it("omits the row entirely when nothing was measured", () => {
+    renderPanel({ model: model({ experiment: experiment({ elapsedMs: null }) }) });
+    expect(screen.queryByText("Took")).toBeNull();
+  });
+});
+

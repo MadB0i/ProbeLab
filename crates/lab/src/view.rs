@@ -420,7 +420,7 @@ impl ExperimentView {
             aggregate: run.aggregate().clone(),
             lifecycle: ExperimentState::Completed,
             terminal_reason: run.terminal_reason.clone(),
-            elapsed_ms: None,
+            elapsed_ms: run.elapsed_ms,
             decisions: decisions_from(run),
             episodes,
             failures: run.failures.iter().map(EpisodeFailureView::from).collect(),

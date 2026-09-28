@@ -54,6 +54,66 @@ export function brainStateLabel(state: string): string {
   return state.replace(/([a-z])([A-Z])/g, "$1 $2").toUpperCase();
 }
 
+/**
+ * Whether a run was cut short by the wall-clock budget, and what to say about it.
+ *
+ * A run that completed 12 of 30 episodes reports `terminalReason: {"kind":"timeout"}` and a Wilson
+ * interval computed over those 12. Nothing about the *number* is wrong -- the backend records the
+ * truncation rather than folding it into a completion, which is the part that matters -- but "12
+ * completed of 30" in a table row looks much like "3 completed of 3" in the same column, and the score
+ * above both would be read as a measurement of the model rather than of the episodes that fit.
+ *
+ * The reason this becomes acute for connected runs: a real model at a few seconds per turn can exhaust
+ * a 30-minute budget on a single episode, so a 30-episode plan may yield two or three results and look
+ * like a 3% score. That is the specific way this product could produce a confident number that means
+ * nothing, and it is stated rather than smoothed over.
+ *
+ * Returns `null` for a run that completed everything it was asked to, so the warning cannot appear on
+ * a run where it would be noise.
+ */
+export function truncationNotice(experiment: ExperimentView): string | null {
+  const kind = experiment.terminalReason?.kind;
+  if (kind !== "timeout") {
+    return null;
+  }
+  const attempted = experiment.episodesCompleted + experiment.episodesFailed;
+  const budget = detailBudgetSeconds(experiment.terminalReason);
+  const shortfall = experiment.episodesRequested - attempted;
+
+  const parts = [
+    `Stopped by the wall-clock budget after ${attempted} of ${experiment.episodesRequested} episodes.`,
+  ];
+  if (budget !== null) {
+    parts.push(`The budget was ${formatDuration(budget)}.`);
+  }
+  parts.push(
+    shortfall > 0
+      ? `The score and its confidence interval describe only the ${experiment.episodesCompleted} episodes that finished, not the ${experiment.episodesRequested} that were planned — so this is a smaller sample than the plan asked for, not a model that scored ${experiment.episodesCompleted}%.`
+      : "Every planned episode was attempted; the budget expired during the last one.",
+  );
+  return parts.join(" ");
+}
+
+/** The budget in seconds from a tagged `timeout` terminal reason, when the backend reported one. */
+function detailBudgetSeconds(reason: TerminalReasonView | null): number | null {
+  const detail = reason?.detail;
+  if (detail === null || detail === undefined || typeof detail !== "object") {
+    return null;
+  }
+  const budget = (detail as { budget_seconds?: unknown }).budget_seconds;
+  return typeof budget === "number" && Number.isFinite(budget) ? budget : null;
+}
+
+/** A human duration from seconds. Deliberately coarse: this is a reading, not a stopwatch. */
+function formatDuration(seconds: number): string {
+  if (seconds < 60) {
+    return `${Math.round(seconds)}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainder = Math.round(seconds % 60);
+  return remainder === 0 ? `${minutes}m` : `${minutes}m ${remainder}s`;
+}
+
 /** Human wording for a lifecycle state. */
 export function lifecycleLabel(state: string): string {
   return state.replace(/_/g, " ").toUpperCase();
@@ -254,8 +314,24 @@ function TimelineRow({ entry }: { entry: TimelineEntryView }) {
 
 function ExperimentBody({ experiment }: { experiment: ExperimentView }) {
   const score = formatScore(experiment.meanSuccessFraction);
+  const truncation = truncationNotice(experiment);
   return (
     <>
+      {/*
+        The truncation notice goes above the facts, not below them.
+
+        A reader who sees "Score 3.3%" and then a footnote explaining that only two episodes finished
+        has already taken the wrong number away with them. The point of this panel is that a number on
+        screen means what it claims to mean, and a score computed over a fraction of the planned sample
+        is a different claim from one computed over all of it. `role="status"` rather than `alert`: this
+        is not a fault the operator caused or can dismiss, it is a fact about the measurement, and it
+        should be announced politely rather than interruptively.
+      */}
+      {truncation ? (
+        <p className="brain-truncation" role="status">
+          {truncation}
+        </p>
+      ) : null}
       <dl className="brain-facts">
         <div>
           <dt>Experiment</dt>
@@ -324,6 +400,12 @@ function ExperimentBody({ experiment }: { experiment: ExperimentView }) {
           <dt>Lifecycle</dt>
           <dd>{lifecycleLabel(experiment.lifecycle)}</dd>
         </div>
+        {experiment.elapsedMs !== null ? (
+          <div>
+            <dt>Took</dt>
+            <dd>{formatDuration(experiment.elapsedMs / 1000)}</dd>
+          </div>
+        ) : null}
         <div>
           <dt>Ended</dt>
           <dd>{terminalLabel(experiment.terminalReason)}</dd>

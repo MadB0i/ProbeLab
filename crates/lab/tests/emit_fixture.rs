@@ -34,6 +34,67 @@ use probelab_lab::{
 
 const FIXTURE_PATH: &str = "../../apps/desktop/src/test-fixtures/brainReadModel.json";
 
+/**
+ * Strips the one field a fixture cannot hold.
+ *
+ * `elapsedMs` is wall-clock milliseconds, so it differs on every execution by design. A committed
+ * fixture containing one would fail the pin on every run and teach everyone to regenerate fixtures
+ * until they went green, which is the opposite of what a pin is for.
+ *
+ * So it is set to `null` here -- which is a real value the wire can carry, keeps the field's *presence*
+ * pinned (a rename would still fail, because the key would move), and leaves the assertion that a
+ * genuine run produces a real number to the tests below.
+ */
+fn normalized(model: &BrainReadModel) -> BrainReadModel {
+    let mut model = model.clone();
+    if let Some(experiment) = model.experiment.as_mut() {
+        experiment.elapsed_ms = None;
+    }
+    model
+}
+
+/// A real run measures its own duration, and it is a real number rather than a placeholder.
+///
+/// This is what the fixture cannot check, so it is checked here instead -- against a real run rather
+/// than a hand-written value.
+#[test]
+fn a_real_run_records_a_real_duration() {
+    let mut brain = LabBrain::new();
+    let run = LabRunner::new()
+        .run(
+            &mut brain,
+            &PlanRequest {
+                benchmark_id: Some("grid-world".to_owned()),
+                target_agent: Some("optimal".to_owned()),
+                probe_agents: Vec::new(),
+                episodes: Some(1),
+                root_seed: Some(4_242),
+            },
+            "exp-timing",
+            &GridWorldEvaluator::new(),
+            Arc::new(NullRecorder),
+        )
+        .expect("run");
+    let elapsed = run
+        .elapsed_ms
+        .expect("a run measures its own duration; this was hardcoded to None in the read model");
+    assert!(
+        elapsed < 60_000,
+        "a three-second mock episode cannot take a minute: {elapsed}ms"
+    );
+
+    // And it reaches the read model, so the panel's elapsed row is not a dead field.
+    let model = BrainReadModel::from_run(&run, BrainState::Completed, "idle");
+    assert!(
+        model
+            .experiment
+            .expect("a run has an experiment")
+            .elapsed_ms
+            .is_some(),
+        "the measured duration must reach the panel, or the field it renders can never be filled"
+    );
+}
+
 struct NullRecorder;
 
 impl TelemetryRecorder for NullRecorder {
@@ -65,7 +126,7 @@ fn emit_the_completed_run_fixture() {
         .expect("the fixture run completes");
 
     let model = BrainReadModel::from_run(&run, BrainState::Completed, "idle");
-    let bytes = serde_json::to_vec_pretty(&model).expect("the read model serializes");
+    let bytes = serde_json::to_vec_pretty(&normalized(&model)).expect("the read model serializes");
 
     if std::env::var_os("PROBELAB_WRITE_FIXTURES").is_some() {
         let path = std::path::Path::new(FIXTURE_PATH);
@@ -246,7 +307,7 @@ fn emit_the_findings_fixture() {
         experiment.security = model.security.clone();
     }
 
-    let bytes = serde_json::to_vec_pretty(&model).expect("the findings read model serializes");
+    let bytes = serde_json::to_vec_pretty(&normalized(&model)).expect("the read model serializes");
 
     if std::env::var_os("PROBELAB_WRITE_FIXTURES").is_some() {
         let path =

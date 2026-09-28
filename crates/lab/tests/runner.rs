@@ -442,3 +442,85 @@ fn not_a_security_authority() {
         "the runner must obtain its sandbox root from RunContext, not create one itself"
     );
 }
+
+/// A truncated run records its own terminal reason and how long it actually had.
+///
+/// These two facts are what stop a budget-truncated run from being read as a measurement of the model.
+/// The backend was already honest -- `TerminalReason::Timeout` is never folded into a completion --
+/// but the panel had no way to tell a reader *how* short the run was, because `elapsed_ms` was
+/// hardcoded to `None` in the read model and the runner discarded its own `Instant`.
+#[test]
+fn a_budget_truncated_run_is_recorded_as_truncated_and_timed() {
+    let mut brain = LabBrain::new();
+    // A zero budget expires before the first episode, which is the sharpest version of the question:
+    // what does the product say when it measured nothing at all?
+    let run = LabRunner::new()
+        .with_wall_clock_budget(std::time::Duration::from_millis(0))
+        .run(
+            &mut brain,
+            &plan_request(),
+            "exp-truncated",
+            &GridWorldEvaluator::new(),
+            Arc::new(CapturingRecorder::default()),
+        )
+        .expect("a truncated run is still a run");
+
+    match run.terminal_reason {
+        Some(TerminalReason::Timeout { budget_seconds }) => {
+            assert_eq!(budget_seconds, 0, "the budget is reported as configured");
+        }
+        other => panic!("a budget expiry must be its own terminal reason, got {other:?}"),
+    }
+
+    assert!(
+        run.completed() < 3,
+        "the run must be short of its plan: {} of 3 completed",
+        run.completed()
+    );
+
+    // Measured, present, and not negative. This was `None` in the read model before, so the panel
+    // could never fill its own elapsed field.
+    let elapsed = run.elapsed_ms.expect("every run measures its own duration");
+    assert!(
+        elapsed < 60_000,
+        "a zero-budget run cannot have taken a minute: {elapsed}ms"
+    );
+
+    // And the truncation appears on the timeline, not only in the terminal reason -- so the event log
+    // of a truncated run says why it stopped.
+    assert!(
+        run.timeline
+            .events()
+            .iter()
+            .any(|event| event.code == "runner.budget_exhausted"),
+        "the truncation must appear on the timeline, not only in the terminal reason"
+    );
+}
+
+/// Every run records a duration, so the panel's elapsed row is never a dead field.
+#[test]
+fn a_completed_run_also_measures_its_duration() {
+    let mut brain = LabBrain::new();
+    let run = LabRunner::new()
+        .run(
+            &mut brain,
+            &plan_request(),
+            "exp-timed",
+            &GridWorldEvaluator::new(),
+            Arc::new(CapturingRecorder::default()),
+        )
+        .expect("run");
+    assert!(
+        run.elapsed_ms.is_some(),
+        "a completed run measures its duration too; otherwise a fast mock and a slow connected run \
+         are indistinguishable in the panel"
+    );
+    // The contrast with the test above, and the reason the elapsed field is worth having: this run
+    // finished, that one did not, and the panel can now say so from the recorded facts rather than
+    // leaving a reader to guess from a small sample size.
+    assert_eq!(
+        run.terminal_reason,
+        Some(TerminalReason::Completed),
+        "and it says so explicitly rather than by omission"
+    );
+}

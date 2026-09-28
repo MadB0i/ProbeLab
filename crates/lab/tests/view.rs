@@ -500,7 +500,46 @@ fn findings_keep_their_category_and_finding_flag() {
 fn projection_is_deterministic() {
     let first = run_model(2);
     let second = run_model(2);
-    assert_eq!(first, second, "the same run must project identically");
+
+    /*
+     * Every field of the read model is a function of what the run *measured* -- and therefore
+     * reproducible from the recorded results -- except one.
+     *
+     * `elapsed_ms` is how long the execution took. It is not a result, it is a measurement *of* the
+     * execution, so two runs of the identical plan differ in it by design: 19ms and 28ms on this
+     * machine, both correct. That is the whole reason the field exists -- it is what distinguishes a
+     * fast mock from a slow connected model, and what makes a budget-truncated run legible.
+     *
+     * So it is compared separately rather than excluded. Excluding it silently would let any *other*
+     * nondeterministic field creep in beside it unnoticed, and the deterministic-projection property is
+     * worth more than one assertion's convenience: it is what lets a panel re-render from a stored run
+     * without the risk of showing a number that changes underneath the reader.
+     */
+    let without_elapsed = |model: &BrainReadModel| {
+        let mut model = model.clone();
+        if let Some(experiment) = model.experiment.as_mut() {
+            experiment.elapsed_ms = None;
+        }
+        model
+    };
+    assert_eq!(
+        without_elapsed(&first),
+        without_elapsed(&second),
+        "the same plan must project identically apart from how long it took"
+    );
+
+    // Both runs did measure themselves, and neither invented a duration.
+    for model in [&first, &second] {
+        let elapsed = model
+            .experiment
+            .as_ref()
+            .and_then(|experiment| experiment.elapsed_ms)
+            .expect("a projected run reports the time it took");
+        assert!(
+            elapsed < 60_000,
+            "a two-episode mock run cannot have taken a minute: {elapsed}ms"
+        );
+    }
 }
 
 /// A minimal valid result, for tests that only care about the integrity counters.
