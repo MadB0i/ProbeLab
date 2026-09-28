@@ -17,6 +17,8 @@ import {
   type AgentSummary,
   type BenchmarkDetail,
   type BrainReadModel,
+  type ModelRunConfig,
+  type OpenAiCompatibleModelRunConfig,
 } from "./api";
 import { BrainPanel } from "./BrainPanel";
 import { ArenaPanel } from "./ArenaPanel";
@@ -296,28 +298,11 @@ type ProviderStatus = {
   message: string;
 };
 
-/** IPC contract version shared with the Rust `ModelRunConfig` definition. */
+/** IPC contract version shared with the Rust ModelRunConfig definition. */
 const MODEL_RUN_CONFIG_SCHEMA_VERSION = 1;
 
-/** The tagged IPC payload. No API key, header map, or raw endpoint is ever accepted. */
-type MockModelRunConfig = {
-  kind: "mock";
-  schema_version: number;
-  strategy: Strategy;
-};
-
-type OpenAiCompatibleModelRunConfig = {
-  kind: "openai_compatible";
-  schema_version: number;
-  base_url: string;
-  api_key_env: string;
-  model: string;
-  timeout_seconds: number;
-  temperature: number;
-  max_tokens: number;
-};
-
-type ModelRunConfig = MockModelRunConfig | OpenAiCompatibleModelRunConfig;
+/** The mock variant of the tagged payload, narrowed for the memo below. */
+type MockModelRunConfig = Extract<ModelRunConfig, { kind: "mock" }>;
 
 type RunState = "idle" | "starting" | "running" | "finalizing" | "complete" | "error";
 type Strategy =
@@ -963,27 +948,38 @@ const App = () => {
    * The benchmark comes from the selected run target and the agent from the strategy picker, so the
    * experiment the Brain supervises is the one the user picked rather than a demo.
    */
-  const startExperiment = useCallback(async () => {
-    if (!benchmark) {
-      return;
-    }
-    setBrainRunning(true);
-    setBrainError(null);
-    try {
-      const model = await runExperiment({
-        benchmarkId: benchmark.benchmark_id,
-        agentId: selectedStrategy,
-        // From the stored settings rather than a constant, so the episode count a person set on the
-        // settings page is the one a run actually uses.
-        episodes: defaultEpisodes,
-        rootSeed: null,
-      });
-      setBrain(model);
-    } catch (error) {
-      setBrainRunning(false);
-      setBrainError(`The experiment could not start: ${formatError(error)}`);
-    }
-  }, [benchmark, selectedStrategy]);
+  const startExperiment = useCallback(
+    async (model?: ModelRunConfig) => {
+      if (!benchmark) {
+        return;
+      }
+      setBrainRunning(true);
+      setBrainError(null);
+      try {
+        const result = await runExperiment({
+          benchmarkId: benchmark.benchmark_id,
+          /*
+           * When a configuration is supplied the backend measures *that*, not the registry agent named
+           * here. The id is still sent because a plan always names an agent and it is part of the
+           * request contract; it simply is not what gets built.
+           */
+          agentId: selectedStrategy,
+          // From the stored settings rather than a constant, so the episode count a person set on the
+          // settings page is the one a run actually uses.
+          episodes: defaultEpisodes,
+          rootSeed: null,
+          // Omitted entirely rather than sent as null: `None` on the Rust side means "the named
+          // registry agent", and an explicit null would be a different thing spelled the same way.
+          ...(model ? { modelConfig: model } : {}),
+        });
+        setBrain(result);
+      } catch (error) {
+        setBrainRunning(false);
+        setBrainError(`The experiment could not start: ${formatError(error)}`);
+      }
+    },
+    [benchmark, selectedStrategy, defaultEpisodes],
+  );
   /**
    * Loads a deterministic replay of the current arena match.
    *
@@ -1341,6 +1337,16 @@ const App = () => {
           running={brainRunning}
           onRun={() => void startExperiment()}
           canRun={benchmark !== null}
+          /*
+           * The connected model goes through the *same* multi-episode runner as the mock, so a real
+           * model produces a result with an episode count and a Wilson interval rather than a single
+           * episode. That is the difference between measuring a model and merely running it once, and
+           * it is also what makes the result comparable against anything else later.
+           */
+          onRunConnected={
+            isConnected ? () => void startExperiment(connectedModelConfig) : undefined
+          }
+          canRunConnected={isConnected}
         />
     </>
   );

@@ -442,12 +442,26 @@ export function BrainPanel({
   running,
   onRun,
   canRun,
+  onRunConnected,
+  canRunConnected,
 }: {
   model: BrainReadModel | null;
   error: string | null;
   running: boolean;
   onRun: () => void;
   canRun: boolean;
+  /**
+   * Starts the same experiment against a connected model instead of the named registry agent.
+   *
+   * This is the button that makes a real model *measurable* rather than merely runnable. Both actions
+   * go through the same multi-episode runner and land in the same panel, so the result carries the
+   * same episode count, the same Wilson interval, and the same recorded provider and model -- which is
+   * what a comparison later needs. A connected run that bypassed this would produce a single episode
+   * with no interval and nothing to compare.
+   */
+  onRunConnected?: () => void;
+  /** Whether a connected model is configured and reachable. Absent means the feature is unavailable. */
+  canRunConnected?: boolean;
 }) {
   if (error) {
     return (
@@ -530,20 +544,44 @@ export function BrainPanel({
 
       <div className="brain-actions">
         {/*
-         * One control, and it starts work rather than steering it. There is deliberately no stop
-         * button: the runner has no cancellation path, and a button that only changed local state
-         * would be worse than no button.
+         * One control for the registry agent, and a second for a connected model, and they are the
+         * *same experiment* run against different subjects. There is deliberately still no stop button:
+         * the runner has no cancellation path, and a button that only changed local state would be
+         * worse than no button.
          */}
-        <button
-          type="button"
-          className="brain-run-button"
-          onClick={onRun}
-          disabled={!canRun || running}
-        >
-          {running ? "EXPERIMENT RUNNING…" : "RUN EXPERIMENT"}
-        </button>
+        <div className="brain-run-actions">
+          <button
+            type="button"
+            className="brain-run-button"
+            onClick={onRun}
+            disabled={!canRun || running}
+          >
+            {running ? "EXPERIMENT RUNNING…" : "RUN EXPERIMENT"}
+          </button>
+          {onRunConnected ? (
+            <button
+              type="button"
+              className="brain-run-button brain-run-button--connected"
+              onClick={onRunConnected}
+              disabled={!canRun || !canRunConnected || running}
+            >
+              RUN WITH CONNECTED MODEL
+            </button>
+          ) : null}
+        </div>
         {!canRun ? (
           <p className="brain-action-note">Select a benchmark and an agent to enable this.</p>
+        ) : canRunConnected === false && onRunConnected ? (
+          /*
+            Said here rather than only as a disabled control, because "why is this button dead" is a
+            question the button cannot answer. A connected run reaches a provider over the network, so
+            the reason it is unavailable is always something outside the app -- a credential that is
+            not set.
+          */
+          <p className="brain-action-note">
+            A connected model needs its API key in the configured environment variable before it can be
+            measured.
+          </p>
         ) : null}
       </div>
 

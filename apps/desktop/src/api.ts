@@ -511,11 +511,47 @@ export async function resetSettings(): Promise<SettingsView> {
   return invoke<SettingsView>("reset_settings");
 }
 
+/**
+ * The tagged model payload sent to the backend.
+ *
+ * Field names are `snake_case` here, unlike almost everything else in this file, because this one
+ * mirrors `ModelRunConfig` in `src-tauri/src/provider.rs`, which derives serde with `rename_all =
+ * "snake_case"` on the *fields* and `rename = "openai_compatible"` on the variant. Renaming these to
+ * camelCase "for consistency" would produce `undefined` on the far side of the bridge.
+ *
+ * No API key, header map, or raw endpoint is ever accepted. `apiKeyEnv` is the *name* of an
+ * environment variable, which is what a person needs in order to fix a missing credential and is not
+ * the credential itself.
+ */
+export type ModelRunConfig =
+  | { kind: "mock"; schema_version: number; strategy: string }
+  | OpenAiCompatibleModelRunConfig;
+
+export type OpenAiCompatibleModelRunConfig = {
+  kind: "openai_compatible";
+  schema_version: number;
+  base_url: string;
+  api_key_env: string;
+  model: string;
+  timeout_seconds: number;
+  temperature: number;
+  max_tokens: number;
+};
+
 export async function runExperiment(request: {
   benchmarkId: string;
   agentId: string;
   episodes: number;
   rootSeed: number | null;
+  /**
+   * The model to measure, or omitted to use the named agent from the registry.
+   *
+   * Supplying this is what makes a real model measurable across the *whole episode pool* rather than
+   * through the single-run `run_benchmark` path. Omitted means "the agent named by `agentId`", which
+   * is a built-in deterministic agent -- it does not mean the mock specifically, and it is not a
+   * default the backend substitutes.
+   */
+  modelConfig?: ModelRunConfig;
 }): Promise<BrainReadModel> {
   return invoke<BrainReadModel>("run_experiment", { request });
 }

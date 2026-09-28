@@ -2604,6 +2604,41 @@ select:disabled {
  * A left rule rather than a full border so it reads as a note attached to the facts below, not as
  * another card competing with them for attention.
  */
+/*
+ * The two run actions sit side by side because they are the same experiment against different
+ * subjects: a registry agent and a connected model. Stacking them would imply they are different
+ * experiments, or that one is a lesser fallback of the other.
+ *
+ * The connected button is visually secondary -- outlined rather than filled -- so a reader is not
+ * invited to spend money on a network call by default, while it remains the same size and weight as
+ * the deterministic one. Disabled states come from the same rule as the primary, so a disabled
+ * secondary does not look like an enabled one at a glance.
+ */
+.brain-run-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.brain-run-button--connected {
+  border-color: var(--violet);
+  background: transparent;
+  color: var(--violet);
+  transition: background 160ms ease, box-shadow 160ms ease, border-color 160ms ease,
+    color 160ms ease;
+}
+
+.brain-run-button--connected:hover:not(:disabled) {
+  background: rgba(168, 140, 255, 0.12);
+  box-shadow: 0 0 24px rgba(168, 140, 255, 0.16);
+}
+
+.brain-run-button--connected:disabled {
+  border-color: var(--line-strong);
+  background: transparent;
+  color: var(--faint);
+}
+
 .brain-truncation {
   margin: 0 0 14px;
   padding: 10px 12px;

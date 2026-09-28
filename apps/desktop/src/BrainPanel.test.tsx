@@ -621,3 +621,55 @@ describe("elapsed time", () => {
   });
 });
 
+
+/**
+ * The two run actions are the same experiment against different subjects.
+ *
+ * A connected run used to have its own single-episode path, so the product could produce a number for a
+ * real model without having measured one. Both actions now go through the same multi-episode runner and
+ * land in the same panel, which is what gives the result an episode count, a confidence interval, and a
+ * recorded provider and model.
+ */
+describe("the connected run action", () => {
+  it("is offered when a connected model is configured, and runs the same experiment", () => {
+    const onRun = vi.fn();
+    const onRunConnected = vi.fn();
+    renderPanel({
+      onRun,
+      onRunConnected,
+      canRunConnected: true,
+    });
+
+    screen.getByRole("button", { name: /run with connected model/i }).click();
+    expect(onRunConnected).toHaveBeenCalledTimes(1);
+    // The two are alternatives, not a sequence: pressing one does not also start the other.
+    expect(onRun).not.toHaveBeenCalled();
+  });
+
+  it("is disabled, with a reason, when no credential is present", () => {
+    // "Why is this button dead" is a question a disabled control cannot answer, and the reason is
+    // always something outside the app.
+    renderPanel({ onRunConnected: vi.fn(), canRunConnected: false });
+    const button = screen.getByRole("button", { name: /run with connected model/i });
+    expect(button).toBeDisabled();
+    expect(
+      screen.getByText(/api key in the configured environment variable/i),
+    ).toBeInTheDocument();
+  });
+
+  it("is not offered at all when the caller supplies no connected action", () => {
+    // Absence and disabled are different states, and conflating them would suggest the feature is
+    // broken rather than simply unavailable in this build.
+    renderPanel({});
+    expect(screen.queryByRole("button", { name: /run with connected model/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /run experiment/i })).toBeInTheDocument();
+  });
+
+  it("cannot start while a run is in flight, whichever subject it is", () => {
+    renderPanel({ onRunConnected: vi.fn(), canRunConnected: true, running: true });
+    expect(
+      screen.getByRole("button", { name: /run with connected model/i }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: /experiment running/i })).toBeDisabled();
+  });
+});

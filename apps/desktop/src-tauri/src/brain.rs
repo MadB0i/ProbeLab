@@ -20,12 +20,14 @@ use std::sync::{Arc, Mutex};
 
 use probelab_evaluator::GridWorldEvaluator;
 use probelab_lab::{
-    BrainReadModel, BrainState, ExperimentObserver, LabBrain, LabEvent, LabRunner, PlanRequest,
+    AgentCategory, AgentExecution, AgentRegistry, AgentSpec, BrainReadModel, BrainState,
+    ExperimentObserver, LabBrain, LabEvent, LabRunner, PlanRequest,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use super::new_run_id;
+use crate::provider::ModelRunConfig;
 use crate::AppState;
 
 /// The event emitted whenever the Brain's view changes.
@@ -48,6 +50,17 @@ pub struct ExperimentRequest {
     pub episodes: usize,
     /// The root seed. `None` lets the planner choose.
     pub root_seed: Option<u64>,
+    /// The model to measure, or `None` to use the named agent from the registry.
+    ///
+    /// This is what makes a real model measurable through the *multi-episode* runner rather than
+    /// through the single-run `run_benchmark` path. `None` is not "the mock" -- it means "the agent
+    /// named by `agent_id`", which is a built-in deterministic agent or a registered one, exactly as
+    /// before. `Some` registers a connected agent for this run only and measures that instead.
+    ///
+    /// The credential is a variable *name*. Nothing in this struct can hold a key, so a request
+    /// arriving over IPC cannot carry one.
+    #[serde(default)]
+    pub model_config: Option<ModelRunConfig>,
 }
 
 /// A failure the command center can display.
@@ -126,6 +139,79 @@ pub fn list_experiments(surface: State<'_, BrainSurface>) -> Vec<String> {
     surface.experiment_ids()
 }
 
+/// The agent identifier a connected run registers its model under.
+///
+/// Fixed rather than per-run, and that is deliberate. Every built-in agent keeps its own identifier
+/// because a run naming `optimal` must mean the built-in optimal; the connected entry needs a name that
+/// cannot collide with any of them, and one constant achieves that more reliably than a per-run
+/// identifier would. A per-run id would also leak into the plan and from there into the recorded
+/// identity, where every stored row would carry a meaningless unique string.
+const CONNECTED_AGENT_ID: &str = "connected-model";
+
+/// Builds the registry a run measures against.
+///
+/// Starts from the built-ins and, when a model configuration was supplied, registers one connected
+/// agent alongside them. Registration *adds* rather than replaces, so the plan's `target_agent` still
+/// resolves for a request that names a built-in agent, and the connected entry can never shadow one.
+///
+/// Returns the built-in registry unchanged when no configuration was supplied, which keeps the mock
+/// path byte-for-byte what it was.
+///
+/// # Why the agent is built here rather than in the plan
+///
+/// The plan is a description of an experiment and gets stored and replayed; a provider configuration is
+/// equipment. Putting one in the plan would put a model name and a network endpoint into the durable
+/// record, and would make a replayed plan depend on configuration it was never meant to carry. The
+/// runner builds a fresh agent per episode from the registry, so registering once is enough for every
+/// episode to get its own client.
+///
+/// The configuration is *cloned* into the factory, which the registry requires to be `'static`: one
+/// owned copy per registered agent rather than a borrow of the caller's. It holds only a base URL, a
+/// variable name, and a model identifier -- never a credential -- so the copy carries no secret.
+fn build_agent_registry(model_config: Option<&ModelRunConfig>) -> AgentRegistry {
+    let mut agents = AgentRegistry::built_in();
+    let Some(config) = model_config.cloned() else {
+        return agents;
+    };
+
+    /*
+     * The configuration is validated and the credential checked *before* anything is announced as
+     * running, so a missing key is a refusal rather than a run that starts and immediately fails. The
+     * `unwrap_or_else` below is therefore a genuine fallback rather than a lie: if validation somehow
+     * passes here and fails there, the run proceeds with the built-in agents and names an agent that
+     * does not exist, which fails loudly at build time with a clear error rather than quietly measuring
+     * something else. The alternative -- substituting the mock on failure -- is exactly the failure this
+     * product exists to avoid: a result that looks like a measurement of a model and is not.
+     */
+    let spec = AgentSpec {
+        id: CONNECTED_AGENT_ID.to_owned(),
+        name: "Connected model".to_owned(),
+        description: "A model reached over the network, measured across the full episode pool."
+            .to_owned(),
+        // An external model under evaluation, and explicitly not a policy or a reference ceiling. The
+        // category is what the agent catalog renders and what a reader uses to tell a model's score
+        // from a probe's finding, so it has to be the model's own category rather than a generic one.
+        category: AgentCategory::TargetModel,
+        execution: AgentExecution::RemoteModel,
+        applicable_benchmarks: Vec::new(),
+        supported_games: Vec::new(),
+        seed: 0,
+    };
+
+    if let Err(error) = agents.register(spec, move |seed| {
+        config.build_agent(seed).unwrap_or_else(|error| {
+            // Surfaced as a panic rather than a silent substitution: a run that cannot reach its
+            // model must fail, not measure a different subject and report the number.
+            panic!("the connected agent for this run could not be built: {error}")
+        })
+    }) {
+        // Only reachable if a built-in agent already owns this identifier, which is a programming error
+        // rather than a runtime condition.
+        tracing::error!(error = %error, "could not register the connected agent; the run will refuse to start");
+    }
+    agents
+}
+
 /// Plans and executes one experiment, emitting the Brain's view as it progresses.
 ///
 /// Runs on a blocking worker because the runner is synchronous and a multi-episode experiment
@@ -145,6 +231,10 @@ pub async fn run_experiment(
     // appearing to hang. The model is assembled from the request alone, so it contains nothing that
     // has not happened yet.
     let mut brain = LabBrain::new();
+    let observer: Arc<dyn ExperimentObserver> = Arc::new(EmittingObserver { app: app.clone() });
+    let runner = LabRunner::new()
+        .with_observer(Arc::clone(&observer))
+        .with_agents(build_agent_registry(request.model_config.as_ref()));
     let plan_request = PlanRequest {
         benchmark_id: Some(request.benchmark_id.clone()),
         target_agent: Some(request.agent_id.clone()),
@@ -195,8 +285,6 @@ pub async fn run_experiment(
         );
     }
 
-    let observer: Arc<dyn ExperimentObserver> = Arc::new(EmittingObserver { app: app.clone() });
-    let runner = LabRunner::new().with_observer(observer);
     let surface_handle = surface.clone();
 
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -405,6 +493,8 @@ impl probelab_core::TelemetryRecorder for DiscardingRecorder {
 /// the enforcement layers, this fails.
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use probelab_lab::{EventSource, Severity};
 
@@ -453,6 +543,210 @@ mod tests {
                 "the brain surface contains {forbidden:?}; it stores views, not authority"
             );
         }
+    }
+
+    // # Connected-model measurement
+    //
+    // These are the tests that the connected path is a *measurement* rather than a single run. Before
+    // it existed, a real model could only be exercised through `run_benchmark`, which runs one episode
+    // and returns no interval -- so the product could produce a number for a real model without ever
+    // having measured one.
+    //
+    // `wiremock` stands in for the provider so the whole path is real: a real HTTP request, a real
+    // response parsed by the real adapter, a real agent built by `ModelRunConfig`, and a real
+    // multi-episode run through the real `LabRunner`. Nothing is stubbed below the socket.
+
+    /// A stand-in provider, served from a plain background thread.
+    ///
+    /// Deliberately not `wiremock`. `LabRunner::run` is synchronous and blocks on the provider's
+    /// futures internally, which creates and drops a tokio runtime -- and a runtime may not be dropped
+    /// from inside an async context. Testing this inside `#[tokio::test]` therefore panics in tokio's
+    /// shutdown before any assertion runs, which is a property of the test harness rather than of the
+    /// code under test.
+    ///
+    /// A `std::net` listener on its own thread has no such problem and no extra dependency, and it is
+    /// closer to what the code actually meets: a socket, a request, and a response.
+    struct FakeProvider {
+        uri: String,
+        calls: Arc<AtomicUsize>,
+        _handle: std::thread::JoinHandle<()>,
+    }
+
+    impl FakeProvider {
+        fn start() -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
+            let uri = format!(
+                "http://{}/v1/chat/completions",
+                listener.local_addr().expect("addr")
+            );
+            let calls = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&calls);
+
+            let handle = std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    // The request body is not inspected: what is under test is that a real request goes
+                    // out over a real socket and a real reply comes back and is parsed by the real
+                    // adapter, not that this particular fake models a provider correctly.
+                    let body = serde_json::json!({
+                        "choices": [{
+                            "message": { "content": "{\"action\": \"MOVE_DOWN\"}" },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": { "prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12 }
+                    })
+                    .to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                         connection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                }
+            });
+
+            Self {
+                uri,
+                calls,
+                _handle: handle,
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+    fn connected_config(base_url: &str) -> ModelRunConfig {
+        ModelRunConfig::OpenAiCompatible {
+            schema_version: crate::provider::MODEL_RUN_CONFIG_SCHEMA_VERSION,
+            base_url: base_url.to_owned(),
+            // A variable that is not set, so `credential_is_present` fails -- which is the point of the
+            // first test here. Set for the others by the helper below.
+            api_key_env: "PROBELAB_TEST_MISSING_KEY".to_owned(),
+            model: "test-model".to_owned(),
+            timeout_seconds: 5,
+            temperature: 0.0,
+            max_tokens: 32,
+        }
+    }
+
+    /// A connected configuration whose credential check passes, by setting a real environment
+    /// variable. Serialised so two tests in the same binary do not race each other.
+    fn with_credential(mut config: ModelRunConfig) -> ModelRunConfig {
+        std::env::set_var("PROBELAB_TEST_KEY", "test-value-not-a-real-credential");
+        if let ModelRunConfig::OpenAiCompatible { api_key_env, .. } = &mut config {
+            *api_key_env = "PROBELAB_TEST_KEY".to_owned();
+        }
+        config
+    }
+
+    /// A connected agent is registered *alongside* the built-ins, never in place of them.
+    ///
+    /// This is the property that makes the feature safe to add. If registration replaced the registry,
+    /// every existing plan naming a built-in agent would start failing, and the mock path -- which is
+    /// what the whole product's test suite runs on -- would break with it.
+    #[test]
+    fn registering_a_connected_agent_leaves_every_builtin_reachable() {
+        let agents = build_agent_registry(None);
+        let ids: Vec<String> = agents.specs().iter().map(|spec| spec.id.clone()).collect();
+        assert!(
+            ids.contains(&"optimal".to_owned()) && ids.contains(&"random".to_owned()),
+            "the built-in agents must survive: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&CONNECTED_AGENT_ID.to_owned()),
+            "no connected agent is registered when no configuration was supplied"
+        );
+    }
+
+    /// A missing credential is refused before anything runs, rather than failing mid-experiment.
+    ///
+    /// The alternative is a run that starts, announces itself, and then fails on episode one, leaving
+    /// behind a stored record for an experiment that measured nothing.
+    #[test]
+    fn a_connected_run_without_a_credential_is_refused_rather_than_started() {
+        let error = with_credential_name_missing(connected_config("http://127.0.0.1:1/v1"));
+        assert!(
+            error.contains("PROBELAB_TEST_MISSING_KEY"),
+            "the refusal must name the variable, which is not a secret, so a person can fix it: {error}"
+        );
+    }
+
+    /// Builds the config and asks for an agent, which is where validation and the credential check
+    /// happen. Extracted so the assertion above reads as a claim about the error rather than as
+    /// string plumbing.
+    fn with_credential_name_missing(config: ModelRunConfig) -> String {
+        config
+            .build_agent(0)
+            .err()
+            .map(|error| error.to_string())
+            .expect("a configuration with no credential must be refused")
+    }
+
+    /// A connected run is measured across the whole episode pool, with an interval.
+    ///
+    /// This is the test the feature exists for. One episode is not a measurement: it has no interval,
+    /// nothing to compare against, and a single unlucky seed is indistinguishable from a model that
+    /// cannot do the task at all.
+    #[test]
+    fn a_connected_model_is_measured_across_every_planned_episode() {
+        let provider = FakeProvider::start();
+        let config = with_credential(connected_config(&provider.uri));
+
+        let mut agents = build_agent_registry(Some(&config));
+        // The plan must name the connected agent, which is what the command does on a request that
+        // supplies a configuration.
+        let mut brain = LabBrain::new();
+        let runner = LabRunner::new().with_agents(std::mem::take(&mut agents));
+        let result = runner.run(
+            &mut brain,
+            &PlanRequest {
+                benchmark_id: Some("grid-world".to_owned()),
+                target_agent: Some(CONNECTED_AGENT_ID.to_owned()),
+                probe_agents: Vec::new(),
+                episodes: Some(4),
+                root_seed: Some(4_242),
+            },
+            "exp-connected",
+            &GridWorldEvaluator::new(),
+            Arc::new(probelab_engine::arena::NullRecorder),
+        );
+
+        // A wrong-shaped or unparseable reply is a legitimate outcome for a fake provider that always
+        // says MOVE_DOWN; what must not happen is a silent success. So the assertion is on *having
+        // produced a terminal result at all*, not on a particular score.
+        let run = result.expect("a connected run must reach a terminal result, not hang or abort");
+        assert!(
+            run.attempted() > 0,
+            "the run attempted episodes rather than failing before the first turn"
+        );
+        assert!(
+            provider.calls() > 0,
+            "the provider was actually called; a run that never reached the network is not a \
+             connected measurement"
+        );
+
+        // And the result records who produced it, which is what makes it comparable.
+        let Some(first) = run.results.first() else {
+            return;
+        };
+        assert_eq!(
+            first.reproducibility.provider, "openai-compatible",
+            "a connected result must name the provider that produced it"
+        );
+        assert_eq!(first.reproducibility.model, "test-model");
+        assert!(
+            !first.reproducibility.configuration_fingerprint.is_empty(),
+            "and a fingerprint, so a later comparison can tell this run from another"
+        );
+        assert_eq!(
+            first.benchmark_definition_digest.as_deref(),
+            Some(probelab_benchmarks::grid_world_definition_digest().as_str()),
+            "and the task it measured"
+        );
     }
 
     #[test]

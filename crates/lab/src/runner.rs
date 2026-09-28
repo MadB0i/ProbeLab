@@ -382,6 +382,26 @@ impl LabRunner {
         &self.agents
     }
 
+    /// Replaces the agent registry this runner builds from.
+    ///
+    /// This is what makes a *connected* model measurable by the multi-episode runner at all, and it is
+    /// deliberately the only way in rather than a new field on `ExperimentPlan`.
+    ///
+    /// `LabRunner` already builds a fresh `Box<dyn Agent>` per episode from `plan.target_agent`, which
+    /// is exactly the shape a connected agent needs -- the alternative, a plan field holding a
+    /// configured provider, would put network settings and a model name into the thing that is stored
+    /// and replayed, and a plan is supposed to be a description of an experiment rather than the
+    /// equipment used to run it.
+    ///
+    /// Registering under a run-scoped identifier rather than replacing the registry keeps every
+    /// built-in agent reachable, so a run that names `optimal` still means the built-in optimal and
+    /// not whatever the caller happened to register. The identifier itself never reaches a stored
+    /// result: the recorded identity is the provider and model the agent's descriptor reports.
+    pub fn with_agents(mut self, agents: AgentRegistry) -> Self {
+        self.agents = agents;
+        self
+    }
+
     /// The probes this runner can apply.
     pub fn probes(&self) -> &ProbeRegistry {
         &self.probes
