@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "Domain contracts and trusted benchmark data for ProbeLab"
+# Stamps the git commit into the binary so a stored result records what measured it. See `build.rs`.
+build = "build.rs"
 
 [dependencies]
 serde.workspace = true

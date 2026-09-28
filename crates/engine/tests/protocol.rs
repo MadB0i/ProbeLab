@@ -259,6 +259,10 @@ struct RestrictedBenchmark {
 
 impl Benchmark for RestrictedBenchmark {
     fn summary(&self) -> BenchmarkSummary {
+        // `..Default::default()` rather than a full literal. This is a test double, not the real
+        // grid-world benchmark, so it has no embedded definition to hash and no honest digest to
+        // report -- and saying so with an empty field is the point. A fabricated digest here would be
+        // a test asserting against an identity this benchmark does not have.
         BenchmarkSummary {
             benchmark_id: "grid-world".to_owned(),
             benchmark_version: probelab_evaluator::GRID_WORLD_BENCHMARK_VERSION.to_owned(),
@@ -268,6 +272,7 @@ impl Benchmark for RestrictedBenchmark {
             seed: 123,
             max_turns: self.max_turns,
             metadata: Default::default(),
+            ..BenchmarkSummary::default()
         }
     }
 

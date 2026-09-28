@@ -29,6 +29,49 @@ pub const GRID_WORLD_BENCHMARK_VERSION: &str = "2";
 /// The only capability dimension represented by the grid-world benchmark.
 pub const GRID_WORLD_CAPABILITY_DIMENSION: &str = "grid-world planning";
 
+/// A content digest of an embedded benchmark definition.
+///
+/// # Why this exists alongside `version`
+///
+/// The version is a hand-maintained string, and the loader *rejects* a definition whose version does
+/// not match the constant -- so a definition can be edited and the loader will still accept it, as
+/// long as whoever edited it did not remember to bump the number. Nothing in the build fails when a
+/// seed pool grows, a turn budget changes, or the reward function moves, and a result recorded before
+/// that edit is then silently comparable with one recorded after. The replay digest catches changed
+/// *state*; this catches a changed *task*.
+///
+/// The digest is computed over the definition's own bytes, so it cannot drift from what was loaded.
+/// It is a second identifier rather than a replacement for the version: the version is the thing a
+/// human reads and bumps, and the digest is the thing that is actually true.
+///
+/// # Format
+///
+/// `sha256:<64 lowercase hex>`. The prefix is there so the field is self-describing in a stored bundle
+/// and so a future algorithm change is visible in the data rather than silent.
+pub fn definition_digest(definition_json: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(definition_json.as_bytes());
+    let mut out = String::with_capacity(7 + 64);
+    out.push_str("sha256:");
+    for byte in digest {
+        // `write!` into a `String` cannot fail, and formatting two hex digits per byte is clearer than
+        // a hex crate dependency for exactly one call site.
+        out.push(char::from_digit((byte >> 4) as u32, 16).expect("a nibble is a hex digit"));
+        out.push(char::from_digit((byte & 0x0f) as u32, 16).expect("a nibble is a hex digit"));
+    }
+    out
+}
+
+/// The digest of the built-in grid-world definition.
+pub fn grid_world_definition_digest() -> String {
+    definition_digest(GRID_WORLD_DEFINITION_JSON)
+}
+
+/// The digest of the built-in sandbox-process definition.
+pub fn sandbox_process_definition_digest() -> String {
+    definition_digest(SANDBOX_PROCESS_DEFINITION_JSON)
+}
+
 /// A validated, versioned grid-world definition.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -299,6 +342,11 @@ impl GridWorldDefinition {
         BenchmarkSummary {
             benchmark_id: self.id.clone(),
             benchmark_version: self.version.clone(),
+            // Empty here. This is the definition on its own, with no record of the bytes it was loaded
+            // from; the two `impl Benchmark` blocks below fill in the real digest, because they are the
+            // ones that hold the JSON. Left empty rather than computed from a re-serialization, because
+            // a digest of bytes nobody kept is a claim about a file that may no longer exist.
+            definition_digest: String::new(),
             title: self.title.clone(),
             description: self.description.clone(),
             capability_dimension: self.capability_dimension.clone(),
@@ -313,6 +361,14 @@ impl GridWorldDefinition {
 #[derive(Clone, Debug)]
 pub struct GridWorldBenchmark {
     definition: GridWorldDefinition,
+    /// The exact bytes the definition was loaded from.
+    ///
+    /// Kept rather than re-serialized from definition on demand, because hashing a re-serialization
+    /// would hash whatever the current field order and whitespace produced rather than the file that
+    /// was actually embedded -- two digests for one definition, differing for reasons that have
+    /// nothing to do with the task. A definition digest has to be a property of the bytes, or it is
+    /// not a digest.
+    definition_json: String,
 }
 
 impl GridWorldBenchmark {
@@ -331,7 +387,13 @@ impl GridWorldBenchmark {
 
     /// Parses and validates a serialized grid-world definition.
     pub fn from_json(json: &str) -> Result<Self, BenchmarkDefinitionError> {
-        Self::from_definition(GridWorldDefinition::from_json(json)?)
+        let mut benchmark = Self::from_definition(GridWorldDefinition::from_json(json)?)?;
+        // Prefer the file's own bytes over the canonical re-serialization. Same definition, same
+        // digest -- but if someone reformats the JSON without changing a single value, the digest
+        // moves too, which is the conservative direction: a changed digest costs a re-baseline, a
+        // missed edit costs a wrong comparison.
+        benchmark.definition_json = json.to_owned();
+        Ok(benchmark)
     }
 
     /// Validates and owns a grid-world definition.
@@ -339,7 +401,17 @@ impl GridWorldBenchmark {
         definition: GridWorldDefinition,
     ) -> Result<Self, BenchmarkDefinitionError> {
         definition.validate()?;
-        Ok(Self { definition })
+        // No raw bytes were supplied, so canonicalise the parsed definition instead. This is
+        // deterministic -- `serde_json` writes struct fields in declaration order and every map in a
+        // definition is a `BTreeMap` -- so an unmodified definition always yields the same digest, and
+        // a *modified* one yields a different digest. That is the property the tests that mutate a
+        // definition rely on.
+        let definition_json =
+            serde_json::to_string(&definition).map_err(BenchmarkDefinitionError::Json)?;
+        Ok(Self {
+            definition,
+            definition_json,
+        })
     }
 
     /// Returns the validated embedded definition.
@@ -360,7 +432,14 @@ impl GridWorldBenchmark {
 
 impl Benchmark for GridWorldBenchmark {
     fn summary(&self) -> BenchmarkSummary {
-        self.definition.summary()
+        // The digest is filled in here rather than in GridWorldDefinition::summary because this is
+        // the layer that kept the bytes. Re-serializing the parsed definition instead would hash field
+        // order and whitespace as much as the task, so a pure reformat would move the digest and a
+        // real edit might not.
+        BenchmarkSummary {
+            definition_digest: definition_digest(&self.definition_json),
+            ..self.definition.summary()
+        }
     }
 
     /// The benchmark's own declared evaluation pool, disjoint from the seeds it was developed against.
@@ -441,6 +520,9 @@ pub const SANDBOX_PROCESS_DEFINITION_JSON: &str =
 #[derive(Clone, Debug)]
 pub struct SandboxProcessBenchmark {
     definition: GridWorldDefinition,
+    /// The exact bytes the definition was loaded from, for the same reason GridWorldBenchmark keeps
+    /// them: the digest has to be a property of the file, not of a re-serialization of it.
+    definition_json: String,
     program: String,
     /// Held for its `Drop`, which removes the directory, and as the single source of truth for
     /// which directory is the answer key.
@@ -533,7 +615,9 @@ impl SandboxProcessBenchmark {
     /// latter validates against the *grid world's* identity as part of parsing and would reject this
     /// definition before the correct check ran.
     pub fn from_json(json: &str) -> Result<Self, BenchmarkDefinitionError> {
-        Self::from_definition(GridWorldDefinition::parse_unvalidated(json)?)
+        let mut benchmark = Self::from_definition(GridWorldDefinition::parse_unvalidated(json)?)?;
+        benchmark.definition_json = json.to_owned();
+        Ok(benchmark)
     }
 
     /// Validates and owns a definition.
@@ -546,8 +630,11 @@ impl SandboxProcessBenchmark {
             SANDBOX_PROCESS_CAPABILITY_DIMENSION,
         )?;
         let answer_key = AnswerKey::create()?;
+        let definition_json =
+            serde_json::to_string(&definition).map_err(BenchmarkDefinitionError::Json)?;
         Ok(Self {
             definition,
+            definition_json,
             program: declared_child_program(),
             answer_key,
         })
@@ -586,7 +673,14 @@ fn declared_child_program() -> String {
 
 impl Benchmark for SandboxProcessBenchmark {
     fn summary(&self) -> BenchmarkSummary {
-        self.definition.summary()
+        // The digest is filled in here rather than in GridWorldDefinition::summary because this is
+        // the layer that kept the bytes. Re-serializing the parsed definition instead would hash field
+        // order and whitespace as much as the task, so a pure reformat would move the digest and a
+        // real edit might not.
+        BenchmarkSummary {
+            definition_digest: definition_digest(&self.definition_json),
+            ..self.definition.summary()
+        }
     }
 
     /// The benchmark's own declared evaluation pool, disjoint from its development seeds.

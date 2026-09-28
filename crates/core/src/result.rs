@@ -7,12 +7,27 @@ use crate::{
 };
 
 /// A discoverable benchmark description safe for the UI.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+///
+/// `Default` is derived, which is what lets a test double report an empty `definition_digest` by
+/// spelling out only the fields it cares about. A double has no embedded definition to hash, so an
+/// empty digest is the truth; requiring every caller to name the field is what would tempt them into
+/// inventing one.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BenchmarkSummary {
     /// Stable benchmark identifier.
     pub benchmark_id: String,
     /// Versioned definition identifier.
     pub benchmark_version: String,
+    /// A content digest of the benchmark definition, computed from its bytes.
+    ///
+    /// Added alongside `benchmark_version` because that field is a hand-maintained string that a
+    /// definition edit does not have to change -- the loader only checks the two agree, so a seed pool
+    /// or a turn budget can move with the version untouched. This one cannot drift, which makes it what
+    /// a stored result should be compared on.
+    ///
+    /// Empty for a summary produced before this field existed. That is a recorded absence rather than a
+    /// computed one: there is no way to recover a digest for a definition that is no longer embedded.
+    pub definition_digest: String,
     /// Human-readable title.
     pub title: String,
     /// Short benchmark purpose.
@@ -280,6 +295,29 @@ impl IntegrityResult {
     }
 }
 
+/// The lab's own version, read from `Cargo.toml` at compile time.
+///
+/// Always in step with the manifest, and unlike a hand-maintained constant it cannot drift.
+pub const PROBELAB_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The commit this binary was built from.
+///
+/// Stamped by `crates/core/build.rs` from `git rev-parse --short HEAD`, with `-dirty` appended when
+/// the working tree did not match it. `unknown` when there was no git to ask -- a vendored tree, a
+/// published crate, a release pipeline that passed nothing. That is a recorded absence, and it is
+/// better than a plausible-looking wrong value.
+///
+/// `option_env!` rather than `env!` on purpose: this constant is part of a public API, and a build
+/// that somehow fails to run the build script should produce `unknown` rather than failing to
+/// compile the crate that every other crate depends on. The emptiness check is `matches!` on the
+/// whitespace characters directly, because `str::trim` is not `const`.
+pub const BUILD_COMMIT: &str = match option_env!("PROBELAB_COMMIT_SHA") {
+    Some(commit) if !matches!(commit.as_bytes(), [] | [b' '] | [b'\t'] | [b'\n'] | [b'\r']) => {
+        commit
+    }
+    _ => "unknown",
+};
+
 /// Safe non-secret metadata needed to reproduce a benchmark run.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
@@ -298,6 +336,17 @@ pub struct ReproducibilityMetadata {
     pub token_usage: TokenUsage,
     /// Consecutive protocol failures required to terminate this run.
     pub protocol_failure_threshold: u32,
+    /// The lab's own version, from `Cargo.toml`.
+    ///
+    /// The other fields here describe the *subject* of a run. This one describes the instrument.
+    /// Without it, two results from the same benchmark, seed, and model are indistinguishable even
+    /// when the code that produced them was rewritten between them, and a regression cannot be
+    /// attributed to the change that caused it.
+    pub probelab_version: String,
+    /// The git commit this binary was built from.
+    ///
+    /// `unknown` is an honest absence rather than a failure; see [`BUILD_COMMIT`].
+    pub commit_sha: String,
 }
 
 impl Default for ReproducibilityMetadata {
@@ -310,7 +359,29 @@ impl Default for ReproducibilityMetadata {
             environment_version: String::new(),
             token_usage: TokenUsage::default(),
             protocol_failure_threshold: PROTOCOL_FAILURE_THRESHOLD,
+            probelab_version: PROBELAB_VERSION.to_owned(),
+            // Empty rather than `BUILD_COMMIT`, and that asymmetry is deliberate.
+            //
+            // `Default` means "nothing is known about the subject of this run", and a *default* has no
+            // run behind it -- so claiming a commit here would stamp a build identity onto metadata
+            // nobody produced. The commit belongs to the code path that actually creates a result, and
+            // `ReproducibilityMetadata::for_run` is that path. An empty string here reads as "not
+            // recorded", which is the truth.
+            commit_sha: String::new(),
         }
+    }
+}
+
+impl ReproducibilityMetadata {
+    /// Metadata for a run this binary is actually producing.
+    ///
+    /// Starts from the supplied fields and stamps the build identity, so every call site records what
+    /// measured the run without each one having to remember. Constructing the struct literally instead
+    /// would leave a future field silently empty at every site that forgot it.
+    pub fn for_run(mut self) -> Self {
+        self.probelab_version = PROBELAB_VERSION.to_owned();
+        self.commit_sha = BUILD_COMMIT.to_owned();
+        self
     }
 }
 

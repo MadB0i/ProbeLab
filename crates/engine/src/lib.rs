@@ -854,6 +854,11 @@ fn bounded_failure(mut failure: ModelCallFailure) -> ModelCallFailure {
 }
 
 fn reproducibility_from_descriptor(model: &ModelDescriptor) -> ReproducibilityMetadata {
+    // `..ReproducibilityMetadata::default()` rather than a full literal, deliberately. This function
+    // is the single place a result's reproducibility record is built, and a full struct literal means
+    // every field added later is silently empty here unless someone remembers -- which is precisely
+    // how `probelab_version` and `commit_sha` were going to end up recorded as blank in every stored
+    // result while looking correct in review.
     ReproducibilityMetadata {
         provider: descriptor_string(model, "provider").unwrap_or_else(|| model.adapter.clone()),
         model: descriptor_string(model, "model").unwrap_or_else(|| model.strategy.clone()),
@@ -862,9 +867,10 @@ fn reproducibility_from_descriptor(model: &ModelDescriptor) -> ReproducibilityMe
         configuration_fingerprint: descriptor_string(model, "configuration_fingerprint")
             .unwrap_or_default(),
         environment_version: descriptor_string(model, "environment_version").unwrap_or_default(),
-        token_usage: TokenUsage::default(),
-        protocol_failure_threshold: PROTOCOL_FAILURE_THRESHOLD,
+        ..ReproducibilityMetadata::default()
     }
+    // And the build identity, stamped by the one constructor that means "a run is happening".
+    .for_run()
 }
 
 fn descriptor_string(descriptor: &ModelDescriptor, key: &str) -> Option<String> {

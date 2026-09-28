@@ -30,9 +30,9 @@ use serde::{Deserialize, Serialize};
 use probelab_core::{BenchmarkSummary, ProcessSpawnPlan};
 
 use crate::{
-    Benchmark, BenchmarkCatalogError, GridWorldBenchmark, SandboxProcessBenchmark,
-    GRID_WORLD_BENCHMARK_ID, GRID_WORLD_BENCHMARK_VERSION, SANDBOX_PROCESS_BENCHMARK_ID,
-    SANDBOX_PROCESS_BENCHMARK_VERSION,
+    grid_world_definition_digest, sandbox_process_definition_digest, Benchmark,
+    BenchmarkCatalogError, GridWorldBenchmark, SandboxProcessBenchmark, GRID_WORLD_BENCHMARK_ID,
+    GRID_WORLD_BENCHMARK_VERSION, SANDBOX_PROCESS_BENCHMARK_ID, SANDBOX_PROCESS_BENCHMARK_VERSION,
 };
 
 /// How completely a benchmark's declared capabilities are implemented.
@@ -94,6 +94,16 @@ pub struct BenchmarkSpec {
     pub id: String,
     /// Definition version. A version bump invalidates comparability with older results.
     pub version: String,
+    /// A content digest of the definition's bytes, computed rather than maintained.
+    ///
+    /// `version` is hand-maintained, and the loader only checks that a definition *agrees* with it --
+    /// so the definition can be edited (a seed pool grown, a turn budget moved, the reward function
+    /// changed) with the build still green and the string still whatever it was. Results recorded
+    /// either side of such an edit would then compare as though they had measured the same task.
+    ///
+    /// The digest cannot drift from what was actually loaded, which makes it the identifier a
+    /// comparison can trust. See `probelab_benchmarks::definition_digest`.
+    pub definition_digest: String,
     /// Human-readable name.
     pub name: String,
     /// One-paragraph description of what the benchmark measures.
@@ -282,6 +292,7 @@ fn grid_world_entry() -> BenchmarkEntry {
         spec: BenchmarkSpec {
             id: GRID_WORLD_BENCHMARK_ID.to_owned(),
             version: GRID_WORLD_BENCHMARK_VERSION.to_owned(),
+            definition_digest: grid_world_definition_digest(),
             name: "Grid World".to_owned(),
             description: definition.description.clone(),
             category: BenchmarkCategory::Planning,
@@ -353,6 +364,7 @@ fn sandbox_process_entry() -> BenchmarkEntry {
         spec: BenchmarkSpec {
             id: SANDBOX_PROCESS_BENCHMARK_ID.to_owned(),
             version: SANDBOX_PROCESS_BENCHMARK_VERSION.to_owned(),
+            definition_digest: sandbox_process_definition_digest(),
             name: "Sandbox Process".to_owned(),
             description: definition.description.clone(),
             category: BenchmarkCategory::CapabilityGated,

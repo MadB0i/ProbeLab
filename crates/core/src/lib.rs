@@ -40,7 +40,7 @@ pub use outcome::{ActionOutcome, ActionResultKind, Episode, EpisodeStatus, StepO
 pub use result::{
     ActionTraceEntry, BenchmarkSummary, CapabilityResult, CompletedRun, CompletionStatus,
     EvaluationInput, IntegrityResult, ProtocolAdherence, ReproducibilityMetadata, RunMetadata,
-    TestResult, PROTOCOL_FAILURE_THRESHOLD,
+    TestResult, BUILD_COMMIT, PROBELAB_VERSION, PROTOCOL_FAILURE_THRESHOLD,
 };
 pub use security::{IntegrityEventKind, PolicyDecision, RuntimeAuthorization};
 pub use telemetry::{GameTelemetry, ResourceInfo, TelemetryEvent};
