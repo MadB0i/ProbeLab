@@ -93,9 +93,19 @@ function BenchmarkRow({ benchmark }: { benchmark: BenchmarkDetail }) {
 export function BenchmarkCatalog({
   benchmarks,
   onSelect,
+  selectedId,
 }: {
   benchmarks: BenchmarkDetail[];
   onSelect?: (benchmark: BenchmarkDetail) => void;
+  /**
+   * The benchmark that will actually run, so the catalog can say which one is chosen.
+   *
+   * Separate from `onSelect` because a picker and a selection indicator are different facts. A
+   * component that only knew it had a handler would render a list of identical buttons and leave the
+   * reader to guess which one was active; passing the current id lets the row carry `aria-current`
+   * and change its label, so the choice is stated rather than inferred from what is not highlighted.
+   */
+  selectedId?: string | null;
 }) {
   if (benchmarks.length === 0) {
     return (
@@ -107,21 +117,37 @@ export function BenchmarkCatalog({
   }
   return (
     <ul className="benchmark-list">
-      {benchmarks.map((benchmark) => (
-        <div key={benchmark.id} className="benchmark-item">
-          {onSelect ? (
-            <button
-              type="button"
-              className="benchmark-select"
-              onClick={() => onSelect(benchmark)}
-              aria-label={`Open ${benchmark.name}`}
-            >
-              Open
-            </button>
-          ) : null}
-          <BenchmarkRow benchmark={benchmark} />
-        </div>
-      ))}
+      {benchmarks.map((benchmark) => {
+        const isSelected = benchmark.id === selectedId;
+        return (
+          <div
+            key={benchmark.id}
+            className={isSelected ? "benchmark-item benchmark-item-active" : "benchmark-item"}
+          >
+            {onSelect ? (
+              <button
+                type="button"
+                className="benchmark-select"
+                onClick={() => onSelect(benchmark)}
+                /*
+                 * `aria-current` rather than a pressed state: this chooses which benchmark a run will
+                 * use, which is navigation within a set, not a toggle. Announcing "current" is the
+                 * fact; a colour change alone is not.
+                 */
+                aria-current={isSelected ? "true" : undefined}
+                aria-label={
+                  isSelected
+                    ? `${benchmark.name}, currently selected`
+                    : `Select ${benchmark.name}`
+                }
+              >
+                {isSelected ? "Selected" : "Select"}
+              </button>
+            ) : null}
+            <BenchmarkRow benchmark={benchmark} />
+          </div>
+        );
+      })}
     </ul>
   );
 }

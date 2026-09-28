@@ -670,7 +670,29 @@ const App = () => {
   const pendingErrorRef = useRef<Record<string, RunErrorEnvelope[]>>({});
   const providerStatusRequestRef = useRef(0);
 
-  const benchmark = benchmarks[0] ?? null;
+  /*
+   * Which benchmark is selected, and the one the rest of the app reads.
+   *
+   * This was `benchmarks[0] ?? null`: a hardcoded first element that nothing could change. Two
+   * consequences, both real. The catalog's select button renders only when `onSelect` is passed, and it
+   * never was, so the most interesting benchmark in the product -- sandbox-process, the only one that
+   * exercises a boundary -- could not be reached from the UI at all. And because index 0 was
+   * authoritative, choosing anything else could not have changed what ran, so this was not a missing
+   * feature but a broken promise: the README lists both benchmarks as implemented and only one of them
+   * was reachable.
+   *
+   * The fallback to the first entry is deliberate and only applies until a person picks. Having a
+   * default is right -- a run needs a benchmark, and an empty picker would block the product's main
+   * action behind a click nobody needs. What was wrong was that the default was *the only* value
+   * reachable. Once `selectedBenchmarkId` is set it is authoritative, and if that benchmark is no
+   * longer registered the result is `null` rather than a silent slide back to the first entry: a run
+   * should refuse to start against a benchmark the picker no longer offers.
+   */
+  const [selectedBenchmarkId, setSelectedBenchmarkId] = useState<string | null>(null);
+  const benchmark =
+    benchmarks.find((item) => item.benchmark_id === selectedBenchmarkId) ??
+    (selectedBenchmarkId === null ? (benchmarks[0] ?? null) : null);
+
   const latestEvent = telemetry.at(-1) ?? null;
   const gridSize = latestEvent?.observation.grid_size ?? { width: 5, height: 5 };
 
@@ -1414,21 +1436,52 @@ const App = () => {
             </div>
             {benchmarksLoading && <div className="state-message">Loading static catalog…</div>}
             {benchmarksError && <div className="error-message">{benchmarksError}</div>}
-            {benchmark && (
+            {/*
+              Every benchmark in the catalog, with the selected one marked.
+
+              This card used to render exactly one row, hardcoded to index `01` and labelled SELECTED,
+              so the two-row catalog showed a single entry that always claimed to be the choice. Now
+              that the picker is wired, all of them are listed and the marker means something: the
+              benchmark that will actually run, which is also the one the progress denominator and the
+              run request are read from.
+
+              `aria-current` carries the selection for a screen reader, so the marker is not a colour
+              and a position.
+            */}
+            {benchmarks.length > 0 ? (
               <div className="benchmark-listing">
-                <div className="benchmark-row benchmark-row-active">
-                  <div className="benchmark-index">01</div>
-                  <div className="benchmark-info">
-                    <strong>{benchmark.title}</strong>
-                    <span>{benchmark.description}</span>
-                    <div className="benchmark-meta">
-                      <span>v{benchmark.benchmark_version}</span>
-                      <span>SEED {benchmark.seed}</span>
-                      <span>{benchmark.max_turns} TURNS</span>
+                {benchmarks.map((entry, index) => {
+                  const isSelected = entry.benchmark_id === benchmark?.benchmark_id;
+                  return (
+                    <div
+                      key={entry.benchmark_id}
+                      className={
+                        isSelected
+                          ? "benchmark-row benchmark-row-active"
+                          : "benchmark-row"
+                      }
+                      aria-current={isSelected ? "true" : undefined}
+                    >
+                      <div className="benchmark-index">
+                        {(index + 1).toString().padStart(2, "0")}
+                      </div>
+                      <div className="benchmark-info">
+                        <strong>{entry.title}</strong>
+                        <span>{entry.description}</span>
+                        <div className="benchmark-meta">
+                          <span>v{entry.benchmark_version}</span>
+                          <span>SEED {entry.seed}</span>
+                          <span>{entry.max_turns} TURNS</span>
+                        </div>
+                      </div>
+                      <span className="ready-pill">{isSelected ? "SELECTED" : "AVAILABLE"}</span>
                     </div>
-                  </div>
-                  <span className="ready-pill">SELECTED</span>
-                </div>
+                  );
+                })}
+              </div>
+            ) : benchmarksLoading ? null : (
+              <div className="state-message">
+                No benchmarks are registered, so there is nothing to run.
               </div>
             )}
             <div className="card-footer">
@@ -1962,7 +2015,11 @@ const App = () => {
                 countLabel="BENCHMARKS"
                 error={registryError}
               >
-                <BenchmarkCatalogPanel benchmarks={registryBenchmarks} />
+                <BenchmarkCatalogPanel
+        benchmarks={registryBenchmarks}
+        onSelect={(entry) => setSelectedBenchmarkId(entry.id)}
+        selectedId={benchmark?.benchmark_id ?? null}
+      />
               </RegistryPanel>
               <section className="route-single" aria-label="Selected benchmark">
                 {viewsuiteCard}

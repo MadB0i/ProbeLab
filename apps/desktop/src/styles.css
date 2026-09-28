@@ -2124,6 +2124,20 @@ select:disabled {
   position: relative;
 }
 
+/*
+ * The selected benchmark. Marked on the row as well as the button, because the button's own label
+ * already says "Selected" and a reader scanning the list needs the whole entry to show it rather than
+ * a word floating in the corner.
+ */
+.benchmark-item-active::before {
+  position: absolute;
+  inset: 0;
+  border-left: 2px solid var(--cyan);
+  content: "";
+  pointer-events: none;
+}
+
+
 .benchmark-select {
   position: absolute;
   top: 10px;
