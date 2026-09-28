@@ -8,6 +8,7 @@
     "dev": "vite --host localhost --port 1420",
     "build": "tsc -b && vite build",
     "test": "vitest run",
+    "check:styles": "node scripts/check-style-legibility.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev"
   },

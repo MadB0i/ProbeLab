@@ -29,6 +29,7 @@ import type {
   ExperimentView,
   SecuritySummary,
   SignalView,
+  TerminalReasonView,
   TimelineEntryView,
 } from "./api";
 
@@ -57,11 +58,35 @@ export function lifecycleLabel(state: string): string {
 }
 
 /** Human wording for a terminal reason, which the backend tags as `snake_case{kind,detail}`. */
-export function terminalLabel(reason: string | null): string {
+/**
+ * A human label for why a run stopped.
+ *
+ * `reason` is the adjacently tagged object the backend sends — `{"kind": "completed"}`, or
+ * `{"kind": "provider_failure", "detail": {"kind": "timeout"}}` — not a string. This function used to
+ * take a `string` and call `.replace()` on it, which threw on every real completed run. The string
+ * branch is kept only as a defensive fallback: if the shape ever changes again, an unreadable label
+ * is a far better outcome than a panel that throws while rendering a finished experiment.
+ */
+export function terminalLabel(reason: TerminalReasonView | null): string {
   if (reason === null) {
     return "Still running";
   }
-  return reason.replace(/_/g, " ");
+  const kind =
+    typeof reason === "string" ? reason : typeof reason.kind === "string" ? reason.kind : null;
+  if (kind === null) {
+    return "Ended for an unrecognised reason";
+  }
+  const words = kind.replace(/_/g, " ");
+  // The tagged variants carry the adapter's own classification, and dropping it would report a
+  // provider timeout as a bare "provider failure" — less specific than the backend already knows.
+  const detail = typeof reason === "string" ? null : reason.detail;
+  if (detail !== undefined && detail !== null && typeof detail === "object" && "kind" in detail) {
+    const inner = (detail as { kind: unknown }).kind;
+    if (typeof inner === "string" && inner.length > 0) {
+      return `${words} (${inner.replace(/_/g, " ")})`;
+    }
+  }
+  return words;
 }
 
 /** The tone for a timeline entry. Never conveys meaning by colour alone — see the text label. */

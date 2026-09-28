@@ -113,6 +113,52 @@ export type Anomaly = {
   isSecurityFinding: boolean;
 };
 
+/**
+ * Why an experiment stopped, as `TerminalReason` serializes.
+ *
+ * An adjacently tagged object, not a string: `#[serde(tag = "kind", content = "detail")]` in
+ * `crates/lab/src/experiment.rs`. `{"kind": "completed"}` for the plain case, and
+ * `{"kind": "provider_failure", "detail": {"kind": "timeout"}}` when the adapter classified it.
+ *
+ * This was declared `string | null` here, and the panel's `terminalLabel` called `.replace()` on it —
+ * so a real completed run threw `TypeError: reason.replace is not a function`. No test caught it
+ * because the frontend fixture supplied a hand-written string that the backend never sends. The shape
+ * is now checked against a payload the backend generated; see `src/test-fixtures/`.
+ */
+export type TerminalReasonView = {
+  kind: string;
+  /** Present only on the variants that carry a classification. */
+  detail?: unknown;
+};
+
+/** Aggregate over every completed episode: a point estimate and the uncertainty around it. */
+export type WilsonInterval = {
+  point: number;
+  lower: number;
+  upper: number;
+  confidence: number;
+};
+
+/** Everything measured across the run's episodes, not per-episode. */
+export type ExperimentAggregate = {
+  episodes: number;
+  successes: number;
+  successRate: number;
+  /**
+   * The Wilson interval for `successRate`.
+   *
+   * This is the field that stops a 3-episode run from being read as a 33% result. It is rendered in the
+   * panel, and before it was the interval the backend computed for every single experiment was sent
+   * across the bridge and never read by any component.
+   */
+  successInterval: WilsonInterval;
+  meanReward: number;
+  meanTurns: number;
+  statusCounts: Record<string, number>;
+  /** The seed pool episodes were drawn from, or null when the plan pinned individual seeds. */
+  seedPool: string | null;
+};
+
 export type ExperimentView = {
   experimentId: string;
   benchmarkId: string;
@@ -131,8 +177,10 @@ export type ExperimentView = {
    * is indistinguishable from a model that failed every episode.
    */
   meanSuccessFraction: number | null;
+  /** Always present, even when no episode completed — a ratio of zero, not a score of zero. */
+  aggregate: ExperimentAggregate;
   lifecycle: string;
-  terminalReason: string | null;
+  terminalReason: TerminalReasonView | null;
   elapsedMs: number | null;
   decisions: DecisionView[];
   episodes: EpisodeView[];

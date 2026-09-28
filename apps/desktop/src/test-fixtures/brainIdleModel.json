@@ -1,0 +1,15 @@
+{
+  "brainState": "planning",
+  "nextIntent": "",
+  "experiment": null,
+  "observedEvents": 0,
+  "findings": [],
+  "signals": [],
+  "security": {
+    "integrityViolations": 0,
+    "brokerRefusals": 0,
+    "violationsByCategory": {},
+    "refusalsByCategory": {},
+    "invalidActions": 0
+  }
+}

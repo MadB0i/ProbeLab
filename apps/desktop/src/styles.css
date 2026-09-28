@@ -96,7 +96,7 @@ a:focus-visible {
   border: 1px solid var(--cyan-dim);
   color: var(--cyan);
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: -1px;
   box-shadow: inset 0 0 20px rgba(84, 229, 225, 0.08);
 }
@@ -149,7 +149,7 @@ a:focus-visible {
 .system-status {
   gap: 9px;
   color: var(--cyan);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .system-status .muted {
@@ -230,7 +230,7 @@ a:focus-visible {
 }
 
 .nav-brand-sub {
-  font-size: 0.6rem;
+  font-size: 11px;
   letter-spacing: 0.14em;
   color: var(--muted);
 }
@@ -284,7 +284,7 @@ a:focus-visible {
 
 .nav-note {
   margin: 0;
-  font-size: 0.62rem;
+  font-size: 11px;
   line-height: 1.5;
   color: var(--muted);
 }
@@ -404,7 +404,7 @@ a:focus-visible {
 .compare-pick-meta,
 .compare-pick-note {
   grid-column: 2;
-  font-size: 0.64rem;
+  font-size: 11px;
   color: var(--muted);
 }
 
@@ -469,7 +469,7 @@ a:focus-visible {
 .compare-refusal-note,
 .compare-refusal-ids {
   margin: 0;
-  font-size: 0.66rem;
+  font-size: 11px;
   color: var(--muted);
   line-height: 1.5;
 }
@@ -490,7 +490,7 @@ a:focus-visible {
 }
 
 .compare-facts dt {
-  font-size: 0.58rem;
+  font-size: 11px;
   letter-spacing: 0.14em;
   color: var(--muted);
 }
@@ -512,7 +512,7 @@ a:focus-visible {
 
 .compare-block-title {
   margin: 0;
-  font-size: 0.66rem;
+  font-size: 11px;
   letter-spacing: 0.14em;
   color: var(--cyan);
 }
@@ -526,7 +526,7 @@ a:focus-visible {
 .compare-table th {
   padding: 6px 8px;
   text-align: left;
-  font-size: 0.58rem;
+  font-size: 11px;
   letter-spacing: 0.12em;
   color: var(--muted);
   border-bottom: 1px solid var(--line);
@@ -545,7 +545,7 @@ a:focus-visible {
 
 .compare-direction {
   margin-left: 5px;
-  font-size: 0.62rem;
+  font-size: 11px;
   color: var(--muted);
 }
 
@@ -560,7 +560,7 @@ a:focus-visible {
 
 .compare-runs summary {
   cursor: pointer;
-  font-size: 0.66rem;
+  font-size: 11px;
   letter-spacing: 0.1em;
   color: var(--muted);
 }
@@ -623,7 +623,7 @@ a:focus-visible {
 
 .settings-provider-label {
   margin-right: 8px;
-  font-size: 0.58rem;
+  font-size: 11px;
   letter-spacing: 0.14em;
   color: var(--muted);
 }
@@ -640,7 +640,7 @@ a:focus-visible {
   margin: 0;
   padding: 10px 12px;
   border: 1px dashed var(--line-strong);
-  font-size: 0.68rem;
+  font-size: 11px;
   line-height: 1.55;
   color: var(--muted);
 }
@@ -660,7 +660,7 @@ a:focus-visible {
  */
 .field-error {
   margin: 4px 0 0;
-  font-size: 0.66rem;
+  font-size: 11px;
   line-height: 1.5;
   color: #f0b24a;
 }
@@ -676,7 +676,7 @@ a:focus-visible {
 }
 
 .settings-readonly dt {
-  font-size: 0.58rem;
+  font-size: 11px;
   letter-spacing: 0.14em;
   color: var(--muted);
   margin-bottom: 5px;
@@ -1189,7 +1189,7 @@ select:disabled {
   color: #061017;
   cursor: pointer;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.1em;
   transition: background 160ms ease, box-shadow 160ms ease, transform 160ms ease;
@@ -1230,7 +1230,7 @@ select:disabled {
   min-height: 0;
   margin: 11px 0 0;
   color: var(--amber);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .model-exchange {
@@ -1258,7 +1258,7 @@ select:disabled {
   overflow: auto;
   color: var(--text);
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
@@ -1333,7 +1333,7 @@ select:disabled {
   gap: 7px;
   color: var(--faint);
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .turn-readout strong {
@@ -1567,7 +1567,7 @@ select:disabled {
 .event-main strong {
   overflow: hidden;
   color: var(--text);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
   text-overflow: ellipsis;
   text-transform: uppercase;
@@ -1937,7 +1937,7 @@ select:disabled {
 
 .agent-group-title {
   margin: 0 0 8px;
-  font-size: 10.5px;
+  font-size: 11px;
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--muted);
@@ -1980,7 +1980,7 @@ select:disabled {
 }
 
 .agent-category {
-  font-size: 9.5px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   color: var(--muted);
   white-space: nowrap;
@@ -2009,7 +2009,7 @@ select:disabled {
 
 .agent-facts dt,
 .benchmark-facts dt {
-  font-size: 9.5px;
+  font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--muted);
@@ -2049,7 +2049,7 @@ select:disabled {
 .benchmark-limits li {
   display: flex;
   gap: 5px;
-  font-size: 10.5px;
+  font-size: 11px;
   border: 1px solid var(--line);
   border-radius: 3px;
   padding: 2px 6px;
@@ -2071,7 +2071,7 @@ select:disabled {
   position: absolute;
   top: 10px;
   right: 12px;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   padding: 3px 9px;
@@ -2088,7 +2088,7 @@ select:disabled {
 }
 
 .badge {
-  font-size: 9.5px;
+  font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   padding: 2px 7px;
@@ -2233,7 +2233,7 @@ select:disabled {
 }
 
 .status-label {
-  font-size: 9.5px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--muted);
@@ -2354,7 +2354,7 @@ select:disabled {
 }
 
 .brain-facts dt {
-  font-size: 9.5px;
+  font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--muted);
@@ -2406,7 +2406,7 @@ select:disabled {
 
 .decision-kind {
   color: var(--cyan);
-  font-size: 10.5px;
+  font-size: 11px;
   letter-spacing: 0.06em;
 }
 
@@ -2422,7 +2422,7 @@ select:disabled {
 .decision-rationale {
   grid-column: 1 / -1;
   font-family: inherit;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--muted);
 }
 
@@ -2451,7 +2451,7 @@ select:disabled {
 
 .signal-meaning,
 .finding-kind {
-  font-size: 9.5px;
+  font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
@@ -2468,7 +2468,7 @@ select:disabled {
 
 .finding-interpretation {
   grid-column: 1 / -1;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--muted);
 }
 
@@ -2487,7 +2487,7 @@ select:disabled {
 
 .security-block h4 {
   margin: 0 0 4px;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.13em;
   text-transform: uppercase;
   font-weight: 600;
@@ -2519,7 +2519,7 @@ select:disabled {
 
 .security-gloss {
   margin: 0;
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.5;
   color: var(--muted);
 }
@@ -2547,7 +2547,7 @@ select:disabled {
 }
 
 .security-breakdown dt {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--faint);
 }
 
@@ -2564,7 +2564,7 @@ select:disabled {
 
 .brain-failures h4 {
   margin: 0 0 6px;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--amber);
@@ -2614,7 +2614,7 @@ select:disabled {
 
 .event-code {
   color: var(--cyan);
-  font-size: 10.5px;
+  font-size: 11px;
   overflow-wrap: anywhere;
 }
 
@@ -2684,7 +2684,7 @@ select:disabled {
 }
 
 .arena-status {
-  font-size: 10.5px;
+  font-size: 11px;
   letter-spacing: 0.14em;
   padding: 2px 9px;
   border-radius: 3px;
@@ -2859,7 +2859,7 @@ select:disabled {
 }
 
 .seat-meta {
-  font-size: 9.5px;
+  font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--muted);
@@ -2903,7 +2903,7 @@ select:disabled {
 
 .arena-illegal h4 {
   margin: 0 0 6px;
-  font-size: 9.5px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--amber);
@@ -2922,7 +2922,7 @@ select:disabled {
 .arena-illegal li {
   display: flex;
   gap: 8px;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--faint);
 }
 
@@ -2948,7 +2948,7 @@ select:disabled {
 
 .arena-no-human-note {
   margin: 10px 0 0;
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.55;
   color: var(--muted);
   border-left: 2px solid var(--line-strong);
@@ -3007,7 +3007,7 @@ select:disabled {
 }
 
 .security-status {
-  font-size: 10.5px;
+  font-size: 11px;
   letter-spacing: 0.14em;
   padding: 2px 9px;
   border-radius: 3px;
@@ -3062,7 +3062,7 @@ select:disabled {
 }
 
 .security-summary-label {
-  font-size: 9.5px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--muted);
@@ -3076,7 +3076,7 @@ select:disabled {
 }
 
 .security-summary-gloss {
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.5;
   color: var(--muted);
 }
@@ -3157,7 +3157,7 @@ select:disabled {
 }
 
 .probe-outcome {
-  font-size: 9.5px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   padding: 2px 7px;
@@ -3180,7 +3180,7 @@ select:disabled {
 
 .probe-id {
   margin: 3px 0 0;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--muted);
 }
 
@@ -3243,7 +3243,7 @@ select:disabled {
 .probe-breakdown li {
   display: flex;
   gap: 6px;
-  font-size: 10.5px;
+  font-size: 11px;
 }
 
 .probe-category {
@@ -3257,7 +3257,7 @@ select:disabled {
 
 .probe-breakdown-empty {
   margin: 0;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--muted);
   font-style: italic;
 }
@@ -3301,7 +3301,7 @@ select:disabled {
 
 .security-total-block h4 {
   margin: 0 0 4px;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.13em;
   text-transform: uppercase;
   font-weight: 600;
@@ -3328,7 +3328,7 @@ select:disabled {
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--faint);
 }
 /* ---------------------------------------------------------------------------
@@ -3345,7 +3345,7 @@ select:disabled {
 }
 
 .replay-capability {
-  font-size: 10.5px;
+  font-size: 11px;
   letter-spacing: 0.14em;
   padding: 2px 9px;
   border-radius: 3px;
@@ -3407,7 +3407,7 @@ select:disabled {
 }
 
 .replay-facts dt {
-  font-size: 9.5px;
+  font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--muted);
@@ -3478,7 +3478,7 @@ select:disabled {
 }
 
 .replay-frame-source {
-  font-size: 9.5px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--cyan);
@@ -3491,7 +3491,7 @@ select:disabled {
 }
 
 .replay-frame-digest {
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--muted);
   margin-left: auto;
 }
@@ -3506,7 +3506,7 @@ select:disabled {
 
 .replay-limitations h3 {
   margin: 0 0 6px;
-  font-size: 9.5px;
+  font-size: 11px;
   letter-spacing: 0.13em;
   text-transform: uppercase;
   color: var(--amber);
@@ -3536,7 +3536,7 @@ select:disabled {
 
 .replay-timeline h3 {
   margin: 0 0 8px;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--muted);
@@ -3597,7 +3597,7 @@ select:disabled {
 
 .replay-row-label {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10.5px;
+  font-size: 11px;
   overflow-wrap: anywhere;
 }
 
@@ -3616,21 +3616,35 @@ select:disabled {
 /*
  * # Legibility floor
  *
- * Every rule above this one that set a font size below 11px has been raised to 11px. The reason is
+ * Every rule in this file that sets a font size below 11px has been raised to 11px. The reason is
  * worth recording, because it is a value judgement rather than a rule:
  *
- * 7px, 8px, and 9px were used in 37 rules for eyebrows, captions, metric labels, run ids, and event
- * counts. Those are not decorative -- they are the labels on every measured number in the product, and
- * a label nobody can read means a number nobody can attribute. The palette itself passes contrast at
- * those sizes (`--muted` is about 5:1, `--cyan` about 9:1), so the failure was size, not colour: WCAG
- * contrast ratios assume text a person can actually resolve, and 7px at 100% zoom on a laptop is not.
+ * Small sizes were used for eyebrows, captions, metric labels, run ids, and event counts. Those are not
+ * decorative -- they are the labels on every measured number in the product, and a label nobody can read
+ * means a number nobody can attribute. The palette itself passes contrast at those sizes (`--muted` is
+ * about 5:1, `--cyan` about 9:1), so the failure was size, not colour: WCAG contrast ratios assume text a
+ * person can actually resolve, and 7px at 100% zoom on a laptop is not.
  *
  * 11px is the floor. It is not comfortable, and it is not the target -- the target is that nobody has
  * to squint at a metric label. Anything smaller needs a reason written next to it.
  *
  * The hierarchy is also no longer inverted: `--faint` used to be *lighter* than `--muted` while being
  * used for strictly secondary information, which is backwards. `--faint` is now the dimmer of the two.
+ *
+ * ## The first pass at this was wrong, and said it was not
+ *
+ * An earlier version of this comment claimed the floor had been applied everywhere. It had not: 58 rules
+ * were still below 11px. The check that produced the original number matched `font-size: 7px` and
+ * `9.5px` but not `font-size: 0.6rem`, and this file mixes both units freely, so every `rem` rule was
+ * invisible to it. The claim survived review because it was written in a comment rather than asserted in
+ * a test, and a prose assertion about a stylesheet cannot fail.
+ *
+ * That is the same failure mode as the `Anomaly` wire bug fixed in this change set -- both ends agreed,
+ * so nothing disagreed -- and it is why the floor is now enforced by `check-style-legibility.mjs`, which
+ * parses the stylesheet and converts both units before comparing. A comment claiming a property of the
+ * code is a wish; a test that fails when the property stops holding is a floor.
  */
+
 
 :root {
   /* The dimmest text token, for the least important text in a panel. Now genuinely dimmer than

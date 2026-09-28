@@ -737,3 +737,112 @@ fn the_stored_terminal_reason_is_the_serde_representation() {
         );
     }
 }
+
+/// A finding the Brain can report reaches the frontend with the names the frontend declares.
+///
+/// Added because `Anomaly` was the one type on the Brain panel's read path with no `rename_all`, so it
+/// serialized `is_security_finding` while `apps/desktop/src/api.ts` declared `isSecurityFinding`. The
+/// consequence was not a crash: an absent property is `undefined` on arrival, which is falsy, so every
+/// anomaly rendered as "pattern only" and the security sub-count was permanently zero. A boundary
+/// finding would have been invisible in the panel whose whole job is to show it.
+///
+/// Nothing caught it, which is the part worth recording. Two tests were green throughout:
+/// `crates/lab/tests/view.rs` round-trips the read model with the *same* decoder that wrote it, so both
+/// ends agreed on snake_case; and the React fixture in `BrainPanel.test.tsx` *typed* `isSecurityFinding`
+/// rather than deriving it from the wire, so the frontend was green against a shape the backend never
+/// sent. A round-trip test passes when both ends drift together, which is the one case that does not
+/// matter. This test pins literals instead, for the type the drift guard had no entry for.
+///
+/// `category` is asserted as the serde spelling of the enum (`broker_denial`) while the *field names*
+/// around it are camelCase. That asymmetry is correct and worth seeing explicitly: `rename_all` on a
+/// struct does not reach into a nested enum's own `rename_all`.
+#[test]
+fn a_brain_finding_keeps_the_field_names_the_frontend_declares() {
+    use probelab_lab::{
+        Anomaly, BrainReadModel, ObservedCategory, SignalInterpretation, SignalView,
+    };
+
+    let finding: BrainReadModel = assert_wire(
+        json!({
+            "brainState": "observing",
+            "nextIntent": "Review repeated_broker_denials (broker denial, 4 observed)",
+            "experiment": null,
+            "observedEvents": 12,
+            "findings": [
+                {
+                    "id": "repeated_broker_denials",
+                    "category": "broker_denial",
+                    "interpretation": "The broker refused the same kind of request repeatedly.",
+                    "occurrences": 4,
+                    "isSecurityFinding": false
+                },
+                {
+                    "id": "repeated_integrity_events",
+                    "category": "integrity_event",
+                    "interpretation": "The integrity layer recorded boundary violations.",
+                    "occurrences": 3,
+                    "isSecurityFinding": true
+                }
+            ],
+            "signals": [
+                {
+                    "id": "task_success",
+                    "label": "Episodes that reached the goal",
+                    "count": 7,
+                    "interpretation": "neutral"
+                }
+            ],
+            "security": {
+                "integrityViolations": 3,
+                "brokerRefusals": 4,
+                "violationsByCategory": { "integrity_event": 3 },
+                "refusalsByCategory": { "broker_denial": 4 },
+                "invalidActions": 2
+            }
+        }),
+        "BrainReadModel with findings",
+    );
+
+    // The flag must survive the round trip as a *value*, not just as a key. Asserting the key exists
+    // would pass even if the boolean were dropped, and `false` is the value that renders as "pattern
+    // only" -- so the false case is the one worth pinning alongside the true one.
+    let broker = finding
+        .findings
+        .iter()
+        .find(|anomaly| anomaly.id == "repeated_broker_denials")
+        .expect("the broker finding survives");
+    assert!(
+        !broker.is_security_finding,
+        "a broker refusal is a correct refusal and must never be a finding"
+    );
+    assert_eq!(broker.category, ObservedCategory::BrokerDenial);
+
+    let integrity = finding
+        .findings
+        .iter()
+        .find(|anomaly| anomaly.id == "repeated_integrity_events")
+        .expect("the integrity finding survives");
+    assert!(
+        integrity.is_security_finding,
+        "an integrity event is a finding on its own terms"
+    );
+
+    // A bare `Anomaly` too, so a future change to the struct alone still fails here.
+    let bare: Anomaly = assert_wire(
+        json!({
+            "id": "containment_events",
+            "category": "containment_event",
+            "interpretation": "Containment reported an event.",
+            "occurrences": 1,
+            "isSecurityFinding": false
+        }),
+        "Anomaly",
+    );
+    assert!(!bare.is_security_finding);
+
+    // The signal interpretation round-trips as its own enum spelling, so the panel's tone mapping
+    // (`violation` / `correct_refusal` / `protocol_shortfall` / `operational` / `neutral`) can branch
+    // on a value the backend really emits.
+    let signal: &SignalView = &finding.signals[0];
+    assert_eq!(signal.interpretation, SignalInterpretation::Neutral);
+}

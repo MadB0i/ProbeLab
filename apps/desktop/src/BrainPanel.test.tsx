@@ -5,13 +5,37 @@
  * `BrainReadModel` the backend produces, and most of the assertions are about what the panel does
  * *not* show: no score when nothing was measured, no combined security number, no narrative reasoning,
  * and no fabricated rows in an empty monitoring view.
+ *
+ * # Two of these fixtures used to be hand-written, and that is what hid two wire bugs
+ *
+ * The `experiment()` and `model()` builders below were written by hand from `api.ts`, which means they
+ * were written from the *consumer's* idea of the producer — and so they agreed with `api.ts` even when
+ * the backend disagreed. Two bugs lived in exactly that gap:
+ *
+ * 1. `Anomaly` had no `#[serde(rename_all)]`, so the backend sent `is_security_finding` while `api.ts`
+ *    said `isSecurityFinding`. The hand-written finding used the TypeScript spelling, so the panel read
+ *    `undefined` — falsy — and rendered every finding as "pattern only" with a security count of zero.
+ * 2. `TerminalReason` is adjacently tagged, so the backend sends `{"kind":"completed"}`. `api.ts` said
+ *    `string`, the fixture said `"completed"`, and `terminalLabel`'s `.replace()` was never run against
+ *    a real payload. On a real run it threw.
+ *
+ * Both are now covered twice: the builders below match the real wire shape, and
+ * `BrainPanel.test.tsx`'s sibling `renderRealBackendPayloads` renders the JSON the backend actually
+ * generates. Those files are produced by `PROBELAB_WRITE_FIXTURES=1 cargo test -p probelab-lab
+ * --test emit_fixture` and pinned against live serialization by that same test, so a rename on either
+ * side now fails here instead of in production.
  */
 
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { BrainPanel, formatScore, brainStateLabel } from "./BrainPanel";
+import { BrainPanel, formatScore, brainStateLabel, terminalLabel } from "./BrainPanel";
 import type { BrainReadModel, ExperimentView } from "./api";
+
+import realCompletedRun from "./test-fixtures/brainReadModel.json";
+import realIdleBrain from "./test-fixtures/brainIdleModel.json";
+import realFindings from "./test-fixtures/brainFindingsModel.json";
+
 
 function experiment(overrides: Partial<ExperimentView> = {}): ExperimentView {
   return {
@@ -25,8 +49,18 @@ function experiment(overrides: Partial<ExperimentView> = {}): ExperimentView {
     episodesCompleted: 3,
     episodesFailed: 0,
     meanSuccessFraction: 0.94,
-    lifecycle: "Completed",
-    terminalReason: "completed",
+    aggregate: {
+      episodes: 3,
+      successes: 3,
+      successRate: 0.94,
+      successInterval: { point: 0.94, lower: 0.6, upper: 0.99, confidence: 0.95 },
+      meanReward: 7.5,
+      meanTurns: 8.2,
+      statusCounts: { success: 3 },
+      seedPool: "eval",
+    },
+    lifecycle: "completed",
+    terminalReason: { kind: "completed" },
     elapsedMs: null,
     decisions: [
       { kind: "select_benchmark", value: "grid-world", rationale: "chosen from the registry" },
@@ -405,3 +439,70 @@ describe("BrainPanel — accessibility", () => {
     expect(screen.getByText(/CONNECTING/i)).toBeInTheDocument();
   });
 });
+
+/**
+ * The panel is rendered against JSON the backend generated, not against a hand-written idea of it.
+ *
+ * Each fixture in `./test-fixtures/` is produced by `crates/lab/tests/emit_fixture.rs` using the real
+ * `BrainReadModel` and the real `serde`, and that Rust test also asserts its live serialization still
+ * matches the committed bytes. So these three assertions are chained to the producer: if a field is
+ * renamed in Rust the generator fails, and if a field is renamed in `api.ts` TypeScript fails to
+ * compile at the `as BrainReadModel` casts below.
+ */
+describe("payloads the backend actually produced", () => {
+  it("renders a completed run without throwing, and labels how it ended", () => {
+    // The regression this pins is a crash, not a wrong value: `terminalReason` is
+    // `{"kind":"completed"}`, and the old `terminalLabel` called `.replace()` on that object.
+    const model = realCompletedRun as unknown as BrainReadModel;
+
+    render(
+      <BrainPanel model={model} error={null} running={false} onRun={() => {}} canRun />,
+    );
+
+    // The `Ended` row's value. Before the fix this cell threw while rendering.
+    expect(screen.getByText("completed")).toBeInTheDocument();
+    // This run scored 1 of 3, and the panel says so to one decimal rather than rounding 0.3333 into
+    // a clean-looking 33%.
+    expect(screen.getByText("33.3%")).toBeInTheDocument();
+  });
+
+  it("labels a provider failure with the adapter's own classification", () => {
+    // `{"kind":"provider_failure","detail":{"kind":"timeout"}}` must not render as a bare
+    // "provider failure" — the backend already knows it was a timeout.
+    expect(terminalLabel({ kind: "provider_failure", detail: { kind: "timeout" } })).toBe(
+      "provider failure (timeout)",
+    );
+    expect(terminalLabel({ kind: "completed" })).toBe("completed");
+    expect(terminalLabel(null)).toBe("Still running");
+  });
+
+  it("tells a correct refusal apart from a real violation", () => {
+    // The exact distinction the `is_security_finding` bug erased: four broker denials are the broker
+    // working, and three integrity events are findings. Rendered from real bytes, so the flag is
+    // genuinely present rather than hand-supplied.
+    const model = realFindings as unknown as BrainReadModel;
+
+    render(
+      <BrainPanel model={model} error={null} running={false} onRun={() => {}} canRun />,
+    );
+
+    const refusals = screen.getByText("repeated broker denials").closest("li");
+    expect(refusals).not.toBeNull();
+    expect(within(refusals as HTMLElement).getByText("PATTERN ONLY")).toBeInTheDocument();
+    expect(within(refusals as HTMLElement).queryByText("SECURITY FINDING")).toBeNull();
+
+    const findings = screen.getByText("repeated integrity events").closest("li");
+    expect(findings).not.toBeNull();
+    expect(within(findings as HTMLElement).getByText("SECURITY FINDING")).toBeInTheDocument();
+    expect(within(findings as HTMLElement).queryByText("PATTERN ONLY")).toBeNull();
+  });
+
+  it("renders the idle Brain as a real state rather than an empty panel", () => {
+    const model = realIdleBrain as unknown as BrainReadModel;
+    render(
+      <BrainPanel model={model} error={null} running={false} onRun={() => {}} canRun />,
+    );
+    expect(screen.getByText(/has been given nothing to run/i)).toBeInTheDocument();
+  });
+});
+

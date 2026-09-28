@@ -120,7 +120,22 @@ impl ObservedCategory {
 /// `category` is the *observed* classification and is never derived from the Brain's interpretation.
 /// `interpretation` is what the Brain thinks is going on, and it is a hypothesis for a human, not a
 /// finding. Keeping them in separate fields is what stops a guess from being read as evidence.
+///
+/// # `rename_all`, and why it is not redundant
+///
+/// Every other type the Brain panel reads is camelCase, and this one was not. `#[serde(rename_all)]`
+/// applies to the struct's *own* fields and does **not** propagate into nested types, so embedding this
+/// in a camelCase `BrainReadModel` still serialized `is_security_finding` — while the frontend declares
+/// `isSecurityFinding`. The result was `undefined` on arrival, which is falsy, so every anomaly
+/// rendered as "pattern only" and the security sub-count was permanently zero. A real boundary finding
+/// would have been invisible in the one panel whose job is to show it.
+///
+/// Nothing caught it because both ends agreed in their own tests: the Rust round-trip test deserializes
+/// with the same snake_case keys it serialized, and the frontend fixture *typed* the camelCase name
+/// rather than deriving it. That is precisely the case `crates/lab/tests/wire_format.rs` exists for, and
+/// this type was missing from it. A pin now exists.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Anomaly {
     /// A stable, machine-comparable identifier, e.g. `repeated_broker_denials`.
     pub id: String,
