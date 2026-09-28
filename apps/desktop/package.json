@@ -9,8 +9,10 @@
     "build": "tsc -b && vite build",
     "test": "vitest run",
     "check:styles": "node scripts/check-style-legibility.mjs",
+    "check:icons": "node scripts/check-icons-current.mjs",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev"
+    "tauri:dev": "tauri dev",
+    "icons": "tauri icon src-tauri/app-icon.svg -o src-tauri/icons && node scripts/copy-favicon.mjs && node scripts/check-icons-current.mjs --write"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

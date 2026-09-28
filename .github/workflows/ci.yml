@@ -74,6 +74,26 @@ jobs:
       - name: Build the frontend
         run: pnpm build
         working-directory: apps/desktop
+      - name: Enforce the legibility floor
+        # Asserts no rendered font size falls below 11px, in both `px` and `rem`. The floor used to
+        # live only in a CSS comment that claimed it was satisfied while 58 rules were under it --
+        # the original check matched `px` and not `rem`, and this stylesheet mixes both. A comment
+        # cannot fail, so it is a script now.
+        run: pnpm check:styles
+        working-directory: apps/desktop
+      - name: Check the app icons match their source
+        # `app-icon.svg` used to be referenced by nothing: a file that looked like the icon source and
+        # was not one, so editing it changed nothing a user would see. `pnpm icons` regenerates every
+        # platform size from it; this fails if the SVG and the generated outputs drift apart, which is
+        # the way that file becomes dead again.
+        run: pnpm check:icons
+        working-directory: apps/desktop
+      - name: Check the cross-language fixtures match live serialization
+        # The Brain panel's frontend fixtures were hand-written from `api.ts`, which is how two wire
+        # bugs survived a full audit: a finding's `is_security_finding` flag and a tagged
+        # `terminalReason` object both disagreed with the consumer while every test was green. The
+        # fixtures are now emitted by the backend and pinned against it.
+        run: cargo test --locked -p probelab-lab --all-features --test emit_fixture
       - name: Check the feature matrix is current
         # Reads the REAL `generate_handler![]` list and the real `invoke` calls in the frontend, and
         # fails in both directions. The previous version grepped `#[tauri::command]`, which marks a

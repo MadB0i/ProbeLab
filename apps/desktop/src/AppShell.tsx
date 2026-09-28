@@ -26,6 +26,8 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
+import { BrandLockup } from "./Brand";
+
 /** One destination in the command center. */
 export type RouteId =
   | "lab"
@@ -214,8 +216,7 @@ export function AppShell({ routes }: { routes: Record<RouteId, ReactNode> }) {
 
       <nav className="shell-nav" aria-label="Command center sections">
         <div className="nav-brand">
-          <span className="nav-brand-mark">PROBE//LAB</span>
-          <span className="nav-brand-sub">EVALUATION LABORATORY</span>
+          <BrandLockup />
         </div>
         {/*
           No `role="list"`. The children are `<button>` elements, and ARIA requires a `list` to contain

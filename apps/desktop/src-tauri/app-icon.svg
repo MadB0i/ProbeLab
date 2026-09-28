@@ -1,6 +1,43 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" fill="#070a12"/>
-  <rect x="42" y="42" width="428" height="428" fill="none" stroke="#54e5e1" stroke-width="14"/>
-  <path d="M140 156h58l58 200 58-200h58" fill="none" stroke="#a88cff" stroke-width="28" stroke-linecap="square" stroke-linejoin="miter"/>
-  <circle cx="256" cy="256" r="22" fill="#54e5e1"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="ProbeLab">
+  <!--
+    Containment rings.
+
+    The mark is the product's actual claim rather than a decoration: a subject at the centre, held
+    inside nested boundaries, with the outermost one visibly broken. That gap is the point. ProbeLab
+    exists to find out whether a boundary holds, and a logo of three unbroken circles would assert an
+    answer the lab has not earned.
+
+    Read from the inside out, each ring is a layer the runner really has:
+      centre      the subject under test
+      inner ring  the model adapter and response protocol
+      middle ring the broker, which grants or refuses capabilities
+      outer ring  containment, and the only ring drawn open
+
+    The gap in the outer ring is a real gap in the path geometry, not a colour change, so it survives
+    being scaled down to a 32px taskbar icon and rasterised to 16px for a favicon.
+  -->
+  <rect width="512" height="512" fill="#070a12" />
+
+  <!-- Containment: open. The one boundary under test, so the one not drawn closed. -->
+  <circle
+    cx="256" cy="256" r="196"
+    fill="none" stroke="#54e5e1" stroke-width="26" stroke-linecap="butt"
+    stroke-dasharray="900 332" transform="rotate(24 256 256)"
+  />
+
+  <!-- The broker: grants or refuses. Violet, to sit between the two cyan layers. -->
+  <circle
+    cx="256" cy="256" r="140"
+    fill="none" stroke="#a88cff" stroke-width="22" stroke-linecap="butt"
+    stroke-dasharray="700 180" transform="rotate(-42 256 256)"
+  />
+
+  <!-- The adapter and protocol: the tightest layer around the subject. -->
+  <circle
+    cx="256" cy="256" r="88"
+    fill="none" stroke="#54e5e1" stroke-width="20"
+  />
+
+  <!-- The subject under test. -->
+  <circle cx="256" cy="256" r="30" fill="#54e5e1" />
 </svg>

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AppShell } from "./AppShell";
+import { BrandLockup } from "./Brand";
 import { ComparisonPanel } from "./ComparisonPanel";
 import { SettingsPanel } from "./SettingsPanel";
 import { AgentCatalog } from "./AgentCatalog";
@@ -1845,13 +1846,7 @@ const App = () => {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <div className="brand-lockup">
-          <div className="brand-mark" aria-hidden="true">P//L</div>
-          <div>
-            <div className="brand-name">PROBE<span>//</span>LAB</div>
-            <div className="brand-subtitle">AI CAPABILITY &amp; AGENT EVALUATION</div>
-          </div>
-        </div>
+        <BrandLockup compact />
         <div className="system-status" aria-live="polite">
           <span className={`status-light ${systemTone}`} aria-hidden="true" />
           <span>SYSTEM {systemStatus}</span>
@@ -1938,7 +1933,13 @@ const App = () => {
       />
 
       <footer className="app-footer">
-        <span>PROBE//LAB / DESKTOP VERTICAL SLICE</span>
+        {/*
+          The build's own scope, stated once. It used to sit in the same line as the product name,
+          which made "DESKTOP VERTICAL SLICE" read as a subtitle -- the third of three different
+          descriptions of what this product is. The name now lives in the lockup above, and the footer
+          carries only the claim that actually varies.
+        */}
+        <span>DESKTOP VERTICAL SLICE</span>
         <span>NO AUTH · NO CLOUD · CONNECTED PROVIDER OPTIONAL</span>
       </footer>
     </div>
