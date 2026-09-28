@@ -60,7 +60,9 @@
       "command": "list_agents",
       "implementation": "crates/lab/src/agents.rs",
       "summary": "Every agent the lab can evaluate, with the category that says whether its number is a claim about a model. The UI's list is derived from this registry rather than hand-written, so a dropdown cannot offer an agent the backend refuses. Two seats are game policies; the rest are grid policies; the security probes are their own category and are never presented as model scores.",
-      "tests": ["crates/lab/tests/agents.rs"]
+      "tests": [
+        "crates/lab/tests/agents.rs"
+      ]
     },
     {
       "id": "benchmark-registry",
@@ -69,7 +71,10 @@
       "command": "list_benchmark_details",
       "implementation": "crates/benchmarks/src/registry.rs",
       "summary": "The catalogue, plus the honesty metadata a row needs to be rendered truthfully: the declared capability execution mode, what the score measures, whether a reference agent exists, replay support, and platform requirements. A benchmark that authorizes a capability without executing it reports `authorized_deferred`, so a row cannot read like a working sandbox feature.",
-      "tests": ["crates/benchmarks/src/lib.rs", "crates/benchmarks/tests/registry.rs"]
+      "tests": [
+        "crates/benchmarks/src/lib.rs",
+        "crates/benchmarks/tests/registry.rs"
+      ]
     },
     {
       "id": "brain-panel",
@@ -90,7 +95,9 @@
       "command": "run_experiment",
       "implementation": "crates/lab/src/runner.rs",
       "summary": "The multi-episode execution path: plan, run, observe, evaluate, persist, aggregate. Holds no broker handle, no policy object, and no process launcher, which is asserted structurally rather than by review. Per-episode failures are recorded and the run continues, because a real measurement must survive one bad episode.",
-      "tests": ["crates/lab/tests/runner.rs"]
+      "tests": [
+        "crates/lab/tests/runner.rs"
+      ]
     },
     {
       "id": "arena-tictactoe",
@@ -164,10 +171,11 @@
       "status": "complete",
       "command": "compare_experiments",
       "implementation": "crates/lab/src/comparison.rs",
-      "summary": "Ranks two or more stored experiments, or refuses and names the dimensions that were not held constant. The refusal is a tagged response rather than an absence, so a panel has to handle it. Broker refusals and policy violations are counted separately and only the latter sets the security-finding flag, because a broker refusal is the boundary working. Holds no executor and writes nothing.",
+      "summary": "Ranks two or more stored experiments, or refuses and names the dimensions that were not held constant. The refusal is a tagged response rather than an absence, so a panel has to handle it. Broker refusals and policy violations are counted separately and only the latter sets the security-finding flag. Provider, model, and benchmark definition digest BLOCK a comparison: a ranking may never span two subjects or two tasks. Absence is not difference, so a run that recorded no identity does not block on its own, and the deterministic mock is exempt from the model check because its model string is derived from its own strategy and is already a declared agent confound.",
       "tests": [
         "crates/lab/tests/comparison.rs",
-        "apps/desktop/src/ComparisonPanel.test.tsx"
+        "apps/desktop/src/ComparisonPanel.test.tsx",
+        "crates/lab/tests/wire_format.rs"
       ]
     },
     {
@@ -188,10 +196,11 @@
       "status": "complete",
       "command": "get_provider_status",
       "implementation": "crates/model-adapters/src/lib.rs",
-      "summary": "Chat Completions over HTTPS or loopback, with redirects and retries disabled, credentials read from the environment by the adapter and never crossing the IPC boundary. The only provider the run configuration admits. The transport reaches any server exposing /v1/chat/completions; that is a protocol statement, not a tested claim, and no such server is in CI.",
+      "summary": "Chat Completions over HTTPS or loopback, with redirects and retries disabled, credentials read from the environment by the adapter and never crossing the IPC boundary. The only provider the run configuration admits. Measured across the full episode pool through the multi-episode runner, not only the single-run path: run_experiment registers a connected agent for one run and the result carries an episode count, a Wilson interval, and a recorded provider, model, fingerprint, and task digest. Proven end to end against a local stand-in provider; no real vendor model has been measured. The transport reaches any server exposing /v1/chat/completions; that is a protocol statement, not a tested claim.",
       "tests": [
         "crates/model-adapters/src/lib.rs",
-        "crates/lab/tests/adversarial.rs"
+        "crates/lab/tests/adversarial.rs",
+        "apps/desktop/src-tauri/src/brain.rs"
       ]
     },
     {
@@ -265,10 +274,11 @@
       "status": "complete",
       "command": "run_experiment",
       "implementation": "crates/engine/src/harness.rs",
-      "summary": "The measurement method: declared dev and eval seed pools validated as disjoint both when the definition loads and again in the constructor, N episodes over a pool, and a success rate with a Wilson interval. Wilson rather than the normal approximation because the approximation collapses to zero width at 0% and leaves [0,1] at 100%, which is exactly where a weak policy sits. The engine's measure loop is not the loop the desktop runs, but the lab's runner uses the same pools, the same interval, and the same reporting.",
+      "summary": "The measurement method: declared dev and eval seed pools validated as disjoint both when the definition loads and again in the constructor, N episodes over a pool, and a success rate with a Wilson interval. Wilson rather than the normal approximation because the approximation collapses to zero width. A run cut short by the wall-clock budget records its own terminal reason and its elapsed time, and the panel states that the score describes only the episodes that finished.",
       "tests": [
         "crates/lab/tests/harness_integration.rs",
-        "crates/engine/tests/benchmark_quality.rs"
+        "crates/engine/tests/benchmark_quality.rs",
+        "crates/lab/tests/runner.rs"
       ]
     },
     {
@@ -278,7 +288,9 @@
       "command": null,
       "implementation": "apps/desktop/src/AppShell.tsx",
       "summary": "Nine hash-routed destinations in a persistent sidebar, with the active one marked by colour, a left bar, and aria-current rather than by colour alone. A real button list in a labelled landmark, with a skip link. No routing dependency. Registers no command of its own: it routes between the panels below, every one of which is driven by their commands, so `brain_panel` is named as the witness. No nav item leads nowhere, and the checker verifies that by comparing the frontend's real invoke calls against the real handler list.",
-      "tests": ["apps/desktop/src/AppShell.test.tsx"]
+      "tests": [
+        "apps/desktop/src/AppShell.test.tsx"
+      ]
     },
     {
       "id": "persistence-recovery",
@@ -321,7 +333,9 @@
       "command": "brain_panel",
       "implementation": "deny.toml",
       "summary": "cargo-deny over advisories, licences, duplicate versions, and allowed sources, checked in both the Linux and Windows CI jobs with a required clean exit rather than trusting the action's pass/fail. Fail-closed: unknown registries and unknown git sources are denied, unlicensed crates are denied, and licence confidence is 0.93 with no OSI-category shortcuts. Six documented advisory exceptions, all unmaintained notices reachable only through Tauri, each naming its path in.",
-      "tests": ["crates/lab/tests/adversarial.rs"]
+      "tests": [
+        "crates/lab/tests/adversarial.rs"
+      ]
     },
     {
       "id": "probe-registry",
@@ -330,7 +344,9 @@
       "command": "run_experiment",
       "implementation": "crates/lab/src/probes.rs",
       "summary": "A second, independent probe system of three prompt-injection and decoy-secret probes, wired into LabRunner and LabBrain. Library-reachable and product-unreachable: the desktop always sends an empty probe_agents list, so it never runs. Partial because it is a real capability with no product surface, and the security lab's six agent-registry probes are a different thing.",
-      "tests": ["crates/lab/tests/lab.rs"]
+      "tests": [
+        "crates/lab/tests/lab.rs"
+      ]
     }
   ]
 }

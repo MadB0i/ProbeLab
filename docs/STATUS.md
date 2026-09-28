@@ -9,7 +9,7 @@ disagree, this file is correct and the other is stale.
 - **Workspace version:** 0.4.1 (`Cargo.toml` is the authority; nothing else declares it)
 - **Toolchain:** 1.97.0, pinned by `rust-toolchain.toml`
 - **Licence:** MIT
-- **Verified on:** Windows 11, `x86_64-pc-windows-msvc`, at commit `38f6578`
+- **Verified on:** Windows 11, `x86_64-pc-windows-msvc`, at commit `6e7c7c5`
 - **Release state:** FEATURE COMPLETE / AUDIT COMPLETE. Known limitations are listed below and are
   accepted; none is a blocker.
 
@@ -37,16 +37,20 @@ section 9.
 | Area | State | Evidence |
 | --- | --- | --- |
 | Rust workspace builds, lints, formats | verified | `cargo build --workspace --all-features --locked`, `clippy -D warnings`, `cargo fmt --check` |
-| 731 Rust tests | passing | `cargo test --workspace --all-targets --all-features --locked` |
-| 180 frontend tests | passing | `pnpm test` in `apps/desktop` |
-| Windows process containment | verified | 30 tests in `crates/sandbox/tests/`, including 9 that launch a real child under a real AppContainer identity |
+| 769 Rust tests | passing | `cargo test --workspace --all-targets --all-features --locked` |
+| 237 frontend tests | passing | `pnpm test` in `apps/desktop` |
+| Windows process containment | verified | 82 tests in `crates/sandbox/`, including 9 that launch a real child under a real AppContainer identity |
 | Dependency and licence policy | verified | `cargo deny check` — advisories, bans, licences, sources all `ok` |
-| Wire format | pinned | `crates/lab/tests/wire_format.rs`, 21 tests against hand-written literals |
+| Wire format | pinned | `crates/lab/tests/wire_format.rs`, 23 tests against hand-written literals |
 | IPC boundary | covered | `apps/desktop/src-tauri/tests/ipc_boundary.rs`, 27 tests |
 | IPC command registration | verified | `every_command_the_frontend_invokes_is_registered` compares the frontend's real `invoke` calls against the real `generate_handler!` list |
 | Feature matrix | verified | `python scripts/check-feature-matrix.py` |
 | Adversarial self-tests | passing | `crates/lab/tests/adversarial.rs`, 24 tests including live loopback servers |
-| End-to-end user paths | passing | `crates/lab/tests/end_to_end.rs`, 11 tests across experiment, security, arena, settings, comparison, and provider |
+| End-to-end user paths | passing | `crates/lab/tests/end_to_end.rs`, 11 tests across experiment, security, arena, settings, comparison, and provider ||
+| Cross-language fixtures | pinned | `crates/lab/tests/emit_fixture.rs` emits the read model the frontend tests render and asserts the committed bytes still match live serialization |
+| Legibility floor | enforced | `apps/desktop/scripts/check-style-legibility.mjs`; a font size below 11px in either `px` or `rem` fails |
+| Icon freshness | enforced | `apps/desktop/scripts/check-icons-current.mjs`; the platform icons must match `app-icon.svg` |
+| Connected-model measurement | passing | `apps/.../brain.rs::a_connected_model_is_measured_across_every_planned_episode` -- 4 planned episodes, 4 completed, 12 real HTTP calls to a local provider |
 
 ### 2.1 Supply chain
 
@@ -91,9 +95,13 @@ compatibility statement, not a tested claim, and no such server is part of CI.
 | `grid-world` (v2) | implemented | deterministic | any |
 | `sandbox-process` (v1) | implemented | deterministic | Windows only; refused at plan time elsewhere |
 
-Both are in the built-in catalogue and reachable from the command center. Seed pools are 40 dev and 70
-evaluation seeds, validated as disjoint both when the definition loads and again in the harness
-constructor.
+Both are in the built-in catalogue and reachable from the command center. That second claim was false
+until this cycle: `App.tsx` read `benchmarks[0]`, the catalog's select button rendered only when
+`onSelect` was passed, and it never was — so `sandbox-process`, the only benchmark that exercises a
+containment boundary, could not be reached from the UI at all while the README listed it as implemented.
+Seed pools are 40 dev and 70 evaluation seeds, validated as disjoint both when the definition loads and
+again in the harness constructor. Each summary now also carries a sha256 of the definition's own bytes,
+and a difference in that digest blocks a comparison.
 
 ### 2.4 Arena support
 
@@ -257,7 +265,9 @@ primitive; the security-relevant digest is the engine's own SHA-256 `replay_dige
 | Token usage | yes | `ReproducibilityMetadata.token_usage` |
 | Action trace | partial | `RunMetadata.action_trace` — turn, selected action, outcome, reward. No observation, so the prompt cannot be rebuilt from the bundle alone |
 | Terminal reason | yes | `ExperimentRecord.terminal_reason`, derived from the serde representation |
-| Software version / commit | **no** | see limitations |
+| Software version | yes | `ReproducibilityMetadata.probelab_version`, from `CARGO_PKG_VERSION` |
+| Source commit | yes | `ReproducibilityMetadata.commit_sha`, stamped by `crates/core/build.rs`; `-dirty` when the working tree did not match it, `unknown` when there was no git to ask |
+| Benchmark definition digest | yes | `TestResult.benchmark_definition_digest` — sha256 over the definition's own bytes, so it cannot drift from what was loaded |
 | Episode configuration | **no** | no `max_turns` or turn-budget ratio in a result bundle |
 | Policy / capability configuration | **no** | a stored result cannot name the allowlisted program, granted roots, or protected paths |
 
@@ -276,30 +286,47 @@ These are distinct and the code keeps them distinct.
 
 ### 6.3 Reproducibility limitations
 
-- **No software version or commit is recorded.** `RunMetadata.schema_version` is a schema version, not a
-  build identity. A change to the engine loop or an adapter between two builds is undetectable from a
-  stored bundle. This is the single largest gap in this section.
-- **The benchmark "version" is a hand-bumped string**, not a digest of the definition file. Editing
-  `turn_budget_numerator` in `crates/benchmarks/games/grid-world.v1.json` while leaving `"version": "2"`
-  changes every episode's behaviour while every stored result still claims the old definition.
+Four of the six gaps that used to be here are closed. What remains is a limit on what a stored bundle
+can rebuild, not on what it can identify.
+
+- **The action trace has no observation**, so a prompt cannot be rebuilt from the result bundle. The
+  per-turn observations are in the `telemetry_events` table, joined by `run_id`. This is the largest
+  remaining gap: a bundle now says exactly which build, which task, and which model produced it, but not
+  what was said.
 - **The configuration fingerprint does not cover the endpoint**, deliberately — an endpoint must not be
   recorded — so two runs against different servers with the same model name share a fingerprint. It is
-  secret-safe and therefore not sufficient to re-run.
-- **Anthropic and Gemini descriptors omit `configuration_fingerprint`, `prompt_template_version`, and
-  `environment_version`**, so a run through either records those three as empty. They are also not
-  selectable in the product (section 2.2), so this does not affect any shipped path — but it is a real
-  gap in the adapter, not a documented limitation of the record.
-- **The action trace has no observation**, so a prompt cannot be rebuilt from the result bundle. The
-  per-turn observations are in the `telemetry_events` table, joined by `run_id`.
+  secret-safe and therefore not sufficient to re-run. The fingerprint is scoped to the *vendor*, so an
+  Anthropic run and an OpenAI-compatible run configured identically cannot collide.
 - **A stored timeline that exceeded 10 000 events is truncated** and is indistinguishable from a short
   one. The truncation is documented in `crates/lab/src/events.rs`; the limit is not encoded in the
   recording.
+- **`commit_sha` is `unknown` for a build with no git** — a vendored tree, a published crate, a release
+  pipeline that passed nothing. That is a recorded absence rather than a guessed value, and it is the
+  only honest answer available.
+
+Closed in this cycle, and previously listed as the largest gaps in this section:
+
+- ~~No software version or commit is recorded.~~ `probelab_version` and `commit_sha` are stamped on every
+  run by `ReproducibilityMetadata::for_run`, which is the single constructor that means a run is
+  happening. `Default` deliberately does not stamp a commit, because `Default` means "nothing is known
+  about a run that does not exist". `crates/core/build.rs` appends `-dirty` when the tree did not match
+  `HEAD`, so a build is never stamped with a commit that does not describe it.
+- ~~The benchmark "version" is a hand-bumped string.~~ A sha256 over the definition's bytes is now
+  carried on `TestResult`, `RunMetadata`, and `ComparableRun`, and a difference in it **blocks** a
+  comparison. The digest is computed from the file's own bytes rather than a re-serialization, so a pure
+  reformat also moves it — the conservative direction, since a changed digest costs a re-baseline and a
+  missed edit costs a wrong comparison.
+- ~~Anthropic and Gemini descriptors omit three reproducibility fields.~~ Both now record the
+  fingerprint, prompt template version, and environment version. The fingerprint function was typed to
+  `OpenAiCompatibleConfig` and so could not have been called for them; it is now vendor-scoped.
+- ~~A comparison could not see which model produced a result.~~ `ComparableRun` carries `provider`,
+  `model`, and the task digest, and differences block the comparison.
 
 ---
 
 ## 7. Measured results
 
-Measured on the host named at the top, at commit `38f6578`, over the 70 held-out evaluation seeds
+Measured on the host named at the top, at commit `6e7c7c5`, over the 70 held-out evaluation seeds
 (disjoint from the 40 dev seeds), reproducible with:
 
 ```
@@ -314,9 +341,20 @@ cargo run --release -p probelab-engine --example grid_world_harness -- --episode
 | stateless reactive | 9/70 = 0.129 | [0.069, 0.227] | 2.76 | 7.90 |
 | memory reactive | 9/70 = 0.129 | [0.069, 0.227] | 2.76 | 7.90 |
 
-**No connected model has been measured on any benchmark.** The reference policy is a scripted searcher,
-not a model. Beating it is a low bar, and a pass on a connected model would be a precondition for an
-interesting result rather than a result worth reporting.
+**No connected model has been measured on any benchmark.** The capability to do so now exists and is
+tested end to end — `run_experiment` accepts a model configuration, registers it for that run only, and
+runs the full episode pool through the same `LabRunner` the mock uses, so a connected result carries an
+episode count, a Wilson interval, and a recorded provider, model, fingerprint, and task digest. The test
+that exercises it reports 4 planned episodes, 4 completed, and 12 real HTTP calls to a local stand-in
+provider.
+
+What has *not* happened is a measurement of a real vendor's model. The stand-in is a `std::net` listener
+returning a fixed response, so the path is proven but no real model's behaviour has been observed, and no
+table above contains a connected row. Adding one requires a credential this host does not have, and a
+number produced without one would be a fabrication rather than a measurement.
+
+The reference policy is a scripted searcher, not a model. Beating it is a low bar, and a pass on a
+connected model would be a precondition for an interesting result rather than a result worth reporting.
 
 Two findings these numbers support, and one they do not:
 
@@ -342,60 +380,85 @@ Accepted. None is a release blocker.
 
 ### Correctness and reproducibility
 
-1. No software version or commit is recorded in any result bundle (6.3).
-2. The benchmark version is a hand-bumped string, not a digest of the definition file (6.3).
-3. The Anthropic and Gemini adapters record an empty fingerprint and empty prompt/environment version
-   (6.3). Unreachable from the product today.
-4. The action trace has no observation, so a prompt cannot be rebuilt from the result bundle alone (6.3).
-5. `LabEvent::detail` is truncated to 512 characters and is **not** redacted, despite a doc comment
+1. The action trace has no observation, so a prompt cannot be rebuilt from the result bundle alone (6.3).
+2. `LabEvent::detail` is truncated to 512 characters and is **not** redacted, despite a doc comment
    claiming it is. The transport redacts provider response text at source; event details are a separate
    path and have no credential filter.
-6. A contained child's stdout/stderr preview is persisted unredacted (3.2).
-7. An Anthropic or Gemini descriptor records `base_url` and the credential variable *name* in
+3. A contained child's stdout/stderr preview is persisted unredacted (3.2).
+4. An Anthropic or Gemini descriptor records `base_url` and the credential variable *name* in
    `ModelDescriptor.parameters`, which the OpenAI-compatible adapter deliberately omits. Not a secret
    value, but the two conventions disagree about what is publishable.
-8. `ExperimentRecord` exists twice — `crates/lab/src/experiment.rs` (not persisted) and
+5. `ExperimentRecord` exists twice — `crates/lab/src/experiment.rs` (not persisted) and
    `crates/telemetry/src/lib.rs` (persisted), with different field casing. Only the second reaches
    SQLite; nothing enforces that.
-9. `put_experiment`'s UPSERT omits `benchmark_id` and `episodes_requested`, so an update changing either
+6. `put_experiment`'s UPSERT omits `benchmark_id` and `episodes_requested`, so an update changing either
    is a silent no-op. `result_json` is always `None`.
-10. `updated_unix_ms` is always written as `0`, so ordering stored experiments by update time
-    degenerates to the `experiment_id` tiebreak.
+7. `updated_unix_ms` is always written as `0`, so ordering stored experiments by update time
+   degenerates to the `experiment_id` tiebreak.
+8. **`BrainState::Running` is unreachable.** The enum has six variants and the Brain is only ever assigned
+   `Planning`, `Preparing`, `Observing`, `Analyzing`, and `Completed`. `Running` appears in `label()` and
+   in two read-model tests that build a projection directly, which is why it reads as live in review. The
+   frontend's lifecycle diagram deliberately draws five states for this reason. Wiring it up is a
+   decision, not a bug fix, so it is recorded rather than changed.
+9. **A comparison exempts the deterministic mock from the `model` check.** The mock derives its `model`
+   string from its own strategy, so for two mock runs that field is a second name for `target_agent`,
+   which is already a declared confound. Blocking on it would refuse the product's core capability —
+   comparing two agents on one benchmark — over a difference the comparison already qualifies. The
+   exemption is asserted from both sides, and `provider` still blocks a mock against a connected run.
 
 ### Security
 
-11. The containment layer hardens a child ProbeLab has already decided to start. It is not a code sandbox:
+10. The containment layer hardens a child ProbeLab has already decided to start. It is not a code sandbox:
     no syscall filtering, no filesystem or registry virtualization, no control over native code loading.
-12. Linux and macOS have no OS-level containment. A spawn there fails closed rather than running
+11. Linux and macOS have no OS-level containment. A spawn there fails closed rather than running
     unconfined, which means those platforms can measure nothing involving a process.
-13. Provider egress is trusted adapter infrastructure. A model adapter is trusted Rust code in the
+12. Provider egress is trusted adapter infrastructure. A model adapter is trusted Rust code in the
     desktop process; the design restricts its action space but does not isolate arbitrary adapter code
     from host resources.
-14. A connected provider receives model-facing observations. Local-first, but disclosed.
-15. The model action space has no network capability. The provider's own HTTP client does.
-16. Granted AppContainer capabilities are passed through `SECURITY_CAPABILITIES` for real, but are not
+13. A connected provider receives model-facing observations. Local-first, but disclosed.
+14. The model action space has no network capability. The provider's own HTTP client does.
+15. Granted AppContainer capabilities are passed through `SECURITY_CAPABILITIES` for real, but are not
     independently verified from outside the container (3.2).
 
 ### Product
 
-17. Two of three providers are unreachable from the desktop product (2.2).
-18. Three of four declared games are schema only (2.4).
-19. No benchmark SDK. Adding a benchmark means implementing the trait and registering a definition; there
+16. Two of three providers are unreachable from the desktop product (2.2).
+17. Three of four declared games are schema only (2.4).
+18. No benchmark SDK. Adding a benchmark means implementing the trait and registering a definition; there
     is no scaffolding, template, or conformance suite for a third party.
-20. The multi-episode harness measurement is shared with the product (seed pools, Wilson interval,
+19. The multi-episode harness measurement is shared with the product (seed pools, Wilson interval,
     success-rate reporting), but the engine's `Harness::measure` execution loop is not the loop the
     desktop uses. The lab's `LabRunner` has its own. The *method* is shipped; the *function* is not the
     same one.
-21. No run cancellation, no cross-process trace verifier, no API-spend or rate-limit control.
-22. Background runs are not recovered after a process restart, although partial telemetry and stored
+20. No run cancellation, no cross-process trace verifier, no API-spend or rate-limit control.
+21. Background runs are not recovered after a process restart, although partial telemetry and stored
     results remain durable.
-23. Desktop packaging is verified by development compilation and a frontend build. Installers are not
+22. Desktop packaging is verified by development compilation and a frontend build. Installers are not
     built or tested in CI.
-24. The `ProbeRegistry` prompt-injection probe system (`crates/lab/src/probes.rs`, 3 probes) is wired
+23. The `ProbeRegistry` prompt-injection probe system (`crates/lab/src/probes.rs`, 3 probes) is wired
     into `LabRunner` and `LabBrain` but is never populated by the desktop, which always sends
     `probe_agents: Vec::new()`. It is library-reachable and product-unreachable.
-25. 7-8px text appears in roughly 20 CSS rules. `--faint` is lighter than `--muted` while being used for
-    strictly secondary information, inverting the intended hierarchy.
+24. **The frontend has no rendering for `experiment.episodes`.** The per-episode list is projected, typed,
+    stored, and sent across the bridge, and the aggregate and interval derived from it are shown — but the
+    individual rows are not. A reader sees a score and an interval with no way to inspect which episodes
+    produced them, which is the one thing a small-sample claim most needs.
+25. **`elapsed_ms` is measured but the read model is therefore no longer a pure function of the run's
+    results.** Two executions of the identical plan differ in that one field by design, so
+    `projection_is_deterministic` compares everything else and checks the duration separately. A
+    deterministic read model is what lets a panel re-render from a stored run without a number changing
+    underneath the reader, so this is a real cost of the field and is the reason it is called out rather
+    than absorbed.
+
+### Closed in this cycle, previously listed above
+
+- ~~7-8px text appears in roughly 20 CSS rules.~~ The count was 58, not 20, and the original check
+  matched `px` while the stylesheet mixes `px` and `rem`, so every `rem` rule was invisible to it. A CSS
+  comment asserted the floor had been applied; it had not, and a comment cannot fail.
+  `apps/desktop/scripts/check-style-legibility.mjs` now enforces 11px across both units and
+  `pnpm check:styles` gates on it in CI. `--faint` is also now genuinely dimmer than `--muted`.
+- ~~No software version or commit is recorded.~~ See 6.3.
+- ~~The benchmark version is a hand-bumped string.~~ See 6.3; a digest now blocks comparison.
+- ~~Anthropic and Gemini record empty reproducibility metadata.~~ See 6.3.
 
 ### Not implemented, and not claimed to be
 
@@ -416,7 +479,13 @@ cargo test --workspace --all-targets --all-features --locked
 cargo build --workspace --all-features --locked
 cargo deny --log-level error check
 python scripts/check-feature-matrix.py
-cd apps/desktop && pnpm install --frozen-lockfile && pnpm test && pnpm build
+cd apps/desktop
+pnpm install --frozen-lockfile
+pnpm check:styles     # no rendered font size below 11px, in px or rem
+pnpm check:icons      # the platform icons match app-icon.svg
+pnpm test
+pnpm build
+cargo test -p probelab-lab --test emit_fixture --locked   # cross-language fixtures match live serialization
 ```
 
 Expected on the host named above:
@@ -425,17 +494,23 @@ Expected on the host named above:
 | --- | --- |
 | `cargo fmt --all --check` | clean |
 | `cargo clippy ... -D warnings` | clean |
-| `cargo test --workspace --all-targets --all-features --locked` | **731 passed, 0 failed** |
+| `cargo test --workspace --all-targets --all-features --locked` | **769 passed, 0 failed** |
 | `cargo build --workspace --all-features --locked` | success |
 | `cargo deny --log-level error check` | `advisories ok, bans ok, licenses ok, sources ok` |
 | `python scripts/check-feature-matrix.py` | consistent |
-| `pnpm test` | **180 passed** |
+| `pnpm check:styles` | no font size below 11px |
+| `pnpm check:icons` | 9 outputs match `app-icon.svg` |
+| `pnpm test` | **237 passed** |
 | `pnpm build` | success |
+
+The last four gates are new in this cycle, and each exists because a claim of the same kind was
+previously only asserted in a comment or a fixture that could not fail. A prose assertion about a
+stylesheet or an icon file is a wish; a script that exits non-zero is a gate.
 
 On Windows, additionally:
 
 ```bash
-cargo test -p probelab-sandbox --locked          # 30 tests, 9 launching a real child
+cargo test -p probelab-sandbox --locked          # 82 tests, 9 launching a real child
 cargo test -p probelab-sandbox --test containment_identity --locked
 ```
 
@@ -468,3 +543,38 @@ tests, security model, and documentation to agree, and they do.
 **Feature development is stopped.** New work is a bug fix against a claim in this file, or a correction
 to a claim. `docs/feature-matrix.json` and this file are the two documents that must be updated together;
 the other four are design records and are not authoritative about state.
+
+### 10.1 What the last cycle changed about that decision
+
+This release was previously signed off with two live defects on the security panel and a reproducibility
+record that could not identify its own producer. Both are fixed. The details belong in the commit
+history; what belongs here is what it means for the decision.
+
+**A green suite was not evidence of correctness.** Every defect above passed 922 tests. The cause was the
+same in all three: something was asserted in a place that could not fail — a CSS comment, a hand-written
+fixture derived from the consumer's idea of the producer, an enum variant that only appeared in tests.
+The suite was not weak; it was checking the wrong things and the checks were shaped so that agreeing with
+each other counted as passing.
+
+So the change is not only bug fixes. Four properties that were previously prose are now executable and
+fail the build: the cross-language fixture pin, the legibility floor, the icon-freshness check, and the
+vendor-scoped configuration fingerprint. Each of them is a claim that used to be made only in a comment,
+and a comment cannot fail.
+
+**The honest reading of the rest of this file is unchanged.** The known limitations are still numerous and
+still real. Nothing in this cycle made the containment layer a code sandbox, brought a second provider into
+the product, implemented a third game, or added a run-cancellation path. What changed is that the
+reproducibility record now identifies the build and the task that produced a result, a comparison can see
+which model it is ranking, a real model can be measured across a full episode pool rather than run once,
+and the panel states when a sample is smaller than the plan asked for instead of presenting a small
+number as a measurement of a model.
+
+Three things a reader should not conclude:
+
+- That a connected model has been measured. The path is proven end to end against a stand-in provider;
+  no real vendor's model has been observed (section 7).
+- That `elapsed_ms` did not cost anything. The read model is no longer a pure function of a run's
+  results, and that is a real trade (section 8, item 25).
+- That the suite is now sufficient. It caught none of the three defects above on its own. It can only be
+  said to catch them now that each is reachable from a gate rather than from a reviewer's reading.
+

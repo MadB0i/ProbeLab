@@ -210,9 +210,14 @@ numbered list with evidence is in **[docs/STATUS.md](docs/STATUS.md) §8**.
   Harness's evaluation seed pools and Wilson interval, and keeps the per-episode failure handling the
   Harness lacks, because a real run must survive a failed episode. So the *measurement method* is on
   the product's path; that particular function is not.
-- **No connected model has been measured on any benchmark.** The reference policy is a scripted
-  searcher. Beating it is a low bar, and a pass would be a precondition for an interesting result
-  rather than a result worth reporting.
+- **No connected model has been measured on any benchmark.** The capability to do so exists and is
+  tested end to end — a connected run goes through the same multi-episode runner as the mock, so it
+  carries an episode count, a Wilson interval, and a recorded provider, model, fingerprint, and task
+  digest, and it is verified against a local stand-in provider (4 planned episodes, 4 completed, 12 real
+  HTTP calls). What has not happened is a measurement of a real vendor's model: that needs a credential
+  this host does not have, and a number produced without one would be a fabrication. The reference
+  policy is a scripted searcher. Beating it is a low bar, and a pass would be a precondition for an
+  interesting result rather than a result worth reporting.
 - **External model nondeterminism** is not reproducible, by anyone.
 - **Settings cannot move stored data or hold a credential.** The storage paths, the credential policy,
   log verbosity, and platform containment support are shown read-only with the reason they are fixed.
