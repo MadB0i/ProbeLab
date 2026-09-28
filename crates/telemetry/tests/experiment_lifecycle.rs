@@ -300,6 +300,7 @@ fn lifecycle_updates_do_not_disturb_stored_results() {
         schema_version: 1,
         benchmark_id: "grid-world".to_owned(),
         benchmark_version: "2".to_owned(),
+        benchmark_definition_digest: None,
         model: probelab_core::ModelDescriptor {
             adapter: "test".to_owned(),
             strategy: "optimal".to_owned(),

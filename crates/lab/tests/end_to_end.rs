@@ -625,6 +625,10 @@ fn the_comparison_path_compares_and_refuses() {
             experiment_id: "a".to_owned(),
             benchmark_id: "grid-world".to_owned(),
             target_agent: "optimal".to_owned(),
+            // Identity, and the same across both runs so this fixture still compares.
+            provider: Some("deterministic-mock".to_owned()),
+            model: Some("native-mock-optimal".to_owned()),
+            benchmark_definition_digest: Some("sha256:test".to_owned()),
             adapter: "deterministic-mock".to_owned(),
             strategy: "optimal".to_owned(),
             root_seed: 4_242,
@@ -650,6 +654,12 @@ fn the_comparison_path_compares_and_refuses() {
                 experiment_id: "a".to_owned(),
                 benchmark_id: "grid-world".to_owned(),
                 target_agent: "optimal".to_owned(),
+                // Inherited from the fixture above, so the two runs still describe the same subject and
+                // the same task. A comparison that blocked here would be correct in general and wrong
+                // for this test, which is about something else.
+                provider: Some("deterministic-mock".to_owned()),
+                model: Some("native-mock-optimal".to_owned()),
+                benchmark_definition_digest: Some("sha256:test".to_owned()),
                 adapter: "deterministic-mock".to_owned(),
                 strategy: "optimal".to_owned(),
                 root_seed: 4_242,

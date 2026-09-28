@@ -513,3 +513,261 @@ fn a_policy_violation_is_a_security_finding() {
         "a policy violation is exactly what this flag is for"
     );
 }
+
+// # Identity blocks a comparison
+//
+// These are the tests for the gap that `provider` and `model` were absent from `ComparableRun` at all.
+// Before this, two connected runs of *different models* on the same benchmark and seed compared as
+// `Comparable`, and nothing anywhere in the product could see the difference. The two runs that the
+// whole point of a controlled comparison is to keep apart were the one pair it ranked straight through.
+//
+// Each test builds a real run and then rewrites only the identity, so the measurement underneath is
+// genuine and the only thing under test is whether the identity difference is noticed.
+
+/// Rewrites a run's recorded identity, leaving every measurement alone.
+fn with_identity(mut run: ComparableRun, provider: &str, model: &str) -> ComparableRun {
+    run.provider = Some(provider.to_owned());
+    run.model = Some(model.to_owned());
+    run
+}
+
+/// The headline case: same benchmark, same seed, same agent -- two different real models.
+#[test]
+fn two_different_connected_models_do_not_compare() {
+    let (left, _) = run("exp-gpt", "optimal", 3, 4_242);
+    let (right, _) = run("exp-claude", "optimal", 3, 4_242);
+
+    // Identical in every measured respect. The only difference is which model answered.
+    assert_eq!(left.benchmark_id, right.benchmark_id);
+    assert_eq!(left.root_seed, right.root_seed);
+    assert_eq!(left.target_agent, right.target_agent);
+    assert_eq!(left.success_fraction, right.success_fraction);
+
+    match compare(vec![
+        with_identity(left, "openai", "gpt-4o"),
+        with_identity(right, "anthropic", "claude-3-5-sonnet"),
+    ]) {
+        ComparisonOutcome::NotComparable(incomparable) => {
+            let named: Vec<&str> = incomparable
+                .dimensions
+                .iter()
+                .map(|dimension| dimension.dimension.as_str())
+                .collect();
+            assert!(
+                named.contains(&"model"),
+                "the model difference must be named: {named:?}"
+            );
+            let model = incomparable
+                .dimensions
+                .iter()
+                .find(|dimension| dimension.dimension == "model")
+                .expect("the model dimension");
+            // Both values shown, so the refusal says *what* differed rather than only that something did.
+            assert_eq!(model.values, vec!["gpt-4o", "claude-3-5-sonnet"]);
+        }
+        other => panic!("two different models must not be ranked against each other: {other:?}"),
+    }
+}
+
+/// One connected model and the mock: different subjects, so this blocks too.
+#[test]
+fn a_mock_run_does_not_compare_against_a_connected_model() {
+    let (left, _) = run("exp-mock", "optimal", 3, 4_242);
+    let (right, _) = run("exp-real", "optimal", 3, 4_242);
+
+    match compare(vec![
+        with_identity(left, "deterministic-mock", "native-mock-optimal"),
+        with_identity(right, "openai", "gpt-4o"),
+    ]) {
+        ComparisonOutcome::NotComparable(incomparable) => {
+            let named: Vec<&str> = incomparable
+                .dimensions
+                .iter()
+                .map(|dimension| dimension.dimension.as_str())
+                .collect();
+            assert!(
+                named.contains(&"provider"),
+                "a mock and a real model are different subjects: {named:?}"
+            );
+        }
+        other => panic!("a mock and a connected model must not be ranked together: {other:?}"),
+    }
+}
+
+/// The same connected model twice is comparable -- the check is a difference check, not a gate on
+/// being connected. A product where you can only ever compare one model to itself is not a lab.
+#[test]
+fn the_same_connected_model_compares_against_itself() {
+    let (left, _) = run("exp-a", "optimal", 3, 4_242);
+    let (right, _) = run("exp-b", "optimal", 3, 4_242);
+
+    match compare(vec![
+        with_identity(left, "openai", "gpt-4o"),
+        with_identity(right, "openai", "gpt-4o"),
+    ]) {
+        ComparisonOutcome::Comparable(_) => {}
+        other => panic!("the same model on the same seed must compare: {other:?}"),
+    }
+}
+
+/// Two mock runs keep comparing, and keep declaring the agent as a confound.
+///
+/// This is the exemption the mock gets, and it is a real behaviour rather than a loosened rule: the
+/// mock's `model` string is derived from its own strategy, so it is a second name for `target_agent`,
+/// which the comparison already reports. Blocking here would refuse the product's core capability --
+/// comparing two agents on one benchmark -- over a difference it already qualifies.
+#[test]
+fn two_mock_agents_still_compare_and_still_declare_the_agent() {
+    let (left, _) = run("exp-optimal", "optimal", 3, 4_242);
+    let (right, _) = run("exp-random", "random", 3, 4_242);
+
+    // The mock really does report a different model string per agent, which is the whole reason the
+    // exemption exists. Asserted so the exemption cannot quietly become unnecessary.
+    assert_ne!(
+        left.model, right.model,
+        "this exemption is only correct while the mock's model tracks its agent"
+    );
+
+    match compare(vec![left, right]) {
+        ComparisonOutcome::Comparable(comparison) => {
+            let agent = comparison
+                .varies_across
+                .iter()
+                .find(|dimension| dimension.dimension == "target_agent")
+                .expect("the agent must still be declared as a confound");
+            assert_eq!(agent.values, vec!["optimal", "random"]);
+        }
+        other => panic!("two mock agents must still compare: {other:?}"),
+    }
+}
+
+/// A changed task blocks, even with everything else identical.
+///
+/// This is the digest earning its place. `benchmark_version` is a hand-maintained string, so a seed
+/// pool or a turn budget can change without it, and the two runs would otherwise rank straight
+/// through each other.
+#[test]
+fn two_runs_of_different_definitions_do_not_compare() {
+    let (left, _) = run("exp-v2", "optimal", 3, 4_242);
+    let (right, _) = run("exp-v2-edited", "optimal", 3, 4_242);
+
+    assert_eq!(
+        left.benchmark_definition_digest, right.benchmark_definition_digest,
+        "one build produces one digest"
+    );
+
+    let mut edited = right.clone();
+    edited.benchmark_definition_digest = Some("sha256:an-edited-definition".to_owned());
+
+    match compare(vec![left, edited]) {
+        ComparisonOutcome::NotComparable(incomparable) => {
+            let named: Vec<&str> = incomparable
+                .dimensions
+                .iter()
+                .map(|dimension| dimension.dimension.as_str())
+                .collect();
+            assert!(
+                named.contains(&"benchmark_definition_digest"),
+                "a changed task must be named: {named:?}"
+            );
+        }
+        other => panic!("runs of two different definitions must not be ranked: {other:?}"),
+    }
+}
+
+/// A real run does record a digest, so the check above is not vacuous.
+#[test]
+fn a_real_run_records_its_definition_digest() {
+    let (run, results) = run("exp-digest", "optimal", 3, 4_242);
+    let digest = run
+        .benchmark_definition_digest
+        .as_deref()
+        .expect("a real run against an embedded benchmark records a digest");
+    assert!(
+        digest.starts_with("sha256:") && digest.len() == 71,
+        "expected a prefixed sha256, got {digest:?}"
+    );
+    // And it came from the episode, not from the projection guessing it.
+    assert!(results
+        .iter()
+        .all(|result| result.benchmark_definition_digest.as_deref() == Some(digest)));
+}
+
+/// A run that recorded no identity does not block on its own.
+///
+/// Absence is not difference. A run with no completed episodes has not claimed to be a different
+/// subject from anyone, and refusing to compare it would make every such comparison impossible --
+/// which is a comparison someone reasonably wants, in order to see that run listed as unranked rather
+/// than quietly ranked on another run's results.
+#[test]
+fn a_run_with_no_recorded_identity_does_not_block_by_itself() {
+    let (left, _) = run("exp-scored", "optimal", 3, 4_242);
+    // A genuinely empty run: it measured nothing, so it recorded no identity either. Cloning the
+    // scored run and clearing only the identity would not do -- that run still has a score, and a
+    // run with a score is legitimately rankable, so the test would be asserting the wrong thing.
+    let mut empty = left.clone();
+    empty.experiment_id = "exp-empty".to_owned();
+    empty.provider = None;
+    empty.model = None;
+    empty.benchmark_definition_digest = None;
+    empty.episodes_completed = 0;
+    empty.success_fraction = None;
+    empty.success_interval = None;
+
+    match compare(vec![left, empty]) {
+        ComparisonOutcome::Comparable(comparison) => {
+            // Compared, and the empty run is present as unranked rather than given a position.
+            let unranked: Vec<&str> = comparison
+                .by_success
+                .iter()
+                .filter(|standing| standing.value.is_none())
+                .map(|standing| standing.experiment_id.as_str())
+                .collect();
+            assert_eq!(
+                unranked,
+                vec!["exp-empty"],
+                "the empty run must be listed, not ranked"
+            );
+        }
+        other => panic!("absence of an identity is not a difference: {other:?}"),
+    }
+}
+
+/// Two runs that both recorded nothing still compare, for the same reason.
+#[test]
+fn two_absent_identities_are_not_a_difference() {
+    let (left, _) = run("exp-a", "optimal", 3, 4_242);
+    let (right, _) = run("exp-b", "optimal", 3, 4_242);
+    let strip = |mut run: ComparableRun| {
+        run.provider = None;
+        run.model = None;
+        run.benchmark_definition_digest = None;
+        run
+    };
+    match compare(vec![strip(left), strip(right)]) {
+        ComparisonOutcome::Comparable(_) => {}
+        other => panic!("two absent identities are not two different identities: {other:?}"),
+    }
+}
+
+/// The mock provider constant this module judges by really is the one a mock run reports.
+///
+/// `comparison.rs` declares `deterministic-mock` as a literal rather than importing it, because
+/// `probelab-lab` must not depend on the thing it judges. That makes the duplication a risk -- if the
+/// two ever disagree, the mock exemption silently stops applying and every agent comparison starts
+/// refusing -- so it is pinned here against a real mock run rather than against the other literal.
+#[test]
+fn the_mock_exemption_matches_the_provider_a_mock_run_actually_reports() {
+    let (run, _) = run("exp-mock-identity", "optimal", 3, 4_242);
+    assert_eq!(
+        run.provider.as_deref(),
+        Some("deterministic-mock"),
+        "a deterministic mock run must report this provider id; if the adapter's constant moves, \
+         `DETERMINISTIC_MOCK_PROVIDER` in comparison.rs must move with it or the exemption silently \
+         stops applying"
+    );
+    // And the exemption is genuinely load-bearing: a run that is *not* the mock must not be exempted,
+    // so the check cannot pass merely because `model` happens to be equal here.
+    let connected = with_identity(run, "openai", "native-mock-optimal");
+    assert_ne!(connected.provider.as_deref(), Some("deterministic-mock"));
+}

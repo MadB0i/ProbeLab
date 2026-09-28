@@ -417,6 +417,12 @@ pub struct RunMetadata {
     pub benchmark_id: String,
     /// Versioned benchmark identifier.
     pub benchmark_version: String,
+    /// The content digest of the benchmark definition, when the run recorded one.
+    ///
+    /// `Option` because this is the run-level record, which tooling predates, and because a run whose
+    /// benchmark was a test double genuinely has no embedded definition to hash. An absent digest reads
+    /// as "not recorded", and a comparison treats that as blocking rather than as agreement.
+    pub benchmark_definition_digest: Option<String>,
     /// Stable provider identifier used by the run.
     pub provider: String,
     /// Provider model identifier used by the run.
@@ -445,6 +451,10 @@ impl Default for RunMetadata {
             schema_version: 2,
             benchmark_id: String::new(),
             benchmark_version: String::new(),
+            // A default describes no run, so it has no definition behind it. `None` rather than an
+            // empty string so it is indistinguishable from "recorded but absent" only where that
+            // distinction does not matter, and distinguishable from a real digest everywhere else.
+            benchmark_definition_digest: None,
             provider: String::new(),
             model: String::new(),
             prompt_template_version: String::new(),
@@ -475,6 +485,14 @@ pub struct EvaluationInput {
     pub benchmark_id: String,
     /// Versioned benchmark definition.
     pub benchmark_version: String,
+    /// A content digest of the benchmark definition this episode was run against.
+    ///
+    /// The companion to enchmark_version and the reason a stored result can be trusted to describe
+    /// the same task later. enchmark_version is a hand-maintained string, and nothing forces it to
+    /// change when a seed pool or a turn budget does, so a comparison that trusted it alone would rank
+    /// runs of two different tasks. None for an episode recorded before this field existed, which is
+    /// a recorded absence and not a claim that the task was unchanged.
+    pub benchmark_definition_digest: Option<String>,
     /// Single capability dimension declared by the benchmark.
     pub capability_dimension: String,
     /// Model configuration selected before execution.
@@ -521,6 +539,14 @@ pub struct TestResult {
     pub benchmark_id: String,
     /// Versioned benchmark definition.
     pub benchmark_version: String,
+    /// A content digest of the benchmark definition this episode was run against.
+    ///
+    /// The companion to enchmark_version and the reason a stored result can be trusted to describe
+    /// the same task later. enchmark_version is a hand-maintained string, and nothing forces it to
+    /// change when a seed pool or a turn budget does, so a comparison that trusted it alone would rank
+    /// runs of two different tasks. None for an episode recorded before this field existed, which is
+    /// a recorded absence and not a claim that the task was unchanged.
+    pub benchmark_definition_digest: Option<String>,
     /// Model configuration used for the run.
     pub model: ModelDescriptor,
     /// Seed governing environment map generation; model RNG seed is in the descriptor.

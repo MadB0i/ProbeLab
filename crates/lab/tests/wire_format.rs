@@ -846,3 +846,85 @@ fn a_brain_finding_keeps_the_field_names_the_frontend_declares() {
     let signal: &SignalView = &finding.signals[0];
     assert_eq!(signal.interpretation, SignalInterpretation::Neutral);
 }
+
+/// A comparable run keeps the identity fields the comparison decides on.
+///
+/// `provider`, `model`, and `benchmarkDefinitionDigest` were added because the comparison could not
+/// see which model produced a result at all -- two connected runs of different models ranked as
+/// comparable with the difference invisible. They are pinned here because the panel's refusal is only
+/// as trustworthy as its understanding of what came over the bridge, and a renamed field would arrive
+/// as `undefined` and quietly read as "not recorded", which does not refuse.
+#[test]
+fn a_comparable_run_keeps_the_identity_the_comparison_judges_on() {
+    use probelab_lab::ComparableRun;
+    use probelab_lab::WilsonInterval as Interval;
+
+    let run: ComparableRun = assert_wire(
+        json!({
+            "experimentId": "exp-a",
+            "benchmarkId": "grid-world",
+            "targetAgent": "optimal",
+            "adapter": "openai-compatible",
+            "strategy": "json-actions",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "benchmarkDefinitionDigest": "sha256:b4d9ca5167eb1ac0ec984012dddbfe24490d6c7badd29c3a0390cfabcfc3acc0",
+            "rootSeed": 4242,
+            "episodesCompleted": 3,
+            "episodesFailed": 0,
+            "successFraction": 0.6666666666666666,
+            "successInterval": { "point": 0.6666666666666666, "lower": 0.2086, "upper": 0.9393, "confidence": 0.95 },
+            "integrityEvents": 0,
+            "brokerRefusals": 0,
+            "isSecurityFinding": false,
+            "meanReward": 7.1,
+            "meanTurns": 9.0,
+            "meanInvalidActions": 0.0
+        }),
+        "ComparableRun",
+    );
+
+    assert_eq!(run.provider.as_deref(), Some("openai"));
+    assert_eq!(run.model.as_deref(), Some("gpt-4o"));
+    assert_eq!(
+        run.benchmark_definition_digest.as_deref(),
+        Some("sha256:b4d9ca5167eb1ac0ec984012dddbfe24490d6c7badd29c3a0390cfabcfc3acc0")
+    );
+
+    // A run that recorded nothing must arrive as null rather than as a missing key, because the
+    // comparison treats "absent" and "recorded as blank" differently and a defaulted empty string
+    // would look like a recorded identity to every check that reads it.
+    let unrecorded: ComparableRun = serde_json::from_value(json!({
+        "experimentId": "exp-old",
+        "benchmarkId": "grid-world",
+        "targetAgent": "optimal",
+        "adapter": "deterministic-mock",
+        "strategy": "optimal",
+        "provider": null,
+        "model": null,
+        "benchmarkDefinitionDigest": null,
+        "rootSeed": 4242,
+        "episodesCompleted": 0,
+        "episodesFailed": 0,
+        "successFraction": null,
+        "successInterval": null,
+        "integrityEvents": 0,
+        "brokerRefusals": 0,
+        "isSecurityFinding": false,
+        "meanReward": 0.0,
+        "meanTurns": 0.0,
+        "meanInvalidActions": 0.0
+    }))
+    .expect("a run with null identity decodes");
+    assert_eq!(unrecorded.provider, None);
+    assert_eq!(unrecorded.model, None);
+    assert_eq!(unrecorded.benchmark_definition_digest, None);
+
+    // And the interval shape the panel reads is present on the wire.
+    let scored: ComparableRun =
+        serde_json::from_value(serde_json::to_value(&run).unwrap()).unwrap();
+    assert!(
+        matches!(scored.success_interval, Some(Interval { .. })),
+        "the interval must be typed on the wire, not a bare number"
+    );
+}

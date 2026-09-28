@@ -135,6 +135,7 @@ impl GridWorldEvaluator {
             schema_version: 2,
             benchmark_id: input.benchmark_id,
             benchmark_version: input.benchmark_version,
+            benchmark_definition_digest: input.benchmark_definition_digest,
             model: input.model,
             seed: input.seed,
             capability: CapabilityResult {
@@ -241,6 +242,7 @@ impl SandboxProcessEvaluator {
             schema_version: 2,
             benchmark_id: input.benchmark_id,
             benchmark_version: input.benchmark_version,
+            benchmark_definition_digest: input.benchmark_definition_digest,
             model: input.model,
             seed: input.seed,
             capability: CapabilityResult {
@@ -415,6 +417,9 @@ mod tests {
         EvaluationInput {
             benchmark_id: "grid-world".to_owned(),
             benchmark_version: GRID_WORLD_BENCHMARK_VERSION.to_owned(),
+            // No digest: this is a test input, and inventing one would let a test assert against an
+            // identity the evaluator never actually ran against.
+            benchmark_definition_digest: None,
             capability_dimension: "grid-world planning".to_owned(),
             model: ModelDescriptor {
                 adapter: "mock".to_owned(),

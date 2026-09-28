@@ -757,6 +757,9 @@ impl BenchmarkRunner {
             .evaluate(EvaluationInput {
                 benchmark_id: summary.benchmark_id.clone(),
                 benchmark_version: summary.benchmark_version.clone(),
+                // The digest travels with the version so a stored episode describes the exact task it ran,
+                // not merely a string someone remembered to bump.
+                benchmark_definition_digest: Some(summary.definition_digest.clone()),
                 capability_dimension: summary.capability_dimension.clone(),
                 model,
                 seed: benchmark_seed,
@@ -776,6 +779,7 @@ impl BenchmarkRunner {
             schema_version: 2,
             benchmark_id: summary.benchmark_id,
             benchmark_version: summary.benchmark_version,
+            benchmark_definition_digest: Some(summary.definition_digest),
             provider: reproducibility.provider,
             model: reproducibility.model,
             prompt_template_version: reproducibility.prompt_template_version,

@@ -587,6 +587,7 @@ fn run_with_mock(run_id: &str) -> probelab_core::TestResult {
 #[test]
 fn evaluator_keeps_protocol_failures_outside_integrity() {
     let mut input = EvaluationInput {
+        benchmark_definition_digest: None,
         benchmark_id: "grid-world".to_owned(),
         benchmark_version: probelab_evaluator::GRID_WORLD_BENCHMARK_VERSION.to_owned(),
         capability_dimension: "grid-world planning".to_owned(),

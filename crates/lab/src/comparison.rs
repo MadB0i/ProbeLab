@@ -54,6 +54,25 @@ pub struct ComparableRun {
     pub adapter: String,
     /// The named strategy within that adapter.
     pub strategy: String,
+    /// The provider that produced the actions, or `None` when the run recorded none.
+    ///
+    /// Part of the *identity* of the measurement, not a quality. Two runs of the same benchmark at the
+    /// same seed by two different models are not comparable at all, and a comparison that ranked them
+    /// would be answering a question nobody asked. `None` is kept distinct from any string a provider
+    /// could report, so a run whose provider was never recorded cannot be silently equated with a
+    /// recorded one -- it blocks, which is the safe direction.
+    pub provider: Option<String>,
+    /// The provider's model identifier, or `None` when the run recorded none.
+    ///
+    /// Same reasoning as [`Self::provider`], and the pair is what a reader actually needs: a provider
+    /// name without a model is a vendor, and vendors ship several models whose behaviour differs.
+    pub model: Option<String>,
+    /// The content digest of the benchmark definition, or `None` for a run recorded before it existed.
+    ///
+    /// Blocks for the same reason `benchmark_id` does, and for an additional one: `benchmark_version`
+    /// is a string a person maintains, and a definition can change without it. Ranking a run of the
+    /// old task against a run of the new one is the failure this whole field exists to prevent.
+    pub benchmark_definition_digest: Option<String>,
     /// The root seed. Two runs with different seeds are not comparable.
     pub root_seed: u64,
     /// Episodes that completed and produced a result.
@@ -78,6 +97,54 @@ pub struct ComparableRun {
     pub mean_invalid_actions: f64,
 }
 
+/// The provider identifier the deterministic mock reports.
+///
+/// Duplicated as a literal rather than imported from `probelab-model-adapters`, because `probelab-lab`
+/// deliberately does not depend on the adapter crates: this module decides what a comparison may claim
+/// from stored data, and taking a constant from the thing it is judging would invert that. The two
+/// must agree, and a test in `crates/lab/tests/comparison.rs` asserts the mock runs this module sees
+/// really do carry this value.
+const DETERMINISTIC_MOCK_PROVIDER: &str = "deterministic-mock";
+
+/// An owned non-empty string, or `None`.
+///
+/// Empty is treated as absent because a run that recorded an empty provider recorded nothing, and
+/// storing Some("") would make "recorded as blank" look like a real identity to every check above.
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+/// How many distinct values were actually recorded across a set of runs.
+///
+/// The unit the identity checks are written in, and it is what makes *absence* different from
+/// *difference*. A run that recorded no provider has not claimed a different subject from anyone; it
+/// has simply not said. Counting only the recorded values means such a run neither blocks a comparison
+/// on its own nor gets quietly equated with a recorded identity -- it is ignored, and the run is
+/// already unranked for having measured nothing.
+///
+/// Two runs, one recorded as `anthropic` and one unrecorded, give 1. Two runs recorded as `anthropic`
+/// and `openai` give 2, and block.
+fn distinct_recorded(values: impl Iterator<Item = Option<String>>) -> usize {
+    let mut distinct: Vec<String> = Vec::new();
+    for value in values.flatten() {
+        if !distinct.contains(&value) {
+            distinct.push(value);
+        }
+    }
+    distinct.len()
+}
+
+/// Formats an optional identity for comparison, so a recorded value never equals an absent one.
+///
+/// NUL is used as the absent marker because no provider id, model id, or content digest can contain
+/// it -- they are vendor strings and lowercase hex. A spelled-out placeholder like "unknown" would
+/// work too and would be more readable in a stored comparison, but it would also be a string a
+/// confused upstream could genuinely produce, and this function's entire job is to make "not
+/// recorded" impossible to confuse with "recorded as something".
+fn identity_value(value: Option<&str>) -> String {
+    value.map_or_else(|| "\u{0}not recorded".to_owned(), str::to_owned)
+}
 impl ComparableRun {
     /// Projects the stored episode results of one run into a comparable run.
     ///
@@ -133,6 +200,31 @@ impl ComparableRun {
             .map(|result| (result.model.adapter.clone(), result.model.strategy.clone()))
             .unwrap_or_else(|| ("none".to_owned(), "none".to_owned()));
 
+        /*
+         * Who produced the actions, and which task they were produced against.
+         *
+         * Read from the first episode's own recorded reproducibility metadata rather than from the
+         * descriptor, because that metadata is what was *persisted with the result* -- it is the same
+         * string a reader of the stored bundle will see, rather than something reconstructed here.
+         *
+         * A run with no completed episode has no identity at all, and that is `None` rather than a
+         * placeholder. `None` blocks the comparison, which is right: a run that measured nothing
+         * cannot be ranked alongside one that did, and quietly equating its identity with another run's
+         * would let that through.
+         */
+        let (provider, model, benchmark_definition_digest) = episodes
+            .first()
+            .map(|result| {
+                let provider = non_empty(&result.reproducibility.provider);
+                let model = non_empty(&result.reproducibility.model);
+                let digest = result
+                    .benchmark_definition_digest
+                    .as_deref()
+                    .and_then(non_empty);
+                (provider, model, digest)
+            })
+            .unwrap_or((None, None, None));
+
         // An `if` rather than `then(...).unwrap_or(...)`: with no completed episode there is nothing
         // to average, and the chain form reads as though a zero were a computed mean.
         let mean_of = |read: fn(&TestResult) -> f64| {
@@ -149,6 +241,9 @@ impl ComparableRun {
             target_agent: target_agent.into(),
             adapter,
             strategy,
+            provider,
+            model,
+            benchmark_definition_digest,
             root_seed,
             episodes_completed: completed,
             episodes_failed,
@@ -359,6 +454,74 @@ pub fn compare(runs: Vec<ComparableRun>) -> ComparisonOutcome {
     };
     check("benchmark", |run| run.benchmark_id.clone());
     check("root_seed", |run| run.root_seed.to_string());
+    /*
+     * The subject, not the instrument.
+     *
+     * `adapter` and `strategy` are confounds reported in `varies_across`, because the lab's own
+     * harness is the same everywhere and a difference there qualifies a comparison without voiding
+     * it. A difference in provider or model is a different kind of fact: it means the two runs
+     * measured two different things, and a ranking across them would be a claim about neither.
+     *
+     * This was previously not checked *at all* -- `ComparableRun` had no provider or model field, so
+     * a comparison could not see which model produced a result even to warn about it. Two connected
+     * runs of different models, same benchmark and seed, ranked as comparable with the difference
+     * invisible. That is the gap this closes.
+     *
+     * # Absence is not difference
+     *
+     * Both checks count *distinct recorded values*, so a run that recorded nothing does not block on
+     * its own. A run with no completed episodes has an identity only as far as the store recorded one,
+     * and refusing to compare it with anything would make every such comparison impossible -- which is
+     * a comparison someone reasonably wants, in order to see that run listed as unranked rather than
+     * quietly ranked on another's results. A run that measured nothing cannot be mis-ranked into a
+     * position, because it is already excluded from every ranking.
+     *
+     * # Why the model check is exempt for the mock, and why that is not a loophole
+     *
+     * The deterministic mock reports `model` as a string derived from its own strategy: `optimal`
+     * becomes `native-mock-optimal`, `random` becomes `native-mock-random`. For two mock runs the
+     * model field is not an independent subject at all -- it is a second name for `target_agent`, which
+     * is already a *declared confound* the panel shows above the ranking. Blocking on it would refuse
+     * the product's core capability, comparing two agents on one benchmark and seed, over a difference
+     * the comparison already reports and qualifies.
+     *
+     * So the model check is skipped when every recorded provider is the deterministic mock. The
+     * provider check still runs, and still blocks a mock run against a connected one, because there the
+     * difference really is a different subject. The boundary is the honest one: `model` is load-bearing
+     * only when it names something the agent did not already name.
+     */
+    if distinct_recorded(runs.iter().map(|run| run.provider.clone())) > 1 {
+        check("provider", |run| identity_value(run.provider.as_deref()));
+    }
+    let every_recorded_provider_is_the_mock = runs
+        .iter()
+        .all(|run| run.provider.as_deref() == Some(DETERMINISTIC_MOCK_PROVIDER));
+    if !every_recorded_provider_is_the_mock
+        && distinct_recorded(runs.iter().map(|run| run.model.clone())) > 1
+    {
+        check("model", |run| identity_value(run.model.as_deref()));
+    }
+
+    /*
+     * The task, which blocks regardless of provider.
+     *
+     * Same absence-is-not-difference rule, and for the same reason: a stored bundle from before the
+     * digest existed has not said what task it ran, and refusing to compare it with anything would make
+     * every pre-existing result unrankable rather than merely qualified.
+     *
+     * Where digests *are* recorded and differ, the task genuinely changed -- a seed pool grew, a turn
+     * budget moved, the reward function changed without anyone bumping the version string -- and
+     * ranking across that boundary is the exact failure this identifier exists to prevent.
+     */
+    if distinct_recorded(
+        runs.iter()
+            .map(|run| run.benchmark_definition_digest.clone()),
+    ) > 1
+    {
+        check("benchmark_definition_digest", |run| {
+            identity_value(run.benchmark_definition_digest.as_deref())
+        });
+    }
 
     if !blocking.is_empty() {
         return ComparisonOutcome::NotComparable(Incomparable {

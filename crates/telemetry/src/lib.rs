@@ -1542,6 +1542,9 @@ mod tests {
             schema_version: 1,
             benchmark_id: "grid-world".to_owned(),
             benchmark_version: "1".to_owned(),
+            // Absent, not fabricated: a storage test has no embedded definition behind it, and a
+            // digest invented here would be a value a reader could mistake for a real one.
+            benchmark_definition_digest: None,
             model: probelab_core::ModelDescriptor {
                 adapter: "mock".to_owned(),
                 strategy: "fixed".to_owned(),

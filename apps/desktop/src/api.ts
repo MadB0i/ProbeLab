@@ -305,6 +305,24 @@ export type ComparableRun = {
   targetAgent: string;
   adapter: string;
   strategy: string;
+  /**
+   * The provider that produced the actions, or null when the run recorded none.
+   *
+   * A comparison refuses when two runs recorded *different* providers or models, so a ranking can
+   * never be a claim about two different subjects. Null means "not recorded", which is distinct from
+   * any provider name and does not on its own refuse a comparison -- absence is not difference.
+   */
+  provider: string | null;
+  /** The provider's model identifier. See `provider`. */
+  model: string | null;
+  /**
+   * The content digest of the benchmark definition, or null when the run recorded none.
+   *
+   * Distinct from `benchmarkVersion`, which is a hand-maintained string a definition edit does not
+   * have to change. This is computed from the definition's bytes, so two runs of different tasks
+   * cannot be ranked against each other.
+   */
+  benchmarkDefinitionDigest: string | null;
   rootSeed: number;
   episodesCompleted: number;
   episodesFailed: number;

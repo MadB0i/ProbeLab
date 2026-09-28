@@ -47,6 +47,12 @@ function comparableRun(input: {
     targetAgent: input.targetAgent ?? "optimal",
     adapter: "deterministic-mock-v1",
     strategy: "optimal",
+    // Identity, not decoration. The backend refuses a comparison when two runs recorded different
+    // providers or models, so these are the fields that decide whether a ranking may exist at all --
+    // and they are the reason this fixture is checked in rather than assumed.
+    provider: "deterministic-mock",
+    model: "native-mock-optimal",
+    benchmarkDefinitionDigest: "sha256:test",
     rootSeed: input.rootSeed ?? 4242,
     episodesCompleted: episodes,
     episodesFailed: 0,
