@@ -334,6 +334,16 @@ pub struct LabRunner {
     /// Notified as the run produces events. `Arc` so a caller can hold the same observer the runner
     /// does and read what it collected.
     observer: Arc<dyn ExperimentObserver>,
+    /// Cooperative cancellation flag. Set by [`LabRunner::cancel_handle`] holders
+    /// (e.g. a UI stop button); checked once per episode so a run stops between
+    /// episodes rather than mid-turn. Never checked inside the engine's turn
+    /// loop, so cancellation cannot strand a contained child — the episode in
+    /// flight finishes and its cleanup runs.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Upper bound on total tokens (prompt + completion) across all episodes.
+    /// `None` means unbounded. Checked between episodes from recorded usage,
+    /// so a run stops before the next episode rather than mid-call.
+    max_total_tokens: Option<u64>,
 }
 
 impl LabRunner {
@@ -347,7 +357,28 @@ impl LabRunner {
             wall_clock_budget: Duration::from_secs(30 * 60),
             host: current_platform(),
             observer: Arc::new(SilentObserver),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            max_total_tokens: None,
         }
+    }
+
+    /// Returns a handle that, when set, asks the next episode boundary to stop.
+    ///
+    /// Cooperative: the in-flight episode always finishes first, so cleanup
+    /// (`ExperimentManager::Drop`, contained-child termination) still runs.
+    pub fn cancel_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
+
+    /// Requests cancellation of the run in flight, if any.
+    pub fn cancel(&self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Caps total tokens across all episodes. `None` (default) is unbounded.
+    pub fn with_max_total_tokens(mut self, max: Option<u64>) -> Self {
+        self.max_total_tokens = max;
+        self
     }
 
     /// Attaches an observer that is notified as the experiment runs.
@@ -486,7 +517,70 @@ impl LabRunner {
         let mut terminal: Option<TerminalReason> = None;
 
         brain.begin_analysis();
+        brain.begin_running();
+        self.observer.on_brain_state(brain.panel().state);
         for index in 0..plan.episodes {
+            if self.cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                // Cooperative cancellation: the episodes so far are preserved
+                // as evidence and the terminal reason says cancelled, so a
+                // stopped run can never read as a completed measurement.
+                terminal = Some(TerminalReason::Cancelled);
+                self.record(
+                    &mut manager,
+                    LabEvent::new(
+                        0,
+                        "runner.cancelled",
+                        EventSource::Experiment,
+                        Severity::Warning,
+                        &format!("cancelled after {index} of {} episodes", plan.episodes),
+                    ),
+                );
+                break;
+            }
+            if let Some(max_tokens) = self.max_total_tokens {
+                let spent: u64 = results
+                    .iter()
+                    .map(|result| {
+                        result
+                            .reproducibility
+                            .token_usage
+                            .prompt_tokens
+                            .unwrap_or(0)
+                            .saturating_add(
+                                result
+                                    .reproducibility
+                                    .token_usage
+                                    .completion_tokens
+                                    .unwrap_or(0),
+                            )
+                    })
+                    .sum();
+                if spent >= max_tokens {
+                    terminal = Some(TerminalReason::Timeout {
+                        budget_seconds: self.wall_clock_budget.as_secs(),
+                    });
+                    self.record(
+                        &mut manager,
+                        LabEvent::new(
+                            0,
+                            "runner.token_budget_exhausted",
+                            EventSource::Experiment,
+                            Severity::Error,
+                            &format!(
+                                "stopped after {index} of {} episodes: token budget {spent}/{max_tokens} exhausted",
+                                plan.episodes
+                            ),
+                        ),
+                    );
+                    brain.observe(&BrainEvent {
+                        episode: index,
+                        turn: 0,
+                        category: ObservedCategory::BudgetExhausted,
+                        label: "token budget expired".to_owned(),
+                    });
+                    break;
+                }
+            }
             if started.elapsed() >= self.wall_clock_budget {
                 // A budget expiry is its own terminal reason, never folded into "completed". Reporting
                 // a truncated run as a finished one would present twelve episodes as thirty.

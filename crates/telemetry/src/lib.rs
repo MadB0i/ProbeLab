@@ -938,10 +938,12 @@ impl SqliteResultRepository {
                     has_score, score, result_json, updated_unix_ms,
                     target_agent, root_seed
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-                 ON CONFLICT(experiment_id) DO UPDATE SET
-                    lifecycle = excluded.lifecycle,
-                    terminal_reason = excluded.terminal_reason,
-                    episodes_completed = excluded.episodes_completed,
+                  ON CONFLICT(experiment_id) DO UPDATE SET
+                     benchmark_id = excluded.benchmark_id,
+                     lifecycle = excluded.lifecycle,
+                     terminal_reason = excluded.terminal_reason,
+                     episodes_requested = excluded.episodes_requested,
+                     episodes_completed = excluded.episodes_completed,
                     episodes_failed = excluded.episodes_failed,
                     has_score = excluded.has_score,
                     score = excluded.score,

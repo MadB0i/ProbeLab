@@ -524,3 +524,64 @@ fn a_completed_run_also_measures_its_duration() {
         "and it says so explicitly rather than by omission"
     );
 }
+
+/// A cancellation request stops the run between episodes with a Cancelled
+/// terminal reason, preserving the episodes that finished.
+#[test]
+fn a_cancelled_run_stops_between_episodes_and_says_so() {
+    use std::sync::atomic::Ordering;
+    let mut brain = LabBrain::new();
+    let runner = LabRunner::new();
+    runner.cancel_handle().store(true, Ordering::SeqCst);
+    let run = runner
+        .run(
+            &mut brain,
+            &plan_request(),
+            "exp-cancelled",
+            &GridWorldEvaluator::new(),
+            Arc::new(CapturingRecorder::default()),
+        )
+        .expect("a cancelled run still returns its partial evidence");
+    assert_eq!(run.terminal_reason, Some(TerminalReason::Cancelled));
+    assert!(run.results.is_empty());
+    assert!(
+        run.timeline
+            .events()
+            .iter()
+            .any(|event| event.code == "runner.cancelled"),
+        "the cancellation must appear on the timeline"
+    );
+}
+
+/// The Brain reaches the Running state during a real multi-episode run.
+#[test]
+fn the_brain_reaches_running_during_a_real_run() {
+    use probelab_lab::{BrainState, ExperimentObserver, LabEvent};
+    use std::sync::Mutex;
+    /// Captures every brain-state notification the runner emits.
+    struct StateCapture(Mutex<Vec<BrainState>>);
+    impl ExperimentObserver for StateCapture {
+        fn on_event(&self, _event: &LabEvent) {}
+        fn on_brain_state(&self, state: BrainState) {
+            self.0.lock().expect("state lock").push(state);
+        }
+    }
+    let capture = Arc::new(StateCapture(Mutex::new(Vec::new())));
+    let mut brain = LabBrain::new();
+    let run = LabRunner::new()
+        .with_observer(capture.clone())
+        .run(
+            &mut brain,
+            &plan_request(),
+            "exp-running-state",
+            &GridWorldEvaluator::new(),
+            Arc::new(CapturingRecorder::default()),
+        )
+        .expect("run");
+    assert_eq!(run.results.len(), 3);
+    let states = capture.0.lock().expect("read states").clone();
+    assert!(
+        states.contains(&BrainState::Running),
+        "the runner must notify Running during a real run, not only assign it: saw {states:?}"
+    );
+}

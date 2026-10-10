@@ -527,6 +527,14 @@ impl LabBrain {
         self.next = "Reduce the recorded results".to_owned();
     }
 
+    /// Marks episodes as running. Set when the first episode starts so the
+    /// `Running` state is reachable from a real run rather than only from tests
+    /// that construct a projection directly.
+    pub fn begin_running(&mut self) {
+        self.state = BrainState::Running;
+        self.next = "Execute the planned episodes".to_owned();
+    }
+
     /// Marks the experiment complete.
     pub fn complete(&mut self) {
         self.state = BrainState::Completed;
