@@ -17,9 +17,13 @@
 //! # What a UI can rely on
 //!
 //! * `code` is stable and safe to branch on. Display strings may change; codes may not.
-//! * `detail` is bounded and credential-free by construction — [`LabEvent::new`] takes a `&str` and
-//!   redacts through the shared transport rules, so an adapter cannot smuggle a key into the timeline
-//!   by putting it in an error message.
+//! * `detail` is bounded and passed through a secret-agnostic sanitizer
+//!   ([`sanitize_detail`]) — credential-shaped fragments (`sk-…`, bearer
+//!   tokens, `api_key=` assignments) and control characters are removed, so
+//!   an adapter cannot smuggle a key into the timeline in plain sight. This
+//!   is a second layer, not a substitute: provider response text is redacted
+//!   with the real secret at source by the transport layer, which is the only
+//!   place the secret value exists.
 //! * `integrity` is `Some` only for events the *infrastructure itself* classified. A model saying
 //!   "I was refused" never sets it, because a model's account of what happened is not evidence.
 
@@ -108,7 +112,7 @@ pub struct LabEvent {
     pub source: EventSource,
     /// How much it matters.
     pub severity: Severity,
-    /// Bounded, credential-free detail.
+    /// Bounded, sanitized detail.
     pub detail: String,
     /// The infrastructure-classified integrity category, when one applies.
     ///
@@ -188,8 +192,85 @@ impl LabEvent {
 }
 
 /// Bounds a detail string so a chatty subsystem cannot inflate a result bundle.
+///
+/// Also strips credential-shaped fragments and control characters. Provider
+/// response text is redacted at source by the transport layer; this is the
+/// second, secret-agnostic layer for the event path, which never receives the
+/// credential value itself. Patterns covered: `sk-…`, `sk-ant-…`, bearer
+/// tokens, `api_key=`/`apikey:` assignments, and C0/C1 control characters.
+/// This is lossy by design: a detail is a label, not evidence.
 fn bound(detail: &str) -> String {
-    detail.chars().take(EVENT_DETAIL_LIMIT).collect()
+    sanitize_detail(detail)
+}
+
+/// Redacts secret-shaped fragments without needing the secret value.
+pub fn sanitize_detail(detail: &str) -> String {
+    let mut out = String::with_capacity(detail.len().min(EVENT_DETAIL_LIMIT * 2));
+    let chars: Vec<char> = detail.chars().take(EVENT_DETAIL_LIMIT * 2).collect();
+    let mut index = 0;
+    while index < chars.len() {
+        if matches_secret_prefix(&chars[index..]) {
+            out.push_str("[REDACTED]");
+            index = skip_secret_token(&chars[index..], index, chars.len());
+            continue;
+        }
+        let character = chars[index];
+        // Line breaks survive: Windows-originated text ends lines with CRLF,
+        // and a detail that dropped them would misquote its source.
+        if character.is_control() && character != '\n' && character != '\r' && character != '\t' {
+            index += 1;
+            continue;
+        }
+        out.push(character);
+        index += 1;
+    }
+    out.chars().take(EVENT_DETAIL_LIMIT).collect()
+}
+
+/// Whether the slice starts a credential-shaped token.
+fn matches_secret_prefix(slice: &[char]) -> bool {
+    let text: String = slice.iter().take(24).collect();
+    let lower = text.to_ascii_lowercase();
+    lower.starts_with("sk-")
+        || lower.starts_with("sk-ant-")
+        || lower.starts_with("bearer ")
+        || lower.starts_with("api_key=")
+        || lower.starts_with("apikey=")
+        || lower.starts_with("api-key=")
+        || lower.starts_with("api_key:")
+        || lower.starts_with("x-api-key")
+}
+
+/// Skips the secret token itself, returning the absolute index to resume at.
+fn skip_secret_token(slice: &[char], base: usize, total: usize) -> usize {
+    let mut offset = 0;
+    // Skip the prefix word itself (up to whitespace or `=`/`:`).
+    while offset < slice.len()
+        && !slice[offset].is_whitespace()
+        && slice[offset] != '='
+        && slice[offset] != ':'
+        && offset < 96
+    {
+        offset += 1;
+    }
+    // Skip the separator and any following whitespace/quotes.
+    while offset < slice.len()
+        && (slice[offset].is_whitespace()
+            || slice[offset] == '='
+            || slice[offset] == ':'
+            || slice[offset] == '"'
+            || slice[offset] == '\'')
+    {
+        offset += 1;
+    }
+    // Skip the token value itself.
+    while offset < slice.len()
+        && (slice[offset].is_alphanumeric() || "_-./+=:".contains(slice[offset]))
+        && offset < 160
+    {
+        offset += 1;
+    }
+    (base + offset).min(total)
 }
 
 /// The stable code for an integrity category.
@@ -303,6 +384,10 @@ pub fn decision_event(sequence: u64, turn: u64, decision: &ModelDecision) -> Lab
 pub struct LabTimeline {
     events: Vec<LabEvent>,
     next_sequence: u64,
+    /// How many oldest events were dropped once the timeline exceeded
+    /// [`LabTimeline::MAX_EVENTS`]. Zero for every normal run. Recorded so a
+    /// truncated timeline is distinguishable from a short one.
+    dropped_events: u64,
 }
 
 impl LabTimeline {
@@ -324,7 +409,9 @@ impl LabTimeline {
         self.events.push(event);
         if self.events.len() > Self::MAX_EVENTS {
             // Drop oldest, keep newest. A run is read forwards, so recent history is what matters.
-            self.events.drain(..self.events.len() - Self::MAX_EVENTS);
+            let dropped = self.events.len() - Self::MAX_EVENTS;
+            self.events.drain(..dropped);
+            self.dropped_events = self.dropped_events.saturating_add(dropped as u64);
         }
         self.events.last().expect("just pushed")
     }
@@ -337,6 +424,19 @@ impl LabTimeline {
     /// How many events are retained.
     pub fn len(&self) -> usize {
         self.events.len()
+    }
+
+    /// How many oldest events were dropped by the [`Self::MAX_EVENTS`] bound.
+    ///
+    /// Zero means nothing was lost. A reader that sees a non-zero value knows
+    /// the recording is truncated rather than short.
+    pub fn dropped_events(&self) -> u64 {
+        self.dropped_events
+    }
+
+    /// Whether the timeline lost events to the retention bound.
+    pub fn is_truncated(&self) -> bool {
+        self.dropped_events > 0
     }
 
     /// Whether the timeline is empty.
@@ -585,6 +685,47 @@ mod tests {
         assert_eq!(timeline.len(), LabTimeline::MAX_EVENTS);
         // The newest is kept, because a run is read forwards.
         assert_eq!(timeline.events().last().expect("last").detail, "10009");
+        // The loss is recorded, so a truncated timeline cannot read as a short one.
+        assert_eq!(timeline.dropped_events(), 10);
+        assert!(timeline.is_truncated());
+    }
+
+    #[test]
+    fn a_fresh_timeline_reports_no_truncation() {
+        let timeline = LabTimeline::new();
+        assert_eq!(timeline.dropped_events(), 0);
+        assert!(!timeline.is_truncated());
+    }
+
+    #[test]
+    fn credential_shaped_fragments_do_not_survive_in_a_detail() {
+        for secret in [
+            "sk-abc123def456",
+            "sk-ant-secret-value",
+            "Bearer eyJhbGciOiJIUzI1NiJ9",
+            "api_key=SUPERSECRET",
+        ] {
+            let event = LabEvent::new(
+                0,
+                "c",
+                EventSource::Model,
+                Severity::Error,
+                &format!("provider said {secret} loudly"),
+            );
+            assert!(
+                !event.detail.contains("abc123")
+                    && !event.detail.contains("SUPERSECRET")
+                    && !event.detail.contains("eyJhbGci"),
+                "secret-shaped text survived: {}",
+                event.detail
+            );
+        }
+    }
+
+    #[test]
+    fn control_characters_do_not_survive_in_a_detail() {
+        let event = LabEvent::new(0, "c", EventSource::Model, Severity::Error, "a\x00b\x1bc");
+        assert_eq!(event.detail, "abc");
     }
 
     #[test]

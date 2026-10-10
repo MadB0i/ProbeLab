@@ -309,6 +309,10 @@ fn read_one_capture(path: &Path) -> StreamCapture {
 /// The read is capped in bytes first and then capped in characters, because a lossy UTF-8 conversion
 /// expands invalid bytes into multi-byte replacement characters and would otherwise let a hostile
 /// child push far more than the cap into telemetry.
+///
+/// The preview is also passed through [`sanitize_preview`]: the child's environment holds no
+/// credentials, so this is a narrow exposure — but a child that prints a secret-shaped string must
+/// not land it verbatim in persisted telemetry.
 fn read_bounded_preview(path: &Path) -> String {
     use std::io::Read;
 
@@ -324,7 +328,67 @@ fn read_bounded_preview(path: &Path) -> String {
     if preview.chars().count() > STREAM_PREVIEW_LIMIT {
         preview = preview.chars().take(STREAM_PREVIEW_LIMIT).collect();
     }
-    preview
+    sanitize_preview(&preview)
+}
+
+/// Removes secret-shaped fragments and control characters from a persisted
+/// stream preview.
+///
+/// Secret-agnostic by necessity: the preview path never holds the credential
+/// value, so it redacts shapes (`sk-…`, bearer tokens, `api_key=`
+/// assignments) rather than values. Control characters are dropped so a
+/// terminal or log renderer cannot be driven by child output. Lossy by
+/// design: a preview is evidence that output existed, not a transcript.
+fn sanitize_preview(preview: &str) -> String {
+    let mut out = String::with_capacity(preview.len().min(STREAM_PREVIEW_LIMIT * 2));
+    let chars: Vec<char> = preview.chars().take(STREAM_PREVIEW_LIMIT * 2).collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let rest: String = chars[index..].iter().take(24).collect();
+        let lower = rest.to_ascii_lowercase();
+        if lower.starts_with("sk-")
+            || lower.starts_with("sk-ant-")
+            || lower.starts_with("bearer ")
+            || lower.starts_with("api_key=")
+            || lower.starts_with("apikey=")
+            || lower.starts_with("api-key=")
+        {
+            out.push_str("[REDACTED]");
+            // Skip the prefix word, the separator, and the token value.
+            while index < chars.len()
+                && !chars[index].is_whitespace()
+                && chars[index] != '='
+                && chars[index] != ':'
+            {
+                index += 1;
+            }
+            while index < chars.len()
+                && (chars[index].is_whitespace()
+                    || chars[index] == '='
+                    || chars[index] == ':'
+                    || chars[index] == '"'
+                    || chars[index] == '\'')
+            {
+                index += 1;
+            }
+            while index < chars.len()
+                && (chars[index].is_alphanumeric() || "_-./+=:".contains(chars[index]))
+            {
+                index += 1;
+            }
+            continue;
+        }
+        let character = chars[index];
+        // Line breaks survive: Windows child output ends lines with CRLF,
+        // and a preview that dropped them would no longer be the output.
+        if character.is_control() && character != '\n' && character != '\r' && character != '\t' {
+            index += 1;
+            continue;
+        }
+        out.push(character);
+        index += 1;
+    }
+    out.chars().take(STREAM_PREVIEW_LIMIT).collect()
 }
 
 /// Maps a core budget onto the job object limits the containment layer understands.
@@ -469,7 +533,9 @@ impl From<MandatoryIntegrity> for IntegrityLevel {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, limits_from, ContainedProcessSpawner, ENFORCED_JOB_LIMITS};
+    use super::{
+        classify, limits_from, sanitize_preview, ContainedProcessSpawner, ENFORCED_JOB_LIMITS,
+    };
     use crate::containment::ContainmentError;
     use probelab_core::{ContainmentFailureKind, ProcessBudget};
 
@@ -559,5 +625,17 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(spawner.protected_paths().len(), 0);
+    }
+
+    #[test]
+    fn a_preview_never_persists_a_secret_shaped_fragment() {
+        let preview = sanitize_preview("leaked sk-abc123def456 done");
+        assert!(!preview.contains("abc123"), "secret survived: {preview}");
+        assert!(preview.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn a_preview_drops_control_characters() {
+        assert_eq!(sanitize_preview("a\x00b\x1bc"), "abc");
     }
 }
