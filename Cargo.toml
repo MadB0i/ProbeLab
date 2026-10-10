@@ -11,6 +11,8 @@ members = [
     "crates/benchmarks",
     "crates/engine",
     "crates/lab",
+    "crates/executors",
+    "crates/tasks",
     "apps/desktop/src-tauri",
 ]
 

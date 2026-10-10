@@ -1,0 +1,20 @@
+[package]
+name = "probelab-tasks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Seed-varying task benchmarks for ProbeLab: coding repair and cue memory with independent verification."
+
+[dependencies]
+probelab-core = { path = "../core" }
+probelab-engine = { path = "../engine" }
+probelab-executors = { path = "../executors" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = "0.4"
+thiserror = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
