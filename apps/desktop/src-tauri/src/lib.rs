@@ -17,9 +17,20 @@ use tauri::{AppHandle, Emitter, Manager};
 mod arena;
 mod brain;
 mod commands;
+mod executors;
 mod provider;
 mod security;
 mod settings;
+mod tasks;
+
+pub use executors::{
+    cancel_experiment, export_experiment, inspect_guest_isolation, list_executors,
+    list_local_models, preflight_executor, CancelRegistry, ExecutorCommandError, ExperimentExport,
+};
+pub use tasks::{
+    guided_task_package, list_task_benchmarks, run_task_eval, score_guided_submission,
+    GuidedPackageView, GuidedSubmission, TaskBenchmarkSummary, TaskCommandError, TaskEvalRequest,
+};
 
 pub use arena::{
     get_arena_match, latest_arena_match, list_arena_agents, list_arena_games, play_arena_match,
@@ -151,6 +162,11 @@ pub struct AppState {
     pub settings_path: std::path::PathBuf,
     /// Where results are stored, so the settings page can report the real path.
     pub results_path: std::path::PathBuf,
+    /// Cancellation handles for runs in flight, keyed by experiment identifier.
+    ///
+    /// Populated when `run_experiment` starts and removed when it ends, so
+    /// `cancel_experiment` can only stop the run it names.
+    pub cancels: CancelRegistry,
 }
 
 #[derive(Clone, Serialize)]
@@ -168,6 +184,56 @@ struct RunCompleteEnvelope {
 struct RunErrorEnvelope {
     run_id: String,
     error: String,
+}
+
+impl AppState {
+    /// Builds application state over throwaway stores for integration tests.
+    ///
+    /// Integration-test scaffolding, not a second production path: the stores
+    /// live under the system temp directory and are never the user's data.
+    /// Every `native_commands.rs` test that invokes a command through a real
+    /// Tauri app builds its state here, so the managed-state type, the
+    /// command registration, and the argument casing are all exercised — the
+    /// three properties unit tests cannot see.
+    pub fn for_testing(tag: &str) -> Result<Self, String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_TEST_STATE: AtomicU64 = AtomicU64::new(0);
+        let sequence = NEXT_TEST_STATE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "probelab-native-test-{tag}-{pid}-{sequence}",
+            pid = std::process::id()
+        ));
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("could not create test state dir: {error}"))?;
+        let database_path = dir.join(DATABASE_FILE_NAME);
+        let settings_path = dir.join(SETTINGS_FILE_NAME);
+        let recorder = Arc::new(
+            SqliteTelemetryRecorder::with_callback(&database_path, |_| {})
+                .map_err(|error| error.to_string())?,
+        );
+        let results = Arc::new(
+            SqliteResultRepository::new(&database_path).map_err(|error| error.to_string())?,
+        );
+        let settings =
+            Arc::new(SqliteSettingsStore::open(&settings_path).map_err(|error| error.to_string())?);
+        let brain = BrainSurface::default();
+        brain
+            .set_recorder(recorder.clone())
+            .map_err(|error| error.message)?;
+        Ok(Self {
+            catalog: BenchmarkCatalog::new().map_err(|error| error.to_string())?,
+            brain,
+            arena: ArenaSurface::default(),
+            security: SecuritySurface::default(),
+            recorder,
+            results,
+            recent_events: RecentEventBuffer::default(),
+            settings,
+            settings_path,
+            results_path: database_path,
+            cancels: CancelRegistry::default(),
+        })
+    }
 }
 
 fn new_run_id() -> Result<RunId, String> {
@@ -283,6 +349,7 @@ pub fn run() {
                 settings,
                 settings_path: settings_path.clone(),
                 results_path: database_path,
+                cancels: CancelRegistry::default(),
             });
             Ok(())
         })
@@ -298,10 +365,16 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             apply_settings,
             brain_panel,
+            cancel_experiment,
             compare_experiments,
+            export_experiment,
             get_experiment,
+            inspect_guest_isolation,
             list_comparable_experiments,
+            list_executors,
             list_experiments,
+            list_local_models,
+            preflight_executor,
             read_settings,
             reset_settings,
             run_experiment,
@@ -310,7 +383,11 @@ pub fn run() {
             list_benchmarks,
             list_providers,
             get_provider_status,
+            guided_task_package,
+            list_task_benchmarks,
             run_benchmark,
+            run_task_eval,
+            score_guided_submission,
             get_result,
             get_run_metadata,
             subscribe_telemetry,
@@ -331,13 +408,14 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        get_arena_match, latest_arena_match, latest_security_report, list_agents,
-        list_arena_agents, list_arena_games, list_benchmark_details, list_providers,
-        list_security_probes, new_run_id, play_arena_match, replay_arena_match, run_security_sweep,
-        AgentSummary, BenchmarkDetail, ProviderSummary,
+        brain_panel, get_arena_match, get_experiment, latest_arena_match, latest_security_report,
+        list_agents, list_arena_agents, list_arena_games, list_benchmark_details, list_experiments,
+        list_providers, list_security_probes, new_run_id, replay_arena_match, AgentSummary,
+        AppState, ArenaCommandError, BenchmarkDetail, BrainCommandError, ProviderSummary,
     };
     use probelab_lab::AgentCategory;
     use probelab_lab::AgentRegistry;
+    use probelab_lab::{ArenaMatchView, BrainReadModel};
 
     #[test]
     fn run_ids_include_a_monotonic_counter() {
@@ -737,24 +815,39 @@ mod tests {
         );
     }
 
-    /// The surfaces those commands read are the ones the application manages.
+    /// Every command's state parameter is the managed type, or the command is dead.
     ///
-    /// `play_arena_match` and `run_security_sweep` take `State<'_, AppState>`, which only resolves
-    /// because `AppState` is what `app.manage(..)` installs. A refactor that managed a different type
-    /// would compile and then fail at run time on the first Arena match, so this asserts the managed
-    /// state is the one the commands ask for.
+    /// Tauri resolves `State<T>` from the types passed to `app.manage(..)` — here, exactly
+    /// `AppState` and nothing else. A command taking `State<BrainSurface>` or `State<ArenaSurface>`
+    /// compiles, passes every test that calls the function directly (tests never run Tauri's state
+    /// resolution), and then fails on *every* invocation in the built application with "state not
+    /// managed". That is precisely what happened to `brain_panel`, `get_experiment`,
+    /// `list_experiments`, `latest_arena_match`, `replay_arena_match`, and `get_arena_match`: the
+    /// command center's entire read path and the arena's read path were dead in the built app while
+    /// the suite was green.
+    ///
+    /// This test names each command with the state type it must take. A refactor that changes a
+    /// signature back to an unmanaged surface fails here at compile time instead of at run time on
+    /// a user's first click.
     #[test]
-    fn the_arena_and_security_commands_read_managed_state_that_exists() {
-        fn assert_state_types_are_expressible(
-            _: Option<tauri::State<'static, super::ArenaSurface>>,
-            _: Option<tauri::State<'static, super::SecuritySurface>>,
-            _: Option<tauri::State<'static, super::BrainSurface>>,
-            _: Option<tauri::State<'static, super::AppState>>,
-        ) {
-        }
-        // The commands below are never called; their types are what is under test.
-        let _ = play_arena_match as fn(_, _) -> _;
-        let _ = run_security_sweep as fn(_, _) -> _;
-        assert_state_types_are_expressible(None, None, None, None);
+    fn every_command_reads_managed_state_that_exists() {
+        use tauri::State;
+        // Brain read path.
+        let _ = brain_panel as fn(State<'static, AppState>) -> BrainReadModel;
+        let _ = get_experiment
+            as fn(State<'static, AppState>, String) -> Result<BrainReadModel, BrainCommandError>;
+        let _ = list_experiments as fn(State<'static, AppState>) -> Vec<String>;
+        // Arena read path.
+        let _ = latest_arena_match as fn(State<'static, AppState>) -> Option<ArenaMatchView>;
+        let _ = replay_arena_match
+            as fn(
+                State<'static, AppState>,
+                String,
+            ) -> Result<probelab_lab::Replay, ArenaCommandError>;
+        let _ = get_arena_match
+            as fn(State<'static, AppState>, String) -> Result<ArenaMatchView, ArenaCommandError>;
+        // And the managed type is the one the application installs.
+        fn assert_managed(_: Option<State<'static, AppState>>) {}
+        assert_managed(None);
     }
 }

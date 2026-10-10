@@ -19,12 +19,27 @@ path = "src/main.rs"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# The `test` feature only gates `tauri::test` (mock runtime, headless IPC
+# invocation) and pulls no extra dependencies. Declared here rather than in
+# `[dependencies]` so test builds exercise the native command path while
+# release builds carry nothing test-only.
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+# Direct access for the native command tests, which seed managed state with a
+# real `LabRunner` run rather than hand-built fixtures.
+probelab-core = { path = "../../../crates/core" }
+probelab-engine = { path = "../../../crates/engine" }
+probelab-evaluator = { path = "../../../crates/evaluator" }
+probelab-lab = { path = "../../../crates/lab" }
+
 [dependencies]
 probelab-agent = { path = "../../../crates/agent" }
 probelab-benchmarks = { path = "../../../crates/benchmarks" }
 probelab-core = { path = "../../../crates/core" }
 probelab-engine = { path = "../../../crates/engine" }
 probelab-evaluator = { path = "../../../crates/evaluator" }
+probelab-executors = { path = "../../../crates/executors" }
+probelab-tasks = { path = "../../../crates/tasks" }
 probelab-lab = { path = "../../../crates/lab" }
 probelab-model-adapters = { path = "../../../crates/model-adapters" }
 probelab-telemetry = { path = "../../../crates/telemetry" }
