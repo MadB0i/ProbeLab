@@ -673,3 +673,46 @@ describe("the connected run action", () => {
     expect(screen.getByRole("button", { name: /experiment running/i })).toBeDisabled();
   });
 });
+
+describe("per-episode inspection", () => {
+  it("renders one row per completed episode with its seed and result", () => {
+    renderPanel();
+    expect(screen.getByText(/Episodes that completed/i)).toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByText(/no success|success/i)).toBeDefined();
+  });
+
+  it("renders no episode table when nothing completed", () => {
+    renderPanel({ model: model({ experiment: experiment({ episodes: [] }) }) });
+    expect(screen.queryByText(/Episodes that completed/i)).toBeNull();
+  });
+});
+
+describe("cancellation and export", () => {
+  it("offers a stop control only while a run is in flight", () => {
+    const onCancel = vi.fn();
+    renderPanel({ onCancel, canCancel: true, running: true });
+    screen.getByRole("button", { name: /^stop$/i }).click();
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not offer a stop control when the caller supplies none", () => {
+    renderPanel({});
+    expect(screen.queryByRole("button", { name: /^stop$/i })).toBeNull();
+  });
+
+  it("offers both export formats for a finished experiment", () => {
+    const onExport = vi.fn();
+    renderPanel({ onExport, canExport: true });
+    screen.getByRole("button", { name: /export json/i }).click();
+    expect(onExport).toHaveBeenCalledWith("json");
+    screen.getByRole("button", { name: /export csv/i }).click();
+    expect(onExport).toHaveBeenCalledWith("csv");
+  });
+
+  it("disables export controls while a run is in flight", () => {
+    renderPanel({ onExport: vi.fn(), canExport: true, running: true });
+    expect(screen.getByRole("button", { name: /export json/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /export csv/i })).toBeDisabled();
+  });
+});

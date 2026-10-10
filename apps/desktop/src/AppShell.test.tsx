@@ -15,9 +15,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppShell, hash_for, route_from_hash, type RouteId } from "./AppShell";
 
 const PAGES: Record<RouteId, string> = {
+  readiness: "READINESS CONTENT",
   lab: "COMMAND CENTER CONTENT",
   agents: "AGENTS CONTENT",
   benchmarks: "BENCHMARKS CONTENT",
+  tasks: "TASKS CONTENT",
   comparison: "COMPARISON CONTENT",
   settings: "SETTINGS CONTENT",
   providers: "PROVIDERS CONTENT",
@@ -120,22 +122,27 @@ describe("destination navigation", () => {
 describe("keyboard navigation", () => {
   it("moves to the next destination with the down arrow", () => {
     renderShell();
+    // Down follows the rail order the reader can see, which is the grouped order -- so the item
+    // below LAB is TASKS, not AGENTS. Asserting against the rendered order rather than the
+    // declaration order is what makes this a test of the keyboard agreeing with the screen.
     fireEvent.keyDown(within(nav()).getByRole("button", { name: "LAB" }), { key: "ArrowDown" });
-    expect(screen.getByText(PAGES.agents)).toBeInTheDocument();
+    expect(screen.getByText(PAGES.tasks)).toBeInTheDocument();
   });
 
   it("moves to the previous destination with the up arrow", () => {
     renderShell();
     fireEvent.keyDown(within(nav()).getByRole("button", { name: "LAB" }), { key: "ArrowUp" });
-    // Up from the first item wraps to the last, rather than dead-ending.
-    expect(screen.getByText(PAGES.replay)).toBeInTheDocument();
+    // Up from the command center reaches readiness, which sits first in the list.
+    expect(screen.getByText(PAGES.readiness)).toBeInTheDocument();
   });
 
   it("wraps in both directions so the list is not a dead end", () => {
     renderShell();
-    const last = screen.getByRole("button", { name: "REPLAY" });
-    fireEvent.keyDown(last, { key: "ArrowDown" });
-    expect(screen.getByText(PAGES.lab)).toBeInTheDocument();
+    // The last rail item, found from the DOM rather than named, so this still tests the wrap when
+    // the rail's last destination changes.
+    const items = within(nav()).getAllByRole("button");
+    fireEvent.keyDown(items[items.length - 1], { key: "ArrowDown" });
+    expect(screen.getByText(PAGES.readiness)).toBeInTheDocument();
   });
 
   /**
@@ -155,10 +162,54 @@ describe("keyboard navigation", () => {
   it("jumps to the first and last destinations with Home and End", () => {
     renderShell();
     const items = within(nav()).getAllByRole("button");
+    // SETTINGS is last in the rail; that it is last is pinned by the group-order test below.
     fireEvent.keyDown(items[1], { key: "End" });
-    expect(screen.getByText(PAGES.replay)).toBeInTheDocument();
-    fireEvent.keyDown(screen.getByRole("button", { name: "REPLAY" }), { key: "Home" });
-    expect(screen.getByText(PAGES.lab)).toBeInTheDocument();
+    expect(screen.getByText(PAGES.settings)).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("button", { name: "SETTINGS" }), { key: "Home" });
+    expect(screen.getByText(PAGES.readiness)).toBeInTheDocument();
+  });
+
+  /*
+   * The rail is grouped, and the group order is the reading order. It is pinned here because the
+   * keyboard walk, the printed indices, and the visual order are all derived from it: if it changed,
+   * three things would move together and none of them individually looks wrong.
+   */
+  it("renders the destinations in the declared group order", () => {
+    renderShell();
+    expect(within(nav()).getAllByRole("button").map((button) => button.textContent?.replace(/\d/g, ""))).toEqual([
+      "READY",
+      "LAB",
+      "TASKS",
+      "AGENTS",
+      "BENCHMARKS",
+      "PROVIDERS",
+      "COMPARE",
+      "ARENA",
+      "SECURITY",
+      "REPLAY",
+      "SETTINGS",
+    ]);
+  });
+
+  it("numbers the rail so a destination can be named by position", () => {
+    renderShell();
+    const indices = Array.from(
+      nav().querySelectorAll<HTMLElement>(".nav-item-index"),
+    ).map((node) => node.textContent);
+    expect(indices).toHaveLength(Object.keys(PAGES).length);
+    expect(indices[0]).toBe("01");
+    expect(indices.at(-1)).toBe(Object.keys(PAGES).length.toString().padStart(2, "0"));
+  });
+
+  /*
+   * The index is a visual affordance for scanning the rail. It must not reach the accessible name,
+   * because a destination announced as "zero two, Command Center" is worse for a screen-reader user
+   * than one announced as "Command Center".
+   */
+  it("keeps the rail index out of each destination's accessible name", () => {
+    renderShell();
+    expect(within(nav()).getByRole("button", { name: "LAB" })).toBeInTheDocument();
+    expect(within(nav()).queryByRole("button", { name: /0?2.*LAB/ })).toBeNull();
   });
 
   /**
@@ -166,10 +217,10 @@ describe("keyboard navigation", () => {
    * disagree: the page would have changed while focus sat on the previous item, and the next arrow
    * press would jump from the wrong place.
    */
-  it("moves focus with the selection", () => {
+it("moves focus with the selection", () => {
     renderShell();
     fireEvent.keyDown(within(nav()).getByRole("button", { name: "LAB" }), { key: "ArrowDown" });
-    expect(within(nav()).getByRole("button", { name: "AGENTS" })).toHaveFocus();
+    expect(within(nav()).getByRole("button", { name: "TASKS" })).toHaveFocus();
   });
 
   /**

@@ -426,6 +426,54 @@ function ExperimentBody({ experiment }: { experiment: ExperimentView }) {
           </ul>
         </div>
       ) : null}
+
+      {/*
+        Per-episode rows, projected by the backend and rendered as received.
+
+        This is the table a small-sample claim most needs: the aggregate above
+        says what the run measured, and these rows say which episodes produced
+        it. Each row names its seed and replay digest so an episode is
+        identifiable, and a failure is never rendered as a row with a zero —
+        failures have their own list above.
+      */}
+      {experiment.episodes.length > 0 ? (
+        <div className="brain-episodes">
+          <h4>Episodes that completed</h4>
+          <table className="episode-table">
+            <thead>
+              <tr>
+                <th scope="col">Episode</th>
+                <th scope="col">Seed</th>
+                <th scope="col">Result</th>
+                <th scope="col">Events</th>
+                <th scope="col">Replay digest</th>
+              </tr>
+            </thead>
+            <tbody>
+              {experiment.episodes.map((episode) => (
+                <tr key={`${episode.index}-${episode.seed}`}>
+                  <td>{episode.index}</td>
+                  <td className="mono">{episode.seed}</td>
+                  <td className={episode.taskSuccess ? "tone-ok" : "tone-neutral"}>
+                    {episode.taskSuccess ? "success" : "no success"}
+                  </td>
+                  <td>{episode.telemetryEventCount}</td>
+                  {/*
+                    The digest is rendered in full.
+
+                    It was truncated to sixteen characters with an ellipsis, and the only way to
+                    read the rest was a hover tooltip -- on a table cell, in a product whose claim is
+                    that a run can be reproduced and verified. A provenance anchor that has to be
+                    hovered is not an anchor. The full value fits comfortably in a monospace column,
+                    so there was never a reason to cut it.
+                  */}
+                  <td className="mono digest-cell">{episode.replayDigest}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
     </>
   );
 }
@@ -444,6 +492,10 @@ export function BrainPanel({
   canRun,
   onRunConnected,
   canRunConnected,
+  onCancel,
+  canCancel,
+  onExport,
+  canExport,
 }: {
   model: BrainReadModel | null;
   error: string | null;
@@ -462,6 +514,20 @@ export function BrainPanel({
   onRunConnected?: () => void;
   /** Whether a connected model is configured and reachable. Absent means the feature is unavailable. */
   canRunConnected?: boolean;
+  /**
+   * Asks the runner to stop after the in-flight episode finishes.
+   *
+   * Cooperative: the current episode always completes first, so contained
+   * children terminate and cleanup runs. The terminal reason says cancelled,
+   * so a stopped run can never read as a completed measurement.
+   */
+  onCancel?: () => void;
+  /** Whether a run is in flight that can be cancelled. */
+  canCancel?: boolean;
+  /** Exports the finished experiment as `"json"` or `"csv"`. */
+  onExport?: (format: "json" | "csv") => void;
+  /** Whether a finished experiment is available to export. */
+  canExport?: boolean;
 }) {
   if (error) {
     return (
@@ -516,7 +582,12 @@ export function BrainPanel({
       <div className="brain-status-grid">
         <div className="brain-status-card">
           <span className="status-label">Phase</span>
-          <span className="status-value">{brainStateLabel(model.brainState)}</span>
+          {/*
+            `is-phase` marks this value as an identifier token rather than prose, so it is the one
+            status value that gets uppercased. The tile beside it holds the orchestrator's stated next
+            intent, which is a sentence -- uppercasing that turned it into four lines of shouting caps.
+          */}
+          <span className="status-value is-phase">{brainStateLabel(model.brainState)}</span>
         </div>
         <div className="brain-status-card">
           <span className="status-label">Next intent</span>
@@ -544,11 +615,11 @@ export function BrainPanel({
 
       <div className="brain-actions">
         {/*
-         * One control for the registry agent, and a second for a connected model, and they are the
-         * *same experiment* run against different subjects. There is deliberately still no stop button:
-         * the runner has no cancellation path, and a button that only changed local state would be
-         * worse than no button.
-         */}
+          One control for the registry agent, a second for a connected model, and a stop control
+          for the run in flight. The stop is cooperative — the in-flight episode finishes first so
+          cleanup runs — and the terminal reason records the cancellation, so a stopped run never
+          reads as completed.
+        */}
         <div className="brain-run-actions">
           <button
             type="button"
@@ -568,7 +639,37 @@ export function BrainPanel({
               RUN WITH CONNECTED MODEL
             </button>
           ) : null}
+          {onCancel ? (
+            <button
+              type="button"
+              className="brain-run-button brain-run-button--stop"
+              onClick={onCancel}
+              disabled={!canCancel || !running}
+            >
+              STOP
+            </button>
+          ) : null}
         </div>
+        {onExport && canExport && !idle ? (
+          <div className="brain-run-actions">
+            <button
+              type="button"
+              className="brain-export-button"
+              onClick={() => onExport("json")}
+              disabled={running}
+            >
+              EXPORT JSON
+            </button>
+            <button
+              type="button"
+              className="brain-export-button"
+              onClick={() => onExport("csv")}
+              disabled={running}
+            >
+              EXPORT CSV
+            </button>
+          </div>
+        ) : null}
         {!canRun ? (
           <p className="brain-action-note">Select a benchmark and an agent to enable this.</p>
         ) : canRunConnected === false && onRunConnected ? (

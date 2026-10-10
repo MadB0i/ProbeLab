@@ -27,12 +27,15 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { BrandLockup } from "./Brand";
+import { IconPanelLeft, ROUTE_ICONS } from "./Icons";
 
 /** One destination in the command center. */
 export type RouteId =
+  | "readiness"
   | "lab"
   | "agents"
   | "benchmarks"
+  | "tasks"
   | "comparison"
   | "settings"
   | "providers"
@@ -53,7 +56,38 @@ export type RouteDefinition = {
   content: ReactNode;
 };
 
+/**
+ * Rail groups.
+ *
+ * Eleven destinations in one undifferentiated column is a list, not a structure. A user cannot
+ * tell that `agents` and `benchmarks` are the same kind of thing, or that `comparison` and `replay`
+ * both read from stored runs rather than producing any. The groups state that relationship instead
+ * of leaving it to be inferred from the labels.
+ *
+ * `RAIL` is the flattened group order, and it is what the rail renders and what the arrow keys walk.
+ * `ROUTES` above stays the lookup table for a destination's title and purpose, so a route can be
+ * declared in either order without the keyboard order depending on where it happens to sit in the
+ * source. The reading order is: check what can run, run it, look at what exists, then look at what
+ * was measured. `settings` sits alone at the foot of the rail because it is the one destination a
+ * user visits deliberately rather than as part of a task.
+ */
+const GROUPS: { title: string; ids: RouteId[] }[] = [
+  { title: "Run", ids: ["readiness", "lab", "tasks"] },
+  { title: "Registry", ids: ["agents", "benchmarks", "providers"] },
+  { title: "Analysis", ids: ["comparison", "arena", "security", "replay"] },
+  { title: "System", ids: ["settings"] },
+];
+
+const RAIL: RouteId[] = GROUPS.flatMap((group) => group.ids);
+
 const ROUTES: { id: RouteId; label: string; title: string; purpose: string }[] = [
+  {
+    id: "readiness",
+    label: "READY",
+    title: "Readiness",
+    purpose:
+      "What this machine can actually run, verified just now. Offline runtimes, coding agents, guided packages, and optional remote providers — with the reason whenever something cannot run.",
+  },
   {
     id: "lab",
     label: "LAB",
@@ -74,6 +108,13 @@ const ROUTES: { id: RouteId; label: string; title: string; purpose: string }[] =
     title: "Benchmarks",
     purpose:
       "Every registered benchmark with its capability-execution mode stated in the row. A benchmark that authorizes a capability without executing it says so here rather than looking like a working feature.",
+  },
+  {
+    id: "tasks",
+    label: "TASKS",
+    title: "Task Benchmarks",
+    purpose:
+      "Coding repair and cue memory over seed pools: reference ceilings, installed-agent runs, and guided submissions — each with its provenance stated above its score.",
   },
   {
     id: "comparison",
@@ -140,7 +181,33 @@ export function hash_for(route: RouteId): string {
   return `#/${route}`;
 }
 
-export function AppShell({ routes }: { routes: Record<RouteId, ReactNode> }) {
+/**
+ * The two-digit position a destination occupies in the rail, shown in the rail and the strip.
+ *
+ * It is the rail position rather than a per-group counter so that a number spoken aloud -- "go to
+ * zero four" -- means the same thing on every page, and so the strip can name its own coordinates.
+ */
+function route_index(id: RouteId): string {
+  return (RAIL.indexOf(id) + 1).toString().padStart(2, "0");
+}
+
+export function AppShell({
+  routes,
+  systemStatus,
+  systemTone,
+}: {
+  routes: Record<RouteId, ReactNode>;
+  /**
+   * The orchestrator's own read, shown in the toolbar.
+   *
+   * It lives here rather than being fetched by the shell because the shell has no business making
+   * backend calls -- it is the frame. `App` already polls this, and passing it down keeps one owner
+   * for the value so the toolbar and the Lab's own status can never disagree.
+   */
+  systemStatus?: string;
+  /** A token name from the stylesheet, not a colour: the shell must not own the palette. */
+  systemTone?: string;
+}) {
   const [active, setActive] = useState<RouteId>(() =>
     route_from_hash(typeof window === "undefined" ? "" : window.location.hash),
   );
@@ -162,8 +229,12 @@ export function AppShell({ routes }: { routes: Record<RouteId, ReactNode> }) {
    * Roving arrow-key navigation.
    *
    * Not a focus trap: Tab still leaves the sidebar, which is what a keyboard user expects from a
-   * navigation region. Arrow keys move within it because a seven-item column is tedious to Tab
+   * navigation region. Arrow keys move within it because an eleven-item column is tedious to Tab
    * through and the convention is well established.
+   *
+   * The walk is over `RAIL`, not over `ROUTES`, so it follows the grouped order the rail actually
+   * renders. Walking the declaration order instead would jump across the screen while the focus ring
+   * visibly moved down one row -- the keyboard and the page would disagree about what "next" means.
    *
    * The index comes from the focused button, not from the active route. Those are usually the same
    * item, but a user can Tab onto a button without activating it -- clicking, after all, is not the
@@ -180,16 +251,16 @@ export function AppShell({ routes }: { routes: Record<RouteId, ReactNode> }) {
       const buttons = navRef.current?.querySelectorAll<HTMLButtonElement>(".nav-item");
       const focused = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>(".nav-item");
       const focusedIndex = focused ? Array.from(buttons ?? []).indexOf(focused) : -1;
-      const index = focusedIndex >= 0 ? focusedIndex : ROUTES.findIndex((route) => route.id === active);
+      const index = focusedIndex >= 0 ? focusedIndex : RAIL.indexOf(active);
       const next =
         event.key === "Home"
           ? 0
           : event.key === "End"
-            ? ROUTES.length - 1
+            ? RAIL.length - 1
             : event.key === "ArrowDown"
-              ? (index + 1) % ROUTES.length
-              : (index - 1 + ROUTES.length) % ROUTES.length;
-      go(ROUTES[next].id);
+              ? (index + 1) % RAIL.length
+              : (index - 1 + RAIL.length) % RAIL.length;
+      go(RAIL[next]);
       buttons?.[next]?.focus();
     },
     [active, go],
@@ -197,8 +268,21 @@ export function AppShell({ routes }: { routes: Record<RouteId, ReactNode> }) {
 
   const definition = ROUTES.find((route) => route.id === active) ?? ROUTES[0];
 
+  /*
+   * The rail's expanded state.
+   *
+   * Collapsed it is a 76px icon dock, which is the shape a desktop application actually has and which
+   * leaves the workspace the width a wide monitor was bought for. Expanded it becomes a labelled
+   * sidebar for anyone who does not want to hover eleven times to learn where things are.
+   *
+   * It is local component state rather than a route or a stored preference, because it is a view
+   * choice for this session, not a setting. `aria-expanded` on the toggle is what tells a screen
+   * reader that the labels are now visible.
+   */
+  const [railExpanded, setRailExpanded] = useState(false);
+
   return (
-    <div className="shell-frame">
+    <div className={`shell-frame${railExpanded ? " is-expanded" : ""}`}>
       {/*
         The skip link is the FIRST focusable node in the document, not a child of `<main>`.
 
@@ -214,50 +298,113 @@ export function AppShell({ routes }: { routes: Record<RouteId, ReactNode> }) {
         Skip to content
       </a>
 
-      <nav className="shell-nav" aria-label="Command center sections">
+      {/*
+        The rail is a wrapper, not the `<nav>`.
+
+        The expand toggle and the brand are frame chrome: they change how the rail is drawn and they
+        name the application. Neither is a destination, so both sit *outside* the navigation landmark.
+        Putting the toggle inside `<nav>` would make it announce as a fourth kind of thing to choose
+        between when it only resizes the thing it lives in -- and it would put a non-destination button
+        into the same list as the eleven real ones.
+      */}
+      <div className="shell-rail">
         <div className="nav-brand">
           <BrandLockup />
         </div>
-        {/*
-          No `role="list"`. The children are `<button>` elements, and ARIA requires a `list` to contain
-          `listitem`s -- so the role announced an empty list. These are navigation links, so the
-          container is a plain group of controls and the buttons carry their own semantics. `aria-current`
-          is what tells a screen reader which destination is active.
-        */}
-        <div className="nav-items" ref={navRef} onKeyDown={onKeyDown}>
-          {ROUTES.map((route) => (
-            <button
-              key={route.id}
-              type="button"
-              className={`nav-item${route.id === active ? " nav-item--active" : ""}`}
-              aria-current={route.id === active ? "page" : undefined}
-              onClick={() => go(route.id)}
-            >
-              <span className="nav-item-mark" aria-hidden="true" />
-              {route.label}
-            </button>
-          ))}
-        </div>
-        <p className="nav-note">
-          Every section opens real data. Unavailable areas are documented in the README and the feature
-          matrix rather than shown as empty pages.
-        </p>
-      </nav>
+        <button
+          type="button"
+          className="rail-toggle"
+          aria-expanded={railExpanded}
+          aria-label={railExpanded ? "Collapse navigation" : "Expand navigation"}
+          onClick={() => setRailExpanded((value) => !value)}
+        >
+          <IconPanelLeft size={18} />
+        </button>
+
+        <nav className="shell-nav" aria-label="Command center sections">
+          {/*
+            No `role="list"`. The children are `<button>` elements, and ARIA requires a `list` to contain
+            `listitem`s -- so the role announced an empty list. These are navigation links, so the
+            container is a plain group of controls and the buttons carry their own semantics. `aria-current`
+            is what tells a screen reader which destination is active.
+
+            The group titles are `<p>`, not headings: a heading inside a `nav` landmark is announced as
+            a section of the page, and these are grouping aids for the sighted reader scanning the rail,
+            not part of the navigation structure a screen reader needs to walk. They are hidden while the
+            rail is collapsed, where there is no room for them.
+          */}
+          <div className="nav-items" ref={navRef} onKeyDown={onKeyDown}>
+            {GROUPS.map((group) => (
+              <div className="nav-group" key={group.title}>
+                <p className="nav-group-title">{group.title}</p>
+                {group.ids.map((id) => {
+                  const Glyph = ROUTE_ICONS[id];
+                  const label = ROUTES.find((r) => r.id === id)?.label ?? id;
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      className={`nav-item${id === active ? " nav-item--active" : ""}`}
+                      aria-current={id === active ? "page" : undefined}
+                      onClick={() => go(id)}
+                    >
+                      {/*
+                        One text node, two jobs.
+
+                        Collapsed, the rail is icons only and this label becomes the hover tooltip.
+                        Expanded, it is the sidebar text. It was previously written twice -- once as
+                        the label and once inside a separate tooltip span -- which put the
+                        destination name into the DOM twice and left the tooltip free to drift out of
+                        sync with the real label. One span, repositioned by CSS, cannot disagree with
+                        itself, and it keeps the accessible name correct in both states because the
+                        text is never removed.
+                      */}
+                      <span className="nav-item-icon" aria-hidden="true">
+                        <Glyph size={20} />
+                      </span>
+                      <span className="nav-item-label">{label}</span>
+                      <span className="nav-item-index" aria-hidden="true">
+                        {route_index(id)}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+          <p className="nav-note">
+            Every section opens real data. Unavailable areas are documented in the README and the feature
+            matrix rather than shown as empty pages.
+          </p>
+        </nav>
+      </div>
 
       <main className="shell-main" id="main-content">
-        <header className="shell-header">
-          {/*
-            `aria-live` on the title, so a route change is announced.
+        {/*
+          The toolbar.
 
-            The whole panel swaps silently on navigation, which meant a screen-reader user pressing a nav
-            button got no confirmation of where they went. The title is the one element that changes on
-            every route, so it is the right place for it -- and `aria-live="polite"` rather than
-            `assertive` because a navigation is not an error and should not interrupt.
-          */}
-          <h1 className="shell-title" aria-live="polite">
-            {definition.title}
-          </h1>
-          <p className="shell-purpose">{definition.purpose}</p>
+          On a desktop application the page title lives in a toolbar with the window's global state and
+          actions beside it -- not floating at the top of a scrolling document. That single move is
+          most of the difference between an application and a web page, so the title, the live system
+          read, and the global actions share one fixed band.
+
+          `aria-live` stays on the title, because it is the one element that changes on every route and
+          a route change must still be announced. `polite` rather than `assertive`: navigating is not an
+          error and should not interrupt.
+        */}
+        <header className="topbar">
+          <div className="shell-header">
+            <h1 className="shell-title" aria-live="polite">
+              {definition.title}
+            </h1>
+            <p className="shell-purpose">{definition.purpose}</p>
+          </div>
+          <div className="system-status" aria-live="polite">
+            <span className={`status-light ${systemTone ?? ""}`} aria-hidden="true" />
+            <span>SYSTEM {systemStatus ?? "—"}</span>
+            <span className="status-divider" aria-hidden="true" />
+            <span className="muted">LOCAL RUNTIME</span>
+          </div>
         </header>
         <div className="shell-content">{routes[definition.id]}</div>
       </main>

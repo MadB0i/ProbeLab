@@ -257,20 +257,25 @@ export function SettingsPanel() {
         )}
 
         <div className="settings-actions">
+          {/*
+            The actions sit in a right-aligned bar, not at full width.
+
+            Full-width SAVE and RESTORE buttons read as banners, not as controls -- the one on the page
+            was the loudest thing in an entire preferences screen, which is backwards for an action that
+            is disabled more often than it is available. `btn` keeps them at their natural size and the
+            state note sits beside them, so the bar reads as "the thing that changed, and what to do".
+          */}
           <button
             type="button"
-            className="run-button"
+            className="btn btn-primary"
             onClick={save}
             disabled={!dirty || saving}
           >
             <span>{saving ? "SAVING" : "SAVE CHANGES"}</span>
-            <span className="button-arrow" aria-hidden="true">
-              →
-            </span>
           </button>
           <button
             type="button"
-            className="run-button run-button-secondary"
+            className="btn btn-secondary"
             onClick={reset}
             disabled={resetting || (stored.isDefault && !dirty)}
           >

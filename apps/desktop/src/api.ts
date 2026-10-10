@@ -770,3 +770,180 @@ export type Replay = {
 export async function replayArenaMatch(matchId: string): Promise<Replay> {
   return invoke<Replay>("replay_arena_match", { match_id: matchId });
 }
+
+/**
+ * Universal execution modes.
+ *
+ * Discovery verifies rather than assumes: a binary must be on `PATH`, a
+ * socket must answer, a model file must exist. Anything else is reported as
+ * unavailable with its reason — never as available on documentation alone.
+ * Nothing here ever holds a credential; the backend sends variable names.
+ */
+
+export type ExecutionMode = "offline_local" | "coding_agent" | "guided_external" | "remote_provider";
+
+export type ExecutorAvailability =
+  | { state: "available"; evidence: string }
+  | { state: "unavailable"; reason: string; remedy: string | null };
+
+export type ExecutorDescriptor = {
+  id: string;
+  label: string;
+  mode: ExecutionMode;
+  availability: ExecutorAvailability;
+  capabilities: string[];
+  detail: string;
+};
+
+export type PreflightCheck = {
+  name: string;
+  passed: boolean;
+  detail: string;
+};
+
+export type PreflightReport = {
+  id: string;
+  passed: boolean;
+  checks: PreflightCheck[];
+};
+
+export async function listExecutors(): Promise<ExecutorDescriptor[]> {
+  return invoke<ExecutorDescriptor[]>("list_executors");
+}
+
+export async function preflightExecutor(id: string): Promise<PreflightReport> {
+  return invoke<PreflightReport>("preflight_executor", { id });
+}
+
+/**
+ * Model identifiers a local executor currently serves.
+ *
+ * Read-only `GET /v1/models` against loopback. Empty means nothing to
+ * select; whether no server answers or the server lists no models is the
+ * discovery availability's job to say.
+ */
+export async function listLocalModels(executorId: string): Promise<string[]> {
+  return invoke<string[]>("list_local_models", { executor_id: executorId });
+}
+
+/**
+ * Disposable guest-execution support, inspected read-only.
+ *
+ * The verdict is always guided-only: presence of a sandbox feature is not a
+ * tested boundary. Nothing here changes the host.
+ */
+export type GuestIsolation = {
+  os: string;
+  hypervisorPresent: boolean | null;
+  sandboxBinaryPresent: boolean;
+  sandboxFeature: "enabled" | "disabled" | "unknown";
+  hypervFeature: "enabled" | "disabled" | "unknown";
+  verdict: "guided_only";
+  detail: string;
+};
+
+export async function inspectGuestIsolation(): Promise<GuestIsolation> {
+  return invoke<GuestIsolation>("inspect_guest_isolation");
+}
+
+export async function cancelExperiment(experimentId: string): Promise<boolean> {
+  return invoke<boolean>("cancel_experiment", { experiment_id: experimentId });
+}
+
+export type ExperimentExport = {
+  filename: string;
+  contents: string;
+  format: string;
+};
+
+export async function exportExperiment(
+  experimentId: string,
+  format: "json" | "csv",
+): Promise<ExperimentExport> {
+  return invoke<ExperimentExport>("export_experiment", { experiment_id: experimentId, format });
+}
+
+/**
+ * Task benchmarks: coding repair and cue memory.
+ *
+ * These measure tasks, not grid episodes. The evidence is the artifact a
+ * policy left behind, scored by hidden checks, with a Wilson interval — and
+ * every report carries its provenance, so an observed run and a manual
+ * submission never look alike.
+ */
+
+export type TaskBenchmarkSummary = {
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  definitionDigest: string;
+  limits: string[];
+  devSeeds: number;
+  evalSeeds: number;
+};
+
+export type TaskReport = {
+  benchmark: "coding_repair" | "memory_latch";
+  definitionVersion: string;
+  definitionDigest: string;
+  policy: string;
+  /** `observed_run` or `manual_submission`. Never omitted. */
+  provenance: "observed_run" | "manual_submission";
+  successes: number;
+  trials: number;
+  /** Null when nothing completed. Not zero. */
+  successRate: number | null;
+  intervalLower: number;
+  intervalUpper: number;
+  meanPartialCredit: number;
+  seeds: number[];
+  taskSuccess: boolean[];
+  executionNotes: string[];
+};
+
+export async function listTaskBenchmarks(): Promise<TaskBenchmarkSummary[]> {
+  return invoke<TaskBenchmarkSummary[]>("list_task_benchmarks");
+}
+
+export async function runTaskEval(request: {
+  benchmarkId: string;
+  /**
+   * `reference-optimal` or `reference-baseline`. `cli:<agent-id>` shapes
+   * parse but are refused by the backend: automatic agent execution cannot be
+   * isolated on this host, so installed agents are measured via guided
+   * packages instead.
+   */
+  policy: string;
+  /** Empty means the benchmark's evaluation pool. */
+  seeds: number[];
+  timeoutSeconds: number;
+}): Promise<TaskReport> {
+  return invoke<TaskReport>("run_task_eval", { request });
+}
+
+export type GuidedPackageView = {
+  formatVersion: number;
+  benchmarkId: string;
+  benchmarkVersion: string;
+  seed: number;
+  instructions: string;
+  files: Record<string, string>;
+  submissionRequirements: string[];
+};
+
+export async function guidedTaskPackage(
+  benchmarkId: string,
+  seed: number,
+): Promise<GuidedPackageView> {
+  return invoke<GuidedPackageView>("guided_task_package", { benchmark_id: benchmarkId, seed });
+}
+
+export async function scoreGuidedSubmission(submission: {
+  benchmarkId: string;
+  seed: number;
+  artifacts: Record<string, string>;
+  log: string;
+}): Promise<TaskReport> {
+  return invoke<TaskReport>("score_guided_submission", { submission });
+}

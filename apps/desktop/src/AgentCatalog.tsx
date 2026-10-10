@@ -10,7 +10,10 @@
  * actually build.
  */
 
+import { useMemo, useState } from "react";
+
 import type { AgentSummary } from "./api";
+import { IconSearch } from "./Icons";
 
 /**
  * The colour for a category, chosen to encode what the number *means* rather than to look tidy.
@@ -100,6 +103,29 @@ function AgentRow({ agent }: { agent: AgentSummary }) {
 }
 
 export function AgentCatalog({ agents }: { agents: AgentSummary[] }) {
+  /*
+   * Library search.
+   *
+   * A registry with more than a handful of entries is not searchable by eye, and this one grows with
+   * every runtime someone installs. The filter matches name, id, category and what the entry reports,
+   * because "find the thing that measures planning" and "find the ollama entry" are both real
+   * questions and they are answered by different fields.
+   */
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const visible = useMemo(
+    () =>
+      needle.length === 0
+        ? agents
+        : agents.filter((agent) =>
+            [agent.name, agent.id, agent.categoryLabel, measurementLabel(agent)]
+              .join(" ")
+              .toLowerCase()
+              .includes(needle),
+          ),
+    [agents, needle],
+  );
+
   if (agents.length === 0) {
     return (
       <p className="empty">
@@ -110,7 +136,7 @@ export function AgentCatalog({ agents }: { agents: AgentSummary[] }) {
   }
 
   const groups = new Map<string, AgentSummary[]>();
-  for (const agent of agents) {
+  for (const agent of visible) {
     const key = groupKey(agent);
     const existing = groups.get(key);
     if (existing) {
@@ -129,16 +155,48 @@ export function AgentCatalog({ agents }: { agents: AgentSummary[] }) {
           : `${agents.filter((a) => a.measuresAModel).length} target model(s) connected. The rest are ` +
             "infrastructure and their numbers measure the lab, not a model."}
       </p>
-      {[...groups.entries()].map(([key, members]) => (
-        <section key={key} className="agent-group">
-          <h3 className="agent-group-title">{GROUP_TITLES[key] ?? key}</h3>
-          <ul className="agent-list">
-            {members.map((agent) => (
-              <AgentRow key={agent.id} agent={agent} />
-            ))}
-          </ul>
-        </section>
-      ))}
+      <div className="catalog-search">
+        <span className="catalog-search-icon" aria-hidden="true">
+          <IconSearch size={16} />
+        </span>
+        <input
+          type="search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Filter by name, runtime, or what it measures…"
+          aria-label="Filter the agent library"
+        />
+        {needle.length > 0 ? (
+          <span className="catalog-search-count" role="status">
+            {visible.length} of {agents.length}
+          </span>
+        ) : null}
+      </div>
+      {visible.length === 0 ? (
+        <p className="empty">
+          No entry matches “{query.trim()}”. The library answers by name, by runtime, and by what the
+          entry measures — try fewer words.
+        </p>
+      ) : (
+        [...groups.entries()].map(([key, members]) => (
+          <section key={key} className="agent-group">
+            {/*
+              The count sits on the group heading because it is the question the reader arrived with:
+              "is anything here a real model, or is it all scaffolding?" Answering it in the heading
+              saves counting rows.
+            */}
+            <h3 className="agent-group-title">
+              {GROUP_TITLES[key] ?? key}
+              <span className="agent-group-count">{members.length}</span>
+            </h3>
+            <ul className="agent-list">
+              {members.map((agent) => (
+                <AgentRow key={agent.id} agent={agent} />
+              ))}
+            </ul>
+          </section>
+        ))
+      )}
     </div>
   );
 }

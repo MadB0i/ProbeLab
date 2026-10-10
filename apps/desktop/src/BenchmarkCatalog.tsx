@@ -37,7 +37,7 @@ function BenchmarkRow({ benchmark }: { benchmark: BenchmarkDetail }) {
     note: "",
   };
   return (
-    <li className="benchmark-row">
+    <div className="benchmark-row">
       <div className="benchmark-row-head">
         <span className="benchmark-name">{benchmark.name}</span>
         <span className={`badge ${execution.tone}`}>{execution.text}</span>
@@ -86,7 +86,7 @@ function BenchmarkRow({ benchmark }: { benchmark: BenchmarkDetail }) {
           ))}
         </ul>
       ) : null}
-    </li>
+    </div>
   );
 }
 
@@ -120,7 +120,16 @@ export function BenchmarkCatalog({
       {benchmarks.map((benchmark) => {
         const isSelected = benchmark.id === selectedId;
         return (
-          <div
+          /*
+           * The `<li>` is the entry itself.
+           *
+           * It used to be a `<div class="benchmark-item">` wrapping a `<li class="benchmark-row">`,
+           * which put a non-list element directly inside a `<ul>`. The browser's parser is
+           * entitled to close the list when it sees a `<div>`, so the list semantics a screen reader
+           * relies on were not reliably present -- and nothing about the entry needed a wrapper the
+           * `<li>` could not be.
+           */
+          <li
             key={benchmark.id}
             className={isSelected ? "benchmark-item benchmark-item-active" : "benchmark-item"}
           >
@@ -145,7 +154,7 @@ export function BenchmarkCatalog({
               </button>
             ) : null}
             <BenchmarkRow benchmark={benchmark} />
-          </div>
+          </li>
         );
       })}
     </ul>

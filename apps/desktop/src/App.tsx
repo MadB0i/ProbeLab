@@ -24,7 +24,18 @@ import { BrainPanel } from "./BrainPanel";
 import { ArenaPanel } from "./ArenaPanel";
 import { SecurityPanel } from "./SecurityPanel";
 import { ReplayPanel } from "./ReplayPanel";
+import { ReadinessPanel } from "./ReadinessPanel";
+import { TasksPanel } from "./TasksPanel";
 import { readSettings, replayArenaMatch, type Replay } from "./api";
+import {
+  cancelExperiment,
+  exportExperiment,
+  getExperiment,
+  listExecutors,
+  listExperiments,
+  listLocalModels,
+  type ExecutorDescriptor,
+} from "./api";
 import {
   latestSecurityReport,
   listSecurityProbes,
@@ -604,6 +615,22 @@ const App = () => {
   const [brain, setBrain] = useState<BrainReadModel | null>(null);
   const [brainError, setBrainError] = useState<string | null>(null);
   const [brainRunning, setBrainRunning] = useState(false);
+  const [executors, setExecutors] = useState<ExecutorDescriptor[]>([]);
+  const [executorsError, setExecutorsError] = useState<string | null>(null);
+  const [executorsLoading, setExecutorsLoading] = useState(false);
+  const [historyIds, setHistoryIds] = useState<string[]>([]);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  /**
+   * Model identifiers served by local executors, keyed by executor id.
+   *
+   * Read-only `GET /v1/models` against loopback. An entry that is missing was
+   * never loaded; an entry that is present but empty means the server lists
+   * no models — both render, because "nothing to select" and "not checked"
+   * are different facts.
+   */
+  const [localModels, setLocalModels] = useState<Record<string, string[]>>({});
+  const [localModelsError, setLocalModelsError] = useState<string | null>(null);
+  const localModelsLoadingRef = useRef<Set<string>>(new Set());
   // The arena. `null` until the backend answers, and the panel renders that as its own state rather
   // than as an empty board.
   const [arenaGames, setArenaGames] = useState<ArenaGameSummary[]>([]);
@@ -973,6 +1000,8 @@ const App = () => {
           ...(model ? { modelConfig: model } : {}),
         });
         setBrain(result);
+        // A finished run joins the history, so the history a reload shows includes this session.
+        void refreshHistory();
       } catch (error) {
         setBrainRunning(false);
         setBrainError(`The experiment could not start: ${formatError(error)}`);
@@ -980,6 +1009,133 @@ const App = () => {
     },
     [benchmark, selectedStrategy, defaultEpisodes],
   );
+
+  /**
+   * Asks the runner to stop after the in-flight episode finishes.
+   *
+   * Cooperative by design: the current episode completes first so cleanup
+   * runs, and the terminal reason records the cancellation.
+   */
+  const cancelRun = useCallback(async () => {
+    const experimentId = brain?.experiment?.experimentId;
+    if (!experimentId) {
+      return;
+    }
+    try {
+      await cancelExperiment(experimentId);
+    } catch (error) {
+      setBrainError(`The experiment could not be stopped: ${formatError(error)}`);
+    }
+  }, [brain]);
+
+  /**
+   * Exports the finished experiment and downloads it.
+   *
+   * The file is the backend's own projection — the same model the panel
+   * renders — serialized as JSON or as a per-episode CSV, never recomputed
+   * locally.
+   */
+  const exportRun = useCallback(
+    async (format: "json" | "csv") => {
+      const experimentId = brain?.experiment?.experimentId;
+      if (!experimentId) {
+        return;
+      }
+      try {
+        const blob = await exportExperiment(experimentId, format);
+        const url = URL.createObjectURL(
+          new Blob([blob.contents], { type: format === "json" ? "application/json" : "text/csv" }),
+        );
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = blob.filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        setBrainError(`The experiment could not be exported: ${formatError(error)}`);
+      }
+    },
+    [brain],
+  );
+
+  /**
+   * Discovers what this machine can run, verified just now.
+   *
+   * Runs on mount and on demand from the readiness route. A binary must be
+   * on `PATH` and a socket must answer; anything else renders with its reason.
+   */
+  const refreshExecutors = useCallback(async () => {
+    setExecutorsLoading(true);
+    try {
+      setExecutors(await listExecutors());
+      setExecutorsError(null);
+    } catch (error) {
+      setExecutorsError(`Discovery did not complete: ${formatError(error)}`);
+    } finally {
+      setExecutorsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshExecutors();
+  }, [refreshExecutors]);
+
+  /**
+   * Loads the served model list for one local executor.
+   *
+   * Guarded per executor so a re-render cannot refetch in a loop. A failure
+   * leaves any previous list in place and records the error beside the
+   * executor rather than clearing the whole section: one unreachable server
+   * is not evidence about the others.
+   */
+  const loadLocalModels = useCallback(async (executorId: string) => {
+    if (localModelsLoadingRef.current.has(executorId)) {
+      return;
+    }
+    localModelsLoadingRef.current.add(executorId);
+    try {
+      const ids = await listLocalModels(executorId);
+      setLocalModels((previous) => ({ ...previous, [executorId]: ids }));
+      setLocalModelsError(null);
+    } catch (error) {
+      setLocalModelsError(`Local models for ${executorId} are unavailable: ${formatError(error)}`);
+    } finally {
+      localModelsLoadingRef.current.delete(executorId);
+    }
+  }, []);
+
+  const localModelBaseUrl = (executorId: string): string =>
+    executorId === "llamacpp-local"
+      ? "http://127.0.0.1:8080/v1"
+      : "http://127.0.0.1:11434/v1";
+
+  /**
+   * Stored experiment history: identifiers from the durable store, loaded on
+   * demand through the same read model the live panel renders.
+   */
+  const refreshHistory = useCallback(async () => {
+    try {
+      setHistoryIds(await listExperiments());
+      setHistoryError(null);
+    } catch (error) {
+      setHistoryError(`History is unavailable: ${formatError(error)}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshHistory();
+  }, [refreshHistory]);
+
+  const loadHistory = useCallback(async (experimentId: string) => {
+    try {
+      setBrain(await getExperiment(experimentId));
+      setBrainError(null);
+    } catch (error) {
+      setBrainError(`That experiment could not be loaded: ${formatError(error)}`);
+    }
+  }, []);
   /**
    * Loads a deterministic replay of the current arena match.
    *
@@ -1324,13 +1480,12 @@ const App = () => {
         : "stable";
 
 
+  /*
+   * The Brain panel heads the monitoring column because it is the layer deciding what runs and
+   * monitoring what happened. Everything in the controls column is something the user drives;
+   * everything in this panel is state the orchestrator reports.
+   */
   const viewbrainPanel = (
-    <>
-        {/*
-         * The Brain panel sits above the run controls because it is the layer deciding what runs and
-         * monitoring what happened. Everything below it is a control the user drives; everything in it
-         * is state the orchestrator reports.
-         */}
         <BrainPanel
           model={brain}
           error={brainError}
@@ -1347,8 +1502,48 @@ const App = () => {
             isConnected ? () => void startExperiment(connectedModelConfig) : undefined
           }
           canRunConnected={isConnected}
+          onCancel={() => void cancelRun()}
+          canCancel={brainRunning && brain?.experiment?.experimentId !== undefined}
+          onExport={(format) => void exportRun(format)}
+canExport={brain?.experiment !== null && brain?.experiment !== undefined}
         />
-    </>
+  );
+
+  /*
+   * History is its own panel, not a section inside the Brain's.
+   *
+   * It used to be appended below the Brain inside a capped single column, so on a wide monitor the
+   * run record and the list of runs that could be loaded sat at different widths and read as one
+   * undifferentiated block. On a command center it belongs with the controls -- it is the only way to
+   * bring an earlier run back into the reporting panels to the right.
+   */
+  const viewhistoryPanel = (
+    <section className="panel history-panel" aria-label="Experiment history">
+      <div className="panel-heading">
+        <h3>Stored runs</h3>
+        <span className="catalog-count">{historyIds.length.toString().padStart(2, "0")}</span>
+      </div>
+      {historyError ? (
+        <p className="panel-note">{historyError}</p>
+      ) : historyIds.length === 0 ? (
+        <p className="panel-note">No stored experiments yet. Finished runs appear here.</p>
+      ) : (
+        <ul className="history-list">
+          {historyIds.map((id) => (
+            <li key={id}>
+              <button
+                type="button"
+                className="history-load"
+                onClick={() => void loadHistory(id)}
+                disabled={brainRunning}
+              >
+                <span className="mono">{id}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
   const viewreplayPanel = (
         <ReplayPanel
@@ -1414,21 +1609,73 @@ const App = () => {
         />
     </>
   );
+  /*
+   * The control deck.
+   *
+   * This panel used to carry a 58px marketing headline and a readout whose value was the literal
+   * string `GRID-WORLD PLANNING`. That value was the worst kind of wrong in this product: the
+   * benchmark is selectable from the catalog, so selecting any other benchmark left the deck still
+   * naming grid-world. Everything the product says about being explicit about what a number measures
+   * is contradicted by a heading that cannot be wrong because it is not reading anything.
+   *
+   * It is now a run-context band, and every field is read from the selected benchmark. When no
+   * benchmark is selected it says so rather than falling back to a name, because "no benchmark
+   * selected" is the true state and a plausible-looking name is not.
+   */
   const viewheroPanel = (
-        <section className="hero-panel panel">
-          <div className="hero-copy">
-            <p className="eyebrow">VERTICAL SLICE / CONTROL DECK</p>
-            <h1>Measure what the model<br /><span>actually sees.</span></h1>
+        <section className="panel deck-panel" aria-label="Run context">
+          {/*
+            A panel heading, not an `<h1>`.
+
+            The page's `<h1>` is the destination title in the instrument strip, and this panel was
+            carrying a second one -- two `<h1>`s on one page, so a screen-reader user navigating by
+            heading level could not tell which one named the page. It also put 24px type on a
+            supporting band, competing with the page title for the eye.
+          */}
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Control deck</p>
+              <h2>Run context</h2>
+            </div>
+          </div>
+          <div className="deck-copy">
             <p className="hero-description">
-              Run a deterministic or connected agent through a capability-restricted evaluation suite.
-              Mock observations stay local; connected runs send only the model request to the configured provider.
+              Every run below is executed against the benchmark named here. Connected runs send only
+              the model request to the configured provider; observations, telemetry and scoring stay
+              in this process.
             </p>
           </div>
-          <div className="hero-readout">
-            <div className="readout-label">ACTIVE OBJECTIVE</div>
-            <div className="readout-value">GRID-WORLD PLANNING</div>
-            <div className="readout-detail">TRUSTED SANDBOX / LOCAL TELEMETRY</div>
-          </div>
+          <dl className="deck-readout">
+            <div>
+              <dt className="readout-label">Active objective</dt>
+              {/*
+                An absent benchmark is not a measurement, so it is not painted in the signal colour.
+                In signal cyan it read as a resolved value -- the one field on the band that looked
+                confidently filled in while in fact nothing had been selected.
+              */}
+              <dd className={`readout-value${benchmark ? "" : " is-absent"}`}>
+                {benchmark?.title ?? "NO BENCHMARK SELECTED"}
+              </dd>
+            </div>
+            <div>
+              <dt className="readout-label">Capability dimension</dt>
+              <dd className="readout-detail">
+                {benchmark?.capability_dimension ?? "—"}
+              </dd>
+            </div>
+            <div>
+              <dt className="readout-label">Parameters</dt>
+              <dd className="readout-detail mono">
+                {benchmark
+                  ? `v${benchmark.benchmark_version} · SEED ${benchmark.seed} · ${benchmark.max_turns} TURNS`
+                  : "—"}
+              </dd>
+            </div>
+            <div>
+              <dt className="readout-label">Execution boundary</dt>
+              <dd className="readout-detail">Trusted sandbox / local telemetry</dd>
+            </div>
+          </dl>
         </section>
   );
   const viewsuiteCard = (
@@ -1463,8 +1710,8 @@ const App = () => {
                       key={entry.benchmark_id}
                       className={
                         isSelected
-                          ? "benchmark-row benchmark-row-active"
-                          : "benchmark-row"
+                          ? "benchmark-choice benchmark-choice-active"
+                          : "benchmark-choice"
                       }
                       aria-current={isSelected ? "true" : undefined}
                     >
@@ -1585,6 +1832,82 @@ const App = () => {
               The key is read from the environment by the backend. ProbeLab never accepts,
               stores, or displays a key value.
             </p>
+            {/*
+              Local models served by executors the readiness page verified.
+
+              The identifiers come from each server's own `/v1/models` listing, read by the
+              backend over loopback — never typed from memory, so a name that is not served
+              cannot be selected. Choosing one fills the base URL and model name above, which
+              is what the connected run measures. An executor with no models lists that fact
+              rather than an empty picker.
+            */}
+            <div className="local-models-block">
+              <h3>Local models</h3>
+              {executors.filter((executor) => executor.mode === "offline_local").length === 0 ? (
+                <p className="field-description">
+                  No local runtime was discovered. See the readiness page for what is missing.
+                </p>
+              ) : (
+                executors
+                  .filter((executor) => executor.mode === "offline_local")
+                  .map((executor) => {
+                    const available = executor.availability.state === "available";
+                    const ids = localModels[executor.id];
+                    return (
+                      <div key={executor.id} className="local-model-executor">
+                        <span className="executor-label">{executor.label}</span>{" "}
+                        <span className={available ? "tone-ok" : "tone-neutral"}>
+                          {available ? "READY" : "NOT AVAILABLE"}
+                        </span>
+                        {!available && executor.availability.state === "unavailable" ? (
+                          <p className="field-description">{executor.availability.reason}</p>
+                        ) : null}
+                        {available ? (
+                          ids === undefined ? (
+                            <button
+                              type="button"
+                              className="button-quiet"
+                              onClick={() => void loadLocalModels(executor.id)}
+                              disabled={isRunning}
+                            >
+                              LIST MODELS
+                            </button>
+                          ) : ids.length === 0 ? (
+                            <p className="field-description">
+                              The server answers but lists no models. Pull one with the
+                              runtime&apos;s own tooling — ProbeLab never downloads models.
+                            </p>
+                          ) : (
+                            <ul className="local-model-list">
+                              {ids.map((id) => (
+                                <li key={id}>
+                                  <span className="mono">{id}</span>{" "}
+                                  <button
+                                    type="button"
+                                    className="button-quiet"
+                                    onClick={() => {
+                                      setBaseUrl(localModelBaseUrl(executor.id));
+                                      setConnectedModel(id);
+                                    }}
+                                    disabled={isRunning}
+                                  >
+                                    USE
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          )
+                        ) : null}
+                      </div>
+                    );
+                  })
+              )}
+              {localModelsError ? (
+                <p className="brain-error" role="alert">
+                  {localModelsError}
+                </p>
+              ) : null}
+            </div>
             <div className="field-group">
               <label htmlFor="strategy">MOCK STRATEGY SELECTOR</label>
               <select
@@ -1629,15 +1952,20 @@ const App = () => {
           <div className="panel action-card">
             <div className="panel-heading">
               <div>
-                <p className="eyebrow">EXECUTION</p>
+                <p className="eyebrow">Execution</p>
                 <h2>Launch probe</h2>
               </div>
               <span className={`run-state ${runState}`}>{formatStatus(runState)}</span>
             </div>
-            <div className="action-copy">
-              <span className="action-index">01</span>
-              <p>Execute the selected model against the real embedded catalog definition.</p>
-            </div>
+            {/*
+              The hardcoded "01" ordinal is removed. There is one action here and it is not the first
+              of a numbered series, so the index asserted a sequence that does not exist -- and it
+              forced the paragraph below it into a two-column layout with a large empty gap beside a
+              two-character number.
+            */}
+            <p className="action-copy">
+              Execute the selected model against the real embedded catalog definition.
+            </p>
             <button
               className="run-button"
               type="button"
@@ -1668,6 +1996,105 @@ const App = () => {
             </div>
           </div>
   );
+
+  /*
+   * The inspector: what is true right now.
+   *
+   * Every field is read from state that already exists, and each one degrades to an explicit
+   * "not reported" rather than a zero or a blank. That matters more here than anywhere else on the
+   * Lab: this is the panel a user glances at to decide whether to trust what is coming, and a `0`
+   * rendered where the backend reported nothing is indistinguishable from a run that scored nothing.
+   */
+  const viewprogressReadout = (
+    <section className="panel inspector-card" aria-label="Run inspector">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Inspector</p>
+          <h2>Run state</h2>
+        </div>
+        <span className={`run-state ${runState}`}>{formatStatus(runState)}</span>
+      </div>
+
+      <div className="inspector-body">
+        <dl className="brain-facts">
+          <div>
+            <dt>Turn</dt>
+            <dd>
+              {latestEvent ? `${latestEvent.turn} / ${maxTurns ?? "—"}` : "no observation yet"}
+            </dd>
+          </div>
+          <div>
+            <dt>Events</dt>
+            <dd>{telemetry.length}</dd>
+          </div>
+          <div>
+            <dt>Episodes</dt>
+            <dd>
+              {brain?.experiment
+                ? `${brain.experiment.episodesCompleted} / ${brain.experiment.episodesRequested}`
+                : "not started"}
+            </dd>
+          </div>
+          <div>
+            <dt>Score</dt>
+            <dd>
+              {brain?.experiment?.meanSuccessFraction === null ||
+              brain?.experiment?.meanSuccessFraction === undefined
+                ? "nothing completed"
+                : `${(brain.experiment.meanSuccessFraction * 100).toFixed(1)}%`}
+            </dd>
+          </div>
+        </dl>
+
+        <div className="inspector-meter">
+          <div className="inspector-meter-head">
+            <span>Turn budget</span>
+            <span className="mono">
+              {progressIsTurnFraction ? `${progress}%` : "no budget reported"}
+            </span>
+          </div>
+          <div
+            className="progress-track"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={progress}
+            aria-label="Turn progress within the benchmark's turn budget"
+            aria-valuetext={
+              progressIsTurnFraction
+                ? `Turn ${latestEvent?.turn} of ${maxTurns}`
+                : "No turn budget reported yet"
+            }
+          >
+            <div className="progress-fill" style={{ width: `${progress}%` }} />
+          </div>
+        </div>
+
+        <dl className="brain-facts">
+          <div>
+            <dt>Integrity violations</dt>
+            <dd>{brain?.security.integrityViolations ?? "—"}</dd>
+          </div>
+          <div>
+            <dt>Broker refusals</dt>
+            <dd>{brain?.security.brokerRefusals ?? "—"}</dd>
+          </div>
+        </dl>
+
+        {/*
+          Refusals are counted separately from violations and must never be summed with them: the sum
+          rises when the sandbox is working correctly, which is the opposite of what a security total
+          is supposed to mean.
+        */}
+        <p className="inspector-note">
+          {brain?.security.integrityViolations
+            ? "The run recorded an integrity violation. The evidence is in the record below."
+            : "No integrity violation recorded. Broker refusals are the boundary working."}
+        </p>
+      </div>
+    </section>
+  );
+
   const viewworkspaceGrid = (
         <section className="workspace-grid">
             {/*
@@ -1676,7 +2103,11 @@ const App = () => {
               sitting at zero between runs.
             */}
             <div
-              className={isRunning ? "panel progress-card is-running" : "panel progress-card"}
+              className={
+                isRunning
+                  ? "panel canvas-dark progress-card is-running"
+                  : "panel canvas-dark progress-card"
+              }
             >
             <div className="panel-heading">
               <div>
@@ -1728,7 +2159,15 @@ const App = () => {
             </div>
             </div>
 
-          <div className="panel visualization-card">
+          {/*
+            The execution canvas is the one deliberately dark surface in the product.
+
+            It holds the world grid and the progress bar -- the two things that are only meaningful
+            while a run is live. Making them dark, and only them, is what makes "running" legible from
+            across a desk: on a light workspace a navy panel is unmistakable, and if every panel were
+            navy that signal would carry nothing.
+          */}
+          <div className="panel canvas-dark visualization-card">
             <div className="panel-heading">
               <div>
                 <p className="eyebrow">LOCAL PERCEPTION</p>
@@ -1962,41 +2401,79 @@ const App = () => {
         </section>
   );
 
-  return (
+return (
     <div className="app-shell">
-      <header className="topbar">
-        <BrandLockup compact />
-        <div className="system-status" aria-live="polite">
-          <span className={`status-light ${systemTone}`} aria-hidden="true" />
-          <span>SYSTEM {systemStatus}</span>
-          <span className="status-divider" aria-hidden="true" />
-          <span className="muted">LOCAL RUNTIME</span>
-        </div>
-      </header>
-
       {/*
-       * Every panel below is a destination, not another section of one long page.
-       *
-       * Splitting them is not a layout preference. Stacked, the run controls sat above the
-       * registries and the security probes, so the two questions a user actually arrives with --
-       * "what does this number measure?" and "what can I run?" -- required scrolling past four
-       * unrelated panels to answer. Each page now answers one question, and the sidebar states
-       * which one.
-       *
-       * The panels are the same components, fed by the same state, as before. Routing changed
-       * where they appear and nothing about what they compute.
-       */}
+          Every panel below is a destination, not another section of one long page.
+
+          Splitting them is not a layout preference. Stacked, the run controls sat above the
+          registries and the security probes, so the two questions a user actually arrives with --
+          "what does this number measure?" and "what can I run?" -- required scrolling past four
+          unrelated panels to answer. Each page now answers one question, and the sidebar states
+          which one.
+
+          The command center is additionally split into two zones: the left column holds what you
+          set up (run context, launch controls, stored runs) and the right holds what the run reports.
+          Everything used to stack full-width in one reading order, which meant scrolling past four
+          panels to reach the live state mid-run and pushed the launch controls out of reach as the
+          telemetry stream grew. The controls column is sticky so reaching the run button never costs
+          a scroll.
+
+          The panels are the same components, fed by the same state, as before. Routing changed
+          where they appear and nothing about what they compute.
+        */}
+      {/*
+        The toolbar is owned by the shell now.
+
+        It used to live here, above the routed content, which meant the page title and the live system
+        read sat in a separate band from the navigation they belong with, and the shell had to fake a
+        header of its own. The shell renders one toolbar with the title, the purpose, and the system
+        state together, so this passes the two values it already owns and gets out of the way.
+      */}
       <AppShell
+        systemStatus={systemStatus}
+        systemTone={systemTone}
         routes={{
-          lab: (
+          readiness: (
             <div className="route-stack">
-              {viewbrainPanel}
-              {viewheroPanel}
-              <section className="lab-top" aria-label="Launch controls">
+              <ReadinessPanel
+                executors={executors}
+                error={executorsError}
+                loading={executorsLoading}
+                onRefresh={() => void refreshExecutors()}
+              />
+            </div>
+          ),
+          lab: (
+            <div className="lab-console">
+              {/*
+                The workstation: three columns and a dock.
+
+                LEFT   what you set up -- the benchmark, the transport, and the runs already stored.
+                CENTRE what you do -- the start control, and the live canvas it starts.
+                RIGHT  what is true right now -- the model, the objective, and the evidence so far.
+                DOCK   the record -- supervision, telemetry, results. Full width, because a timeline
+                       that has to fit in a column is a timeline nobody reads.
+
+                It used to be two full-height columns, which put the start button in the same column as
+                the run context and buried the live canvas under everything else. The brief for a tool
+                like this is "configure, run, watch" and those are three different moments, so they are
+                three different columns.
+              */}
+              <div className="lab-controls">
+                {viewheroPanel}
+                {viewhistoryPanel}
+              </div>
+              <div className="lab-stage">
                 {viewactionCard}
-              </section>
-              {viewworkspaceGrid}
-              {viewlowerGrid}
+                {viewworkspaceGrid}
+              </div>
+              <aside className="lab-inspector" aria-label="Run inspector">
+                {viewmodelCard}
+                {viewprogressReadout}
+              </aside>
+              <div className="lab-dock">{viewbrainPanel}</div>
+              <div className="lab-dock">{viewlowerGrid}</div>
             </div>
           ),
           agents: (
@@ -2030,6 +2507,11 @@ const App = () => {
               <section className="route-single" aria-label="Selected benchmark">
                 {viewsuiteCard}
               </section>
+            </div>
+          ),
+          tasks: (
+            <div className="route-stack">
+              <TasksPanel />
             </div>
           ),
           comparison: (
