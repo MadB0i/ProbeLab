@@ -17,6 +17,7 @@
 //! `run_experiment` starts work rather than steering it.
 
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use probelab_evaluator::GridWorldEvaluator;
 use probelab_lab::{
@@ -117,26 +118,36 @@ impl ExperimentObserver for EmittingObserver {
 ///
 /// Never fails. A Brain with nothing to report is a real state, and returning an error for it would
 /// make the panel's most common initial state look like a fault.
+///
+/// Takes `State<AppState>` — the one type the application manages — and reads the Brain surface
+/// through it. A previous version took `State<BrainSurface>` directly, which compiled, passed every
+/// test (tests call the function, never Tauri's state resolution), and failed on every invocation
+/// in the built application with "state not managed". State resolution is an integration property,
+/// and only a test that names the managed type can pin it.
 #[tauri::command(rename_all = "snake_case")]
-pub fn brain_panel(surface: State<'_, BrainSurface>) -> BrainReadModel {
-    surface.panel()
+pub fn brain_panel(state: State<'_, AppState>) -> BrainReadModel {
+    state.brain.panel()
 }
 
 /// Returns one experiment's read model by identifier.
+///
+/// See [`brain_panel`] for why this takes `State<AppState>`.
 #[tauri::command(rename_all = "snake_case")]
 pub fn get_experiment(
-    surface: State<'_, BrainSurface>,
+    state: State<'_, AppState>,
     experiment_id: String,
 ) -> Result<BrainReadModel, BrainCommandError> {
-    surface.experiment(&experiment_id).ok_or_else(|| {
+    state.brain.experiment(&experiment_id).ok_or_else(|| {
         BrainCommandError::not_found(format!("no experiment named {experiment_id:?}"))
     })
 }
 
 /// Lists experiment identifiers, newest first, so a finished run stays reachable after it ends.
+///
+/// See [`brain_panel`] for why this takes `State<AppState>`.
 #[tauri::command(rename_all = "snake_case")]
-pub fn list_experiments(surface: State<'_, BrainSurface>) -> Vec<String> {
-    surface.experiment_ids()
+pub fn list_experiments(state: State<'_, AppState>) -> Vec<String> {
+    state.brain.experiment_ids()
 }
 
 /// The agent identifier a connected run registers its model under.
@@ -235,6 +246,13 @@ pub async fn run_experiment(
     let runner = LabRunner::new()
         .with_observer(Arc::clone(&observer))
         .with_agents(build_agent_registry(request.model_config.as_ref()));
+    // The cancellation handle is registered before the worker starts and
+    // removed when it ends, so `cancel_experiment` can only stop the run it
+    // names and a stale handle can never stop a later run.
+    let cancel_handle = runner.cancel_handle();
+    if let Ok(mut registry) = state.cancels.lock() {
+        registry.insert(experiment_id.clone(), Arc::clone(&cancel_handle));
+    }
     let plan_request = PlanRequest {
         benchmark_id: Some(request.benchmark_id.clone()),
         target_agent: Some(request.agent_id.clone()),
@@ -272,7 +290,7 @@ pub async fn run_experiment(
         has_score: false,
         score: None,
         result_json: None,
-        updated_unix_ms: 0,
+        updated_unix_ms: now_unix_ms(),
         target_agent: Some(running_agent.clone()),
         root_seed: request_root_seed,
     }) {
@@ -314,6 +332,9 @@ pub async fn run_experiment(
     // Persist the terminal state. A run that reached here is genuinely finished, so this is the one
     // place `completed` is written -- and it is written from the runner's own terminal reason rather
     // than from the absence of an error.
+    if let Ok(mut registry) = state.cancels.lock() {
+        registry.remove(&run_id);
+    }
     if let Some(experiment) = result.experiment.as_ref() {
         // `to_wire_json`, not `format!("{reason:?}").to_lowercase()`. The `Debug` rendering stored
         // `containmentfailure { kind: verificationfailed }` in a TEXT column -- a Rust expression
@@ -340,8 +361,8 @@ pub async fn run_experiment(
             episodes_failed: experiment.episodes_failed,
             has_score: experiment.mean_success_fraction.is_some(),
             score: experiment.mean_success_fraction,
-            result_json: None,
-            updated_unix_ms: 0,
+            result_json: serde_json::to_string(&experiment.mean_success_fraction).ok(),
+            updated_unix_ms: now_unix_ms(),
             // Re-stated rather than re-read: the running row wrote them, and carrying the same
             // values forward keeps the terminal write from blanking the identity the comparison
             // needs. A terminal row with a null agent would refuse every comparison it took part in.
@@ -355,6 +376,17 @@ pub async fn run_experiment(
         tracing::warn!(error = %error, "failed to emit the final brain model");
     }
     Ok(result)
+}
+
+/// Wall-clock milliseconds since the Unix epoch for stored rows.
+///
+/// Recorded rather than defaulted so `ORDER BY updated_unix_ms` orders by
+/// update time instead of degenerating to the experiment-id tiebreak.
+fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 /// The Brain's state, plus the experiment it is supervising.
@@ -738,6 +770,15 @@ mod tests {
             "a connected result must name the provider that produced it"
         );
         assert_eq!(first.reproducibility.model, "test-model");
+        assert_eq!(
+            first.model.adapter, "openai-compatible-v1",
+            "a connected result must carry the remote adapter identity, never a mock one: \
+             this is what stops a local-model measurement from being read as a scripted reference run"
+        );
+        assert_ne!(
+            first.model.adapter, "deterministic-mock-v1",
+            "adapter identity is the machine-readable line between a model and a mock"
+        );
         assert!(
             !first.reproducibility.configuration_fingerprint.is_empty(),
             "and a fingerprint, so a later comparison can tell this run from another"

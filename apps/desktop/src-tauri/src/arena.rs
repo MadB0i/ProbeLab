@@ -208,9 +208,13 @@ pub fn list_arena_agents(game: String) -> Result<Vec<ArenaAgentSummary>, ArenaCo
 /// The most recent match, or `None` when none has been played.
 ///
 /// `None` is a real state — an empty arena — and the panel renders it as one rather than as a fault.
+///
+/// Takes `State<AppState>` — the one type the application manages — and reads the arena surface
+/// through it. Taking `State<ArenaSurface>` directly compiled and passed every test while failing on
+/// every invocation in the built application with "state not managed".
 #[tauri::command(rename_all = "snake_case")]
-pub fn latest_arena_match(surface: State<'_, ArenaSurface>) -> Option<ArenaMatchView> {
-    surface.latest()
+pub fn latest_arena_match(state: State<'_, AppState>) -> Option<ArenaMatchView> {
+    state.arena.latest()
 }
 
 /// Reconstructs a stored match as a deterministic replay.
@@ -218,25 +222,32 @@ pub fn latest_arena_match(surface: State<'_, ArenaSurface>) -> Option<ArenaMatch
 /// The reconstruction reads recorded data and nothing else: no engine, no provider, no broker. It
 /// therefore cannot produce a different result than the recording, and cannot call a model even by
 /// accident — which is what makes it a replay rather than a second run.
+///
+/// See [`latest_arena_match`] for why this takes `State<AppState>`.
 #[tauri::command(rename_all = "snake_case")]
 pub fn replay_arena_match(
-    surface: State<'_, ArenaSurface>,
+    state: State<'_, AppState>,
     match_id: String,
 ) -> Result<probelab_lab::Replay, ArenaCommandError> {
-    let view = surface.get(&match_id).ok_or_else(|| ArenaCommandError {
-        code: "not_found".to_owned(),
-        message: format!("no match named {match_id:?}"),
-    })?;
+    let view = state
+        .arena
+        .get(&match_id)
+        .ok_or_else(|| ArenaCommandError {
+            code: "not_found".to_owned(),
+            message: format!("no match named {match_id:?}"),
+        })?;
     Ok(probelab_lab::replay_match(&view))
 }
 
 /// One stored match by identifier.
+///
+/// See [`latest_arena_match`] for why this takes `State<AppState>`.
 #[tauri::command(rename_all = "snake_case")]
 pub fn get_arena_match(
-    surface: State<'_, ArenaSurface>,
+    state: State<'_, AppState>,
     match_id: String,
 ) -> Result<ArenaMatchView, ArenaCommandError> {
-    surface.get(&match_id).ok_or_else(|| ArenaCommandError {
+    state.arena.get(&match_id).ok_or_else(|| ArenaCommandError {
         code: "not_found".to_owned(),
         message: format!("no match named {match_id:?}"),
     })

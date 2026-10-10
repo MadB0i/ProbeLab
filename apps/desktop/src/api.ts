@@ -263,7 +263,12 @@ export async function brainPanel(): Promise<BrainReadModel> {
 }
 
 export async function getExperiment(experimentId: string): Promise<BrainReadModel> {
-  return invoke<BrainReadModel>("get_experiment", { experimentId });
+  // The key is snake_case because the command declares
+  // `rename_all = "snake_case"`: Tauri resolves top-level argument names
+  // exactly, and `experimentId` would be a missing argument rather than a
+  // differently-cased one. Inner struct fields stay camelCase (serde) — only
+  // the top-level command keys follow this rule.
+  return invoke<BrainReadModel>("get_experiment", { experiment_id: experimentId });
 }
 
 export async function listExperiments(): Promise<string[]> {
@@ -719,7 +724,7 @@ export async function listSecurityProbes(
   benchmarkId: string,
 ): Promise<SecurityProbeListing[]> {
   return invoke<SecurityProbeListing[]>("list_security_probes", {
-    benchmarkId,
+    benchmark_id: benchmarkId,
   });
 }
 
@@ -763,5 +768,5 @@ export type Replay = {
 };
 
 export async function replayArenaMatch(matchId: string): Promise<Replay> {
-  return invoke<Replay>("replay_arena_match", { matchId });
+  return invoke<Replay>("replay_arena_match", { match_id: matchId });
 }
