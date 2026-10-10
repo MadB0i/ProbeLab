@@ -1,3 +1,7 @@
+<p align="left">
+  <img src="assets/probelab-lockup.svg" alt="PROBE//LAB — AI capability and agent evaluation" width="520">
+</p>
+
 # PROBE//LAB
 
 A controlled environment where AI systems are placed into measurable tasks and
@@ -71,14 +75,16 @@ summary, and where they differ STATUS.md is right.
 
 ### The command center
 
-Nine destinations in a persistent sidebar, hash-routed and deep-linkable. Each one answers a single
+Eleven destinations in a persistent sidebar, hash-routed and deep-linkable. Each one answers a single
 question instead of stacking all of them into one long page:
 
 | Destination | What it shows |
 |---|---|
+| Readiness | What this machine can actually run, verified just now: offline runtimes, coding agents, guided packages, optional remote providers — with the reason whenever something cannot run. |
 | Command center | The orchestrator's state, the experiment it is supervising, the launch controls, and the live run's event stream. |
 | Agents | Every agent from the authoritative registry, with what each one's number measures. |
 | Benchmarks | Every registered benchmark, and the selected one. |
+| Tasks | Coding-repair and memory-latch task benchmarks: reference ceilings, installed-agent runs, and guided submissions, each with its provenance stated above its score. |
 | Comparison | Two or more stored experiments, with a refusal and its reason when they cannot be compared. |
 | Settings | The defaults future experiments and runs start from, stored and validated by the backend. |
 | Providers | The provider protocols the lab speaks. Credentials are read from the environment by the backend and never reach this page. |
@@ -101,6 +107,8 @@ built application while this file described them as working.
 |---|---|---|
 | Grid World | Implemented | Partially observable planning on a replayable seed. |
 | Sandbox Process | Implemented | A real contained process, on Windows only. `filesystem.*` and `network.connect` are **authorized and refused at execution time** — not executed. `environment.inspect` is **denied at the broker and has no grant path at all**, so it is never authorized. Only `process.spawn` has a real executor. |
+| Coding repair | Implemented | Eight seed-varying single-bug Python repairs, scored by hidden static checks with partial credit. Reference optimal scores 70/70, noop 0/70, disjoint intervals. Static verification only — no code is executed. |
+| Memory latch | Implemented | A cue shown once, then an unlabeled choice. The memory reference scores 70/70; the stateless baseline scores at chance with a disjoint interval. This is the load-bearing memory measurement the grid world does not provide. |
 
 ### Arena
 
@@ -138,6 +146,18 @@ provider (a coding agent, not a model endpoint; there is no API to point at).
 
 Keys are read from the environment at call time, never stored, never sent to the frontend, and
 redacted from anything that could reach a log or a result bundle.
+
+### Execution modes
+
+Four, verified by discovery rather than assumed. The readiness page reports what this machine can
+run, with the reason whenever something cannot:
+
+| Mode | What it is | Needs |
+|---|---|---|
+| Offline local | Ollama or a llama.cpp server on loopback, plus installed `.gguf` files. | A running local server. ProbeLab never downloads models and needs no API key. |
+| Coding agent | Installed Codex, OpenCode, or Claude Code CLIs: discovered and preflighted, measured through guided packages. | The binary plus the agent's own login for discovery; a guided package for measurement. Automatic execution is disabled — an agent running as your user can read your files, and a disposable workdir does not change that. |
+| Guided external | An isolated task package, run elsewhere and imported for independent verification. Always available; always marked as a manual submission, never an observed run. | Nothing installed. |
+| Remote provider | The existing OpenAI-compatible transport. Optional, never mandatory. | A credential variable, read from the environment at call time. |
 
 ### Security probes
 
@@ -218,6 +238,18 @@ numbered list with evidence is in **[docs/STATUS.md](docs/STATUS.md) §8**.
   this host does not have, and a number produced without one would be a fabrication. The reference
   policy is a scripted searcher. Beating it is a low bar, and a pass would be a precondition for an
   interesting result rather than a result worth reporting.
+- **No installed CLI agent has been measured either.** Discovery, preflight, disposable-workspace
+  execution with artifact scoring, and guided packages are implemented and tested, but no machine with
+  an installed, authenticated agent has run a task benchmark through this build yet. The task panels
+  show reference ceilings and floors; anything else appears only after a real run.
+- **Automatic CLI-agent execution is disabled, not deferred.** An installed agent runs as your user
+  with your files readable, and a disposable workdir does not change that — so the product refuses
+  `cli:…` task policies with a typed error and measures installed agents through guided packages
+  instead. The executor library and its fail-closed tests remain for a future verified boundary.
+- **A run can be stopped, and a finished run can be exported.** Cancellation is cooperative between
+  episodes with a recorded `Cancelled` reason; exports are JSON (the full read model) or CSV
+  (per-episode rows plus the aggregate), read from the stored projection so the file cannot disagree
+  with the panel.
 - **External model nondeterminism** is not reproducible, by anyone.
 - **Settings cannot move stored data or hold a credential.** The storage paths, the credential policy,
   log verbosity, and platform containment support are shown read-only with the reason they are fixed.
@@ -232,6 +264,32 @@ numbered list with evidence is in **[docs/STATUS.md](docs/STATUS.md) §8**.
 
 See [docs/feature-matrix.json](docs/feature-matrix.json) for the machine-readable version, which CI
 checks against the repository, and [docs/STATUS.md](docs/STATUS.md) for what is verified.
+
+## Brand
+
+The mark is **the Signal Aperture**: a grounded navy stem, a blue aperture bowl with a wedge mouth, a
+cyan probe needle entering through that mouth, and a cyan measurement node in the counter of the P.
+Four shapes, no more.
+
+| | |
+|---|---|
+| ![The Signal Aperture](assets/signal-aperture.svg) | ![Reversed lockup on navy](assets/probelab-lockup-reversed.svg) |
+
+Three constraints shaped it, and each is enforced by a test rather than by convention:
+
+- **The bowl is never closed.** It is two arc segments with a real gap in the path geometry. A closed
+  ring would be the generic concentric-target icon, and it would also assert a boundary that this lab
+  has not measured.
+- **The node stays clear of the bowl.** It sits inside the 56px counter with at least 6px to spare.
+  Two earlier sizes overlapped it, and below 24px the node and bowl fused into one cyan blob — at
+  which point the aperture stops being an aperture.
+- **The in-app mark and the icon set cannot drift.** `src/Brand.tsx` and
+  `src-tauri/app-icon.svg` are two renderings of one design kept in two files; `Brand.test.tsx` asserts
+  they still describe the same geometry.
+
+Sources live in [`apps/desktop/src-tauri/brand/`](apps/desktop/src-tauri/brand/); generated platform
+icons in [`apps/desktop/src-tauri/icons/`](apps/desktop/src-tauri/icons/) are produced from
+`app-icon.svg` by `pnpm icons` and verified current by `pnpm check:icons`.
 
 ## Further reading
 

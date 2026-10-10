@@ -162,7 +162,18 @@ def invoked_commands() -> set[str]:
     generic argument (`invoke<T>("name", ...)`) including nested angle brackets, and a bare string
     literal, which is all the frontend uses.
     """
-    names: set[str] = set()
+    return {name for (name, _keys) in invoked_calls()}
+
+
+def invoked_calls() -> list[tuple[str, set[str] | None]]:
+    """Every `invoke` call: the command name and its top-level argument keys.
+
+    The keys are `None` when the payload is not an object literal (a variable
+    or an absent second argument), which is unverifiable rather than wrong.
+    String contents are skipped so a value like `{ format: "csv" }` does not
+    read `"csv"` as a key.
+    """
+    calls: list[tuple[str, set[str] | None]] = []
     for path in frontend_sources():
         text = path.read_text(encoding="utf-8")
         for match in re.finditer(r"\binvoke(?:<|\s*\()", text):
@@ -191,13 +202,245 @@ def invoked_commands() -> set[str]:
             arguments = tail[open_paren + 1 : index - 1]
             literal = re.match(r"""\s*["'`]([A-Za-z0-9_]+)["'`]""", arguments)
             if literal:
-                names.add(literal.group(1))
-    if not names:
+                calls.append((literal.group(1), top_level_keys(arguments[len(literal.group(0)) :])))
+    if not calls:
         fail(
             "no `invoke` calls found in the frontend. The extraction is broken, not the frontend, and "
             "a check that cannot see the calls would pass while every panel was dead."
         )
-    return names
+    return calls
+
+
+def top_level_keys(after_name: str) -> set[str] | None:
+    """The keys of the payload object literal following a command name.
+
+    Returns `None` when there is no object literal to read (absent payload or
+    a variable), which the caller treats as unverifiable rather than wrong.
+    """
+    stripped = after_name.lstrip()
+    if not stripped.startswith(","):
+        return set()
+    rest = stripped[1:].lstrip()
+    if not rest.startswith("{"):
+        return None
+    keys: set[str] = set()
+    depth = 0
+    index = 0
+    in_string: str | None = None
+    while index < len(rest):
+        char = rest[index]
+        if in_string is not None:
+            if char == "\\":
+                index += 2
+                continue
+            if char == in_string:
+                in_string = None
+            index += 1
+            continue
+        if char in "\"'`":
+            in_string = char
+            index += 1
+            continue
+        if char in "{[(":
+            depth += 1
+            index += 1
+            continue
+        if char in "}])":
+            depth -= 1
+            if depth <= 0:
+                break
+            index += 1
+            continue
+        if depth == 1:
+            key = re.match(r"[A-Za-z0-9_]+", rest[index:])
+            if key:
+                word = key.group(0)
+                after = rest[index + len(word) :].lstrip()
+                if after.startswith(":"):
+                    # `key: value` — record the key, then skip the whole value
+                    # expression so a value identifier (`{ experiment_id:
+                    # experimentId }`) is never mistaken for a second key.
+                    keys.add(word)
+                    index = skip_value(rest, index + len(word) + 1)
+                    continue
+                if after[:1] in ",}":
+                    # Shorthand `{ request }`.
+                    keys.add(word)
+                index += len(word)
+                continue
+        index += 1
+    return keys
+
+
+def skip_value(text: str, index: int) -> int:
+    """Skips one value expression, returning the index after it.
+
+    Stops at a top-level comma or closing brace — the two things that can
+    follow a value inside an object literal.
+    """
+    depth = 0
+    in_string: str | None = None
+    while index < len(text):
+        char = text[index]
+        if in_string is not None:
+            if char == "\\":
+                index += 2
+                continue
+            if char == in_string:
+                in_string = None
+            index += 1
+            continue
+        if char in "\"'`":
+            in_string = char
+            index += 1
+            continue
+        if char in "{[(":
+            depth += 1
+        elif char in "}])":
+            if depth == 0:
+                return index
+            depth -= 1
+        elif char == "," and depth == 0:
+            return index + 1
+        index += 1
+    return index
+
+
+def to_camel(name: str) -> str:
+    """`experiment_id` to `experimentId`, for commands without a case policy."""
+    parts = name.split("_")
+    return parts[0] + "".join(part[:1].upper() + part[1:] for part in parts[1:])
+
+
+# Parameter types Tauri injects rather than reading from the payload. A key
+# with one of these base types is resolved from the runtime, never from JSON,
+# so the frontend sends nothing for it and the checker must expect nothing.
+INJECTED_TYPES = {"State", "AppHandle", "App", "Window", "Webview", "WebviewWindow"}
+
+
+def rust_command_params() -> dict[str, set[str]]:
+    """Every Tauri command's expected top-level argument keys.
+
+    Read from the real `pub fn` signatures, not from documentation. Injectable
+    parameters (`State`, `AppHandle`, windows) are excluded, and the command's
+    own case policy (`rename_all = "snake_case"`, default camelCase) decides
+    the spelling — the exact contract the webview must speak.
+    """
+    params: dict[str, set[str]] = {}
+    for path in TAURI_SRC.glob("*.rs"):
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(
+            r"#\[tauri::command(?P<attr>[^\]]*)\]\s*pub\s+(?:async\s+)?fn\s+(?P<name>[A-Za-z0-9_]+)\s*\(",
+            text,
+        ):
+            snake = 'rename_all = "snake_case"' in (match.group("attr") or "")
+            depth = 1
+            index = match.end()
+            while index < len(text) and depth:
+                if text[index] == "(":
+                    depth += 1
+                elif text[index] == ")":
+                    depth -= 1
+                index += 1
+            signature = text[match.end() : index - 1]
+            keys: set[str] = set()
+            for part in split_top_level(signature, ","):
+                part = part.strip()
+                param = re.match(r"(?:mut\s+)?([A-Za-z0-9_]+)\s*:\s*(.+)", part, re.DOTALL)
+                if not param:
+                    continue
+                ident, typename = param.group(1), param.group(2).strip()
+                base = re.split(r"[<>,:\s&'\"]", typename, maxsplit=1)[0]
+                if base in INJECTED_TYPES:
+                    continue
+                keys.add(ident if snake else to_camel(ident))
+            params[match.group("name")] = keys
+    if not params:
+        fail("no Tauri commands found in src-tauri/src; the signature reader is broken")
+    return params
+
+
+def split_top_level(text: str, separator: str) -> list[str]:
+    """Splits on a separator that is not nested in brackets or strings.
+
+    A single quote starts a string only when it cannot be a Rust lifetime or
+    char literal: `'_` and `'a` (followed by anything but a closing quote) are
+    lifetimes, `'x'` is a char literal. Without this, `State<'_, AppState>`
+    swallows the rest of a command signature and every parameter after it is
+    lost — which is precisely the kind of silent parser miss this checker
+    exists to avoid becoming.
+    """
+    parts: list[str] = []
+    depth = 0
+    in_string: str | None = None
+    current: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if in_string is not None:
+            current.append(char)
+            if char == "\\":
+                if index + 1 < len(text):
+                    current.append(text[index + 1])
+                    index += 1
+            elif char == in_string:
+                in_string = None
+            index += 1
+            continue
+        if char == "'" and _quote_is_rust_string(text, index):
+            in_string = char
+            current.append(char)
+            index += 1
+            continue
+        if char == "'" :
+            # A Rust lifetime (`'_`, `'a`) or char literal (`'x'`): neither
+            # opens a string. Lifetimes pass through as ordinary characters;
+            # char literals are skipped whole so a comma inside one (unlikely
+            # but legal) cannot split a signature.
+            if _quote_is_char_literal(text, index):
+                current.append(text[index : index + 3])
+                index += 3
+            else:
+                current.append(char)
+                index += 1
+            continue
+        if char == '"':
+            in_string = char
+            current.append(char)
+            index += 1
+            continue
+        if char in "(<[{":
+            depth += 1
+        elif char in ")>]}":
+            depth -= 1
+        if char == separator and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    parts.append("".join(current))
+    return parts
+
+
+def _quote_is_rust_string(text: str, index: int) -> bool:
+    """Whether a single quote opens a string rather than a lifetime/literal.
+
+    A quote followed by an identifier character starts a lifetime (`'_`,
+    `'a`) or a char literal (`'x'`), never a string. Anything else opens one.
+    """
+    nxt = text[index + 1 : index + 2]
+    return not (nxt.isascii() and (nxt.isalnum() or nxt == "_"))
+
+
+def _quote_is_char_literal(text: str, index: int) -> bool:
+    """Whether the quote starts a `'x'` char literal (skipped whole)."""
+    nxt = text[index + 1 : index + 2]
+    return (
+        nxt.isascii()
+        and (nxt.isalnum() or nxt == "_")
+        and text[index + 2 : index + 3] == "'"
+    )
 
 
 def known_test_files() -> dict[str, bool]:
@@ -232,7 +475,8 @@ def main() -> int:
         fail("the matrix declares no capabilities")
 
     dispatched = dispatched_commands()
-    invoked = frontend_commands = invoked_commands()
+    calls = invoked_calls()
+    invoked = frontend_commands = {name for (name, _keys) in calls}
     files = known_test_files()
 
     problems: list[str] = []
@@ -259,6 +503,29 @@ def main() -> int:
         if name in frontend_commands:
             problems.append(
                 f"{name!r} is declared unused but the frontend now invokes it; remove the entry"
+            )
+
+    # Top-level argument keys, in both directions. Tauri matches each key
+    # exactly under the command's own case policy (`rename_all =
+    # "snake_case"` here almost everywhere), so a camelCase key where a
+    # snake_case one is expected is a missing argument at runtime — six call
+    # sites shipped exactly that while every suite was green. Calls whose
+    # payload is a variable rather than a literal are unverifiable, not wrong.
+    expected_params = rust_command_params()
+    for name, keys in calls:
+        if keys is None or name not in expected_params:
+            continue
+        expected = expected_params[name]
+        for key in sorted(keys - expected):
+            problems.append(
+                f"{name}: the frontend sends argument {key!r}, which the command does not declare. "
+                f"Tauri matches argument keys exactly under the command's case policy, so this is a "
+                f"missing argument at runtime, not a cosmetic mismatch."
+            )
+        for key in sorted(expected - keys):
+            problems.append(
+                f"{name}: the frontend never sends required argument {key!r}. "
+                f"A call without it fails argument resolution before the command body runs."
             )
 
     seen_ids: set[str] = set()

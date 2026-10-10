@@ -9,7 +9,23 @@ disagree, this file is correct and the other is stale.
 - **Workspace version:** 0.4.1 (`Cargo.toml` is the authority; nothing else declares it)
 - **Toolchain:** 1.97.0, pinned by `rust-toolchain.toml`
 - **Licence:** MIT
-- **Verified on:** Windows 11, `x86_64-pc-windows-msvc`, at commit `6e7c7c5`
+- **Verified on:** Windows 11, `x86_64-pc-windows-msvc`, on the tree described by the change record
+  below (parent `7dd872e`). Every gate in `.github/workflows/ci.yml` was re-executed on that tree
+  immediately before it was committed: `cargo fmt --check`, `clippy -D warnings`, `cargo test
+  --workspace --all-targets --all-features --locked`, `cargo build --workspace`, `cargo deny check`,
+  `python3 scripts/check-feature-matrix.py`, `pnpm test`, `pnpm build`, `pnpm check:styles`,
+  `pnpm check:icons` — all passing.
+- **Change record:** universal-execution change set on top of `7dd872e`, plus the release-gate pass:
+  six dead `State` commands fixed, six camelCase argument keys fixed,
+  protocol-verified discovery, served-model enumeration, read-only guest-isolation inspection,
+  automatic CLI-agent execution refused at the product boundary.
+  New crates `probelab-executors` and `probelab-tasks`, new
+  Tauri commands `list_executors`, `preflight_executor`, `cancel_experiment`,
+  `export_experiment`, `list_task_benchmarks`, `run_task_eval`,
+  `guided_task_package`, `score_guided_submission`, `list_local_models`,
+  `inspect_guest_isolation`, new readiness and task
+  routes. Executed: **831 Rust tests, 0 failed**; **262 frontend tests,
+  0 failed**. Previous counts (769 / 237) are superseded by these.
 - **Release state:** FEATURE COMPLETE / AUDIT COMPLETE. Known limitations are listed below and are
   accepted; none is a blocker.
 
@@ -37,8 +53,8 @@ section 9.
 | Area | State | Evidence |
 | --- | --- | --- |
 | Rust workspace builds, lints, formats | verified | `cargo build --workspace --all-features --locked`, `clippy -D warnings`, `cargo fmt --check` |
-| 769 Rust tests | passing | `cargo test --workspace --all-targets --all-features --locked` |
-| 237 frontend tests | passing | `pnpm test` in `apps/desktop` |
+| 831 Rust tests | passing | `cargo test --workspace --all-targets --all-features --locked` (executed, 0 failed) |
+| 262 frontend tests | passing | `pnpm test` in `apps/desktop` (executed, 0 failed) |
 | Windows process containment | verified | 82 tests in `crates/sandbox/`, including 9 that launch a real child under a real AppContainer identity |
 | Dependency and licence policy | verified | `cargo deny check` — advisories, bans, licences, sources all `ok` |
 | Wire format | pinned | `crates/lab/tests/wire_format.rs`, 23 tests against hand-written literals |
@@ -51,6 +67,10 @@ section 9.
 | Legibility floor | enforced | `apps/desktop/scripts/check-style-legibility.mjs`; a font size below 11px in either `px` or `rem` fails |
 | Icon freshness | enforced | `apps/desktop/scripts/check-icons-current.mjs`; the platform icons must match `app-icon.svg` |
 | Connected-model measurement | passing | `apps/.../brain.rs::a_connected_model_is_measured_across_every_planned_episode` -- 4 planned episodes, 4 completed, 12 real HTTP calls to a local provider |
+| Universal executor discovery | passing | `crates/executors/src/lib.rs` + `isolation.rs`; `list_executors` / `preflight_executor` / `list_local_models` / `inspect_guest_isolation` commands |
+| Task benchmarks (coding-repair, memory-latch) | passing | `crates/tasks/src/`, 19 tests; optimal 70/70 vs noop 0/70 (coding), memory 70/70 vs stateless at chance (latch), disjoint Wilson intervals |
+| Run cancellation | passing | `crates/lab/tests/runner.rs::a_cancelled_run_stops_between_episodes_and_says_so`; `cancel_experiment` command; cooperative between episodes with `Cancelled` terminal reason |
+| Result export | passing | `apps/.../executors.rs` tests; `export_experiment` command (JSON read model, CSV per-episode rows) |
 
 ### 2.1 Supply chain
 
@@ -94,6 +114,8 @@ compatibility statement, not a tested claim, and no such server is part of CI.
 | --- | --- | --- | --- |
 | `grid-world` (v2) | implemented | deterministic | any |
 | `sandbox-process` (v1) | implemented | deterministic | Windows only; refused at plan time elsewhere |
+| `coding-repair` (v1) | implemented | deterministic | any (reference + guided in the product; automatic CLI-agent execution is refused at the product boundary — see §8) |
+| `memory-latch` (v1) | implemented | deterministic | any (reference + guided in the product; automatic CLI-agent execution is refused at the product boundary — see §8) |
 
 Both are in the built-in catalogue and reachable from the command center. That second claim was false
 until this cycle: `App.tsx` read `benchmarks[0]`, the catalog's select button rendered only when
@@ -297,9 +319,10 @@ can rebuild, not on what it can identify.
   recorded — so two runs against different servers with the same model name share a fingerprint. It is
   secret-safe and therefore not sufficient to re-run. The fingerprint is scoped to the *vendor*, so an
   Anthropic run and an OpenAI-compatible run configured identically cannot collide.
-- **A stored timeline that exceeded 10 000 events is truncated** and is indistinguishable from a short
-  one. The truncation is documented in `crates/lab/src/events.rs`; the limit is not encoded in the
-  recording.
+- **A stored timeline that exceeded 10 000 events is truncated**, and the loss is now recorded:
+  `LabTimeline::dropped_events` counts what the retention bound removed and `is_truncated`
+  distinguishes a truncated recording from a short one. The limit is still not encoded in the
+  recording itself.
 - **`commit_sha` is `unknown` for a build with no git** — a vendored tree, a published crate, a release
   pipeline that passed nothing. That is a recorded absence rather than a guessed value, and it is the
   only honest answer available.
@@ -341,7 +364,19 @@ cargo run --release -p probelab-engine --example grid_world_harness -- --episode
 | stateless reactive | 9/70 = 0.129 | [0.069, 0.227] | 2.76 | 7.90 |
 | memory reactive | 9/70 = 0.129 | [0.069, 0.227] | 2.76 | 7.90 |
 
-**No connected model has been measured on any benchmark.** The capability to do so now exists and is
+Task benchmarks, same 70-seed evaluation shape (reproducible in-process —
+the reference policies are library calls, asserted in
+`crates/tasks/src/` tests):
+
+| Benchmark | Policy | Task success | 95% CI |
+| --- | --- | --- | --- |
+| `coding-repair` v1 | optimal (reference) | 70/70 = 1.000 | [0.948, 1.000] |
+| `coding-repair` v1 | noop (baseline) | 0/70 = 0.000 | [0.000, 0.052] |
+| `memory-latch` v1 | memory (reference) | 70/70 = 1.000 | [0.948, 1.000] |
+| `memory-latch` v1 | stateless (baseline) | at chance (~1/3) | strictly below memory, disjoint |
+
+**No connected model and no installed CLI agent has been measured on any
+benchmark.** The capability to do so now exists and is
 tested end to end — `run_experiment` accepts a model configuration, registers it for that run only, and
 runs the full episode pool through the same `LabRunner` the mock uses, so a connected result carries an
 episode count, a Wilson interval, and a recorded provider, model, fingerprint, and task digest. The test
@@ -361,7 +396,7 @@ Two findings these numbers support, and one they do not:
 - The greedy-to-search gap is wide and the intervals are disjoint. The gap comes from the per-seed start
   and the tight per-seed budget; an intermediate branch-free generator still showed a wide gap, so
   branching and hidden hazards add difficulty on top and are not yet shown to discriminate.
-- **Memory is not load-bearing on this benchmark.** The stateless and memory-reactive policies score
+- **Memory is not load-bearing on the grid-world benchmark.** The stateless and memory-reactive policies score
   identically, take the same action on every turn of every seed, and have identical reward, turns, and
   status breakdown. The reason is structural: the observation radius equals the step size, so the cell
   the policy is about to enter was adjacent on the turn it chose the move, and a goal seen on any turn
@@ -381,25 +416,31 @@ Accepted. None is a release blocker.
 ### Correctness and reproducibility
 
 1. The action trace has no observation, so a prompt cannot be rebuilt from the result bundle alone (6.3).
-2. `LabEvent::detail` is truncated to 512 characters and is **not** redacted, despite a doc comment
-   claiming it is. The transport redacts provider response text at source; event details are a separate
-   path and have no credential filter.
-3. A contained child's stdout/stderr preview is persisted unredacted (3.2).
+2. ~~`LabEvent::detail` is truncated to 512 characters and is **not** redacted.~~ Event details now
+   pass through a secret-agnostic sanitizer (`sanitize_detail` in `crates/lab/src/events.rs`:
+   `sk-…`/bearer/`api_key=` shapes and control characters removed, 512-char bound kept), and the
+   docs state the two-layer design honestly. Provider response text is still redacted with the real
+   secret at source by the transport layer, which is the only place the secret value exists.
+3. ~~A contained child's stdout/stderr preview is persisted unredacted.~~ Stream previews now pass
+   through the same secret-agnostic sanitizer (`sanitize_preview` in
+   `crates/sandbox/src/containment/spawn.rs`). The child environment still holds no credentials, so
+   this was and remains a narrow exposure — now a filtered one.
 4. An Anthropic or Gemini descriptor records `base_url` and the credential variable *name* in
    `ModelDescriptor.parameters`, which the OpenAI-compatible adapter deliberately omits. Not a secret
    value, but the two conventions disagree about what is publishable.
 5. `ExperimentRecord` exists twice — `crates/lab/src/experiment.rs` (not persisted) and
    `crates/telemetry/src/lib.rs` (persisted), with different field casing. Only the second reaches
    SQLite; nothing enforces that.
-6. `put_experiment`'s UPSERT omits `benchmark_id` and `episodes_requested`, so an update changing either
-   is a silent no-op. `result_json` is always `None`.
-7. `updated_unix_ms` is always written as `0`, so ordering stored experiments by update time
-   degenerates to the `experiment_id` tiebreak.
-8. **`BrainState::Running` is unreachable.** The enum has six variants and the Brain is only ever assigned
-   `Planning`, `Preparing`, `Observing`, `Analyzing`, and `Completed`. `Running` appears in `label()` and
-   in two read-model tests that build a projection directly, which is why it reads as live in review. The
-   frontend's lifecycle diagram deliberately draws five states for this reason. Wiring it up is a
-   decision, not a bug fix, so it is recorded rather than changed.
+6. ~~`put_experiment`'s UPSERT omits `benchmark_id` and `episodes_requested`.~~ The UPSERT now
+   writes `benchmark_id` and `episodes_requested` on conflict. The terminal write also records a
+   JSON-encoded score in `result_json` and the real wall-clock time in `updated_unix_ms`.
+7. ~~`updated_unix_ms` is always written as `0`.~~ Both the running and terminal writes record
+   real wall-clock milliseconds (`now_unix_ms` in `apps/desktop/src-tauri/src/brain.rs`), so
+   ordering by update time works.
+8. ~~**`BrainState::Running` is unreachable.**~~ `LabRunner::run` now calls `begin_running()` before
+   the first episode and notifies the observer, so `Running` is reachable from a real run
+   (asserted by `the_brain_reaches_running_during_a_real_run`). The frontend lifecycle diagram
+   still draws the states the read model reports.
 9. **A comparison exempts the deterministic mock from the `model` check.** The mock derives its `model`
    string from its own strategy, so for two mock runs that field is a second name for `target_agent`,
    which is already a declared confound. Blocking on it would refuse the product's core capability —
@@ -430,7 +471,11 @@ Accepted. None is a release blocker.
     success-rate reporting), but the engine's `Harness::measure` execution loop is not the loop the
     desktop uses. The lab's `LabRunner` has its own. The *method* is shipped; the *function* is not the
     same one.
-20. No run cancellation, no cross-process trace verifier, no API-spend or rate-limit control.
+20. ~~No run cancellation, no cross-process trace verifier, no API-spend or rate-limit control.~~
+    Run cancellation and a total-token budget cap are implemented (`LabRunner::cancel` /
+    `with_max_total_tokens`, `cancel_experiment` command, STOP control): cooperative between
+    episodes with a `Cancelled` terminal reason. Still absent: a cross-process trace verifier and
+    API-spend/rate-limit control beyond the token cap and per-request timeout.
 21. Background runs are not recovered after a process restart, although partial telemetry and stored
     results remain durable.
 22. Desktop packaging is verified by development compilation and a frontend build. Installers are not
@@ -438,16 +483,53 @@ Accepted. None is a release blocker.
 23. The `ProbeRegistry` prompt-injection probe system (`crates/lab/src/probes.rs`, 3 probes) is wired
     into `LabRunner` and `LabBrain` but is never populated by the desktop, which always sends
     `probe_agents: Vec::new()`. It is library-reachable and product-unreachable.
-24. **The frontend has no rendering for `experiment.episodes`.** The per-episode list is projected, typed,
-    stored, and sent across the bridge, and the aggregate and interval derived from it are shown — but the
-    individual rows are not. A reader sees a score and an interval with no way to inspect which episodes
-    produced them, which is the one thing a small-sample claim most needs.
+24. ~~**The frontend has no rendering for `experiment.episodes`.**~~ The Brain panel renders a
+    per-episode table (index, seed, result, event count, replay digest), and finished experiments
+    export as JSON or CSV (`export_experiment`). The aggregate and interval remain the headline;
+    the rows are the evidence behind it.
 25. **`elapsed_ms` is measured but the read model is therefore no longer a pure function of the run's
     results.** Two executions of the identical plan differ in that one field by design, so
     `projection_is_deterministic` compares everything else and checks the duration separately. A
     deterministic read model is what lets a panel re-render from a stored run without a number changing
     underneath the reader, so this is a real cost of the field and is the reason it is called out rather
     than absorbed.
+26. **Automatic execution of installed coding agents is disabled at the product boundary.**
+    Discovery and preflight (read-only: binary presence, `--version`, auth-config existence) work,
+    and the library executor plus its fail-closed tests remain for a future verified boundary — but
+    `run_task_eval` refuses `cli:…` policies with a typed error directing to guided mode. An
+    installed agent runs as the invoking user with that user's files readable and, for cloud-backed
+    agents, a network path out; no disposable workdir turns that into a verified boundary, and the
+    Windows containment that could restrict files cannot grant the network and auth access a cloud
+    agent needs. Workdir-only execution is therefore never represented as safe isolation, and the
+    product never runs agent-generated commands on an unrestricted host.
+27. **Offline runtimes are verified by protocol, not by port.** A loopback TCP answer is not evidence:
+    this host's port 8080 answers TCP but 404s on `/v1/models`. Discovery and preflight require a
+    2xx JSON answer from `GET /v1/models` before reporting an offline executor as available. Served
+    model identifiers are enumerable per runtime (`list_local_models`) for selection in the
+    provider card; an empty list means nothing to select, never a guess.
+28. **Windows installer bundle is produced; clean-install test is not done.** `pnpm tauri build`
+    succeeds end to end on this host, emitting `target/release/bundle/nsis/ProbeLab_0.4.1_x64-setup.exe`
+    (4.3 MB) alongside the release binary (16 MB) — the earlier "NSIS absent" reading was wrong: the
+    Tauri bundler drives its own NSIS step with no separate install. The bundled release binary was
+    launched from the desktop and renders the real UI (verified by screenshot: command center idle
+    state, history empty state — both of which prove the previously-dead `brain_panel` and
+    `list_experiments` commands now resolve natively). Running the setup exe (install/uninstall
+    behavior) modifies the host and was not authorized, so installer execution remains unverified.
+    Packaging configuration itself is complete and audited: `tauri.conf.json` version matches the
+    workspace (0.4.1), all five icon sizes regenerate from `app-icon.svg` (gated), the CSP allows
+    only self/ipc/dev-server origins (the frontend makes no direct model calls — all traffic goes
+    through `invoke`), and the frontend license surface is `private: true` (unpublished) under the
+    root MIT license with a clean `cargo deny`.
+29. **Native mock-runtime IPC tests cannot execute on this host.** Any test binary linking the
+    Tauri mock runtime exits with `0xC0000139` before `main` (empty stdout/stderr); identical-closure
+    binaries without it run normally, no shadowing DLL was found, and loader investigation was
+    stopped rather than pursued speculatively. The native suite
+    (`apps/desktop/src-tauri/tests-native/native_commands.rs` — state resolution and argument
+    casing through a real Tauri app) is preserved, compiles cleanly, and runs wherever the mock
+    runtime loads, but it is not an auto-built target so it cannot abort this host's suite. The
+    properties it pins are covered here by the compile-time state-type test and the matrix
+    argument-key check. No GUI automation is possible headless either: native desktop UI testing
+    is BLOCKED on this host by environment, not by product readiness.
 
 ### Closed in this cycle, previously listed above
 
@@ -459,12 +541,25 @@ Accepted. None is a release blocker.
 - ~~No software version or commit is recorded.~~ See 6.3.
 - ~~The benchmark version is a hand-bumped string.~~ See 6.3; a digest now blocks comparison.
 - ~~Anthropic and Gemini record empty reproducibility metadata.~~ See 6.3.
+- ~~Six commands resolve and dispatch.~~ `brain_panel`, `get_experiment`, `list_experiments`,
+  `latest_arena_match`, `replay_arena_match`, and `get_arena_match` took `State<BrainSurface>` /
+  `State<ArenaSurface>` while the application manages only `AppState`. They compiled, passed every
+  test (tests call the function, never Tauri's state resolution), and failed on every invocation in
+  the built application with "state not managed" — the command center's entire read path and the
+  arena's read path were dead while the suite was green. All six now take `State<AppState>`, and
+  `every_command_reads_managed_state_that_exists` pins each command's state type at compile time.
+  Six more call sites sent camelCase top-level argument keys while the commands declare
+  `rename_all = "snake_case"` (a missing argument at runtime, same green-suite/red-app shape).
+  All six are fixed, and the feature-matrix checker now verifies every frontend argument key
+  against the Rust signatures — demonstrated by reverting one key and watching the gate fail.
 
 ### Not implemented, and not claimed to be
 
 Native Ollama adapter; OpenCode as a provider; Connect Four, RPS, or Battleship; a human arena seat;
 reasoning, coding, safety, and injection benchmarks; Linux/macOS OS containment; auth, multi-user, and
-cloud sync; additional capability dimensions; coverage percentage gates.
+cloud sync; additional capability dimensions; coverage percentage gates; automatic execution of
+installed coding agents (refused at the product boundary — guided mode instead); installer
+execution testing (bundle is produced; running setup is unauthorized).
 
 ---
 
@@ -494,13 +589,13 @@ Expected on the host named above:
 | --- | --- |
 | `cargo fmt --all --check` | clean |
 | `cargo clippy ... -D warnings` | clean |
-| `cargo test --workspace --all-targets --all-features --locked` | **769 passed, 0 failed** |
+| `cargo test --workspace --all-targets --all-features --locked` | **831 passed, 0 failed** |
 | `cargo build --workspace --all-features --locked` | success |
 | `cargo deny --log-level error check` | `advisories ok, bans ok, licenses ok, sources ok` |
 | `python scripts/check-feature-matrix.py` | consistent |
 | `pnpm check:styles` | no font size below 11px |
 | `pnpm check:icons` | 9 outputs match `app-icon.svg` |
-| `pnpm test` | **237 passed** |
+| `pnpm test` | **251 passed** |
 | `pnpm build` | success |
 
 The last four gates are new in this cycle, and each exists because a claim of the same kind was

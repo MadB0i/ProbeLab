@@ -347,6 +347,57 @@
       "tests": [
         "crates/lab/tests/lab.rs"
       ]
+    },
+    {
+      "id": "executor-discovery",
+      "area": "orchestration",
+      "status": "complete",
+      "command": "list_executors",
+      "implementation": "crates/executors/src/lib.rs",
+      "summary": "Verified discovery of all four execution modes: offline runtimes (Ollama, llama.cpp with GGUF listing, never downloaded; availability requires a 2xx JSON answer from GET /v1/models, not a TCP answer), installed coding agents (Codex, OpenCode, Claude Code with existence-only auth detection), guided external packages, and optional remote providers. Served model identifiers are enumerable per runtime for selection. Unavailable executors report the reason and remedy. Preflight runs only version checks and loopback connects. Guest-isolation support is inspectable read-only (OS, hypervisor, Sandbox/Hyper-V feature state) with a standing guided-only verdict.",
+      "tests": [
+        "crates/executors/src/lib.rs",
+        "crates/executors/src/isolation.rs",
+        "apps/desktop/src/ReadinessPanel.test.tsx"
+      ]
+    },
+    {
+      "id": "task-benchmarks",
+      "area": "benchmark",
+      "status": "complete",
+      "command": "run_task_eval",
+      "implementation": "crates/tasks/src/lib.rs",
+      "summary": "Seed-varying coding-repair (8 bug patterns, hidden static checks, partial credit) and memory-latch (cue shown once, chance baseline 1/3) task benchmarks with 40 dev / 70 eval disjoint seed pools, Wilson intervals, definition digests, and reference ceilings/floors with disjoint intervals. Installed agents are measured through guided packages scored by the same hidden checks with provenance always recorded; automatic CLI-agent execution is refused at the product boundary because a workdir is not an isolation boundary.",
+      "tests": [
+        "crates/tasks/src/coding.rs",
+        "crates/tasks/src/memory.rs",
+        "crates/tasks/src/runner.rs",
+        "crates/tasks/tests/published_numbers.rs",
+        "apps/desktop/src/TasksPanel.test.tsx"
+      ]
+    },
+    {
+      "id": "run-cancellation",
+      "area": "orchestration",
+      "status": "complete",
+      "command": "cancel_experiment",
+      "implementation": "crates/lab/src/runner.rs",
+      "summary": "Cooperative cancellation between episodes: the in-flight episode always finishes so cleanup runs, then the runner stops with a Cancelled terminal reason and a timeline entry. Handles are registered per experiment id and removed on completion, so a stale handle cannot stop a later run. A token-budget cap stops before the next episode with the same honesty.",
+      "tests": [
+        "crates/lab/tests/runner.rs"
+      ]
+    },
+    {
+      "id": "result-export",
+      "area": "ui",
+      "status": "complete",
+      "command": "export_experiment",
+      "implementation": "apps/desktop/src-tauri/src/executors.rs",
+      "summary": "Finished experiments export as pretty JSON (the full read model) or CSV (provenance header, per-episode rows, failures, aggregate with Wilson interval), read from the stored projection so the file cannot disagree with the panel. Unknown identifiers are refused rather than exported empty.",
+      "tests": [
+        "apps/desktop/src-tauri/src/executors.rs",
+        "apps/desktop/src/BrainPanel.test.tsx"
+      ]
     }
   ]
 }

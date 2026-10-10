@@ -27,6 +27,8 @@ A connected provider is trusted infrastructure code, not a model capability. The
 - `evaluator`: independently converts trusted environment outcomes, protocol adherence, and integrity events into results.
 - `benchmarks`: versioned JSON definitions and benchmark registry.
 - `engine`: synchronous deterministic orchestration without UI concerns. The evaluator is injected, so adding a benchmark does not require rewriting the engine.
+- `executors`: universal execution modes — offline runtimes, CLI coding agents, guided external packages, and remote providers. Discovery verifies (binary on `PATH`, loopback connect, model file on disk) and never reads credentials; the only automatic process execution is `<binary> --version` with a bounded timeout. Coding-task execution runs in a disposable temp workspace with a scrubbed environment, no shell, and canonical containment checks, and reports `WorkdirOnly` isolation honestly rather than claiming containment.
+- `tasks`: seed-varying task benchmarks (`coding-repair`, `memory-latch`) with hidden checks, disjoint seed pools, Wilson intervals, definition digests, and reference calibrations. Task benchmarks measure artifacts, not episodes, so they reuse the laboratory's measurement method without going through the grid turn loop.
 - `apps/desktop/src-tauri`: Tauri IPC, background run lifecycle, provider preflight, live event delivery, and SQLite ownership only.
 
 ## Provider boundary
