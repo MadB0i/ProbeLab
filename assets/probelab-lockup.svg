@@ -1,0 +1,20 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 200" width="780" height="200" role="img" aria-label="PROBE//LAB — AI capability and agent evaluation">
+  <!--
+    Horizontal lockup: the Signal Aperture + wordmark.
+
+    The wordmark is live text, not outlines: the brief forbids embedded fonts, and an outlined
+    wordmark would freeze a drawing of letters that no one can correct. The stack degrades from the
+    product's instrument face (Bahnschrift) to any condensed grotesque to system sans; letterforms
+    shift slightly between them, which is fine, because the mark, not the type, carries identity.
+  -->
+  <title>PROBE//LAB</title>
+  <g id="mark" transform="translate(8,12) scale(0.34375)">
+    <path d="M 148 388 L 148 156 Q 148 128 176 128 L 196 128 Q 224 128 224 156 L 224 388 Q 224 408 204 408 L 168 408 Q 148 408 148 388 Z" fill="#172B39"/>
+    <path d="M 210.8 98.7 A 126 126 0 0 1 340.8 271.2 L 275.9 245.0 A 56 56 0 0 0 218.1 168.3 Z" fill="#2563EB"/>
+    <path d="M 290.8 330.9 A 126 126 0 0 1 210.8 349.3 L 218.1 279.7 A 56 56 0 0 0 253.7 271.5 Z" fill="#2563EB"/>
+    <line x1="346.6" y1="326.8" x2="271.5" y2="263.9" stroke="#00C6CC" stroke-width="28" stroke-linecap="round"/>
+    <circle cx="244" cy="216" r="28" fill="#00C6CC"/>
+  </g>
+  <text x="212" y="112" font-family="'Bahnschrift SemiBold Condensed','Bahnschrift Condensed',Bahnschrift,'Arial Narrow','Segoe UI',sans-serif" font-size="64" font-weight="600" letter-spacing="6" fill="#172B39">PROBE<tspan fill="#2563EB">//</tspan>LAB</text>
+  <text x="214" y="152" font-family="'Bahnschrift Condensed',Bahnschrift,'Arial Narrow','Segoe UI',sans-serif" font-size="21" letter-spacing="5.5" fill="#5B7285">AI CAPABILITY &amp; AGENT EVALUATION</text>
+</svg>
