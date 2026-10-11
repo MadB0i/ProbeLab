@@ -181,14 +181,9 @@ export function hash_for(route: RouteId): string {
   return `#/${route}`;
 }
 
-/**
- * The two-digit position a destination occupies in the rail, shown in the rail and the strip.
- *
- * It is the rail position rather than a per-group counter so that a number spoken aloud -- "go to
- * zero four" -- means the same thing on every page, and so the strip can name its own coordinates.
- */
-function route_index(id: RouteId): string {
-  return (RAIL.indexOf(id) + 1).toString().padStart(2, "0");
+/** The rail group a destination sits in, so the band can name the neighbourhood of the page. */
+function group_title(id: RouteId): string {
+  return GROUPS.find((group) => group.ids.includes(id))?.title ?? "";
 }
 
 export function AppShell({
@@ -269,17 +264,19 @@ export function AppShell({
   const definition = ROUTES.find((route) => route.id === active) ?? ROUTES[0];
 
   /*
-   * The rail's expanded state.
+   * The rail's expanded state, open by default.
    *
-   * Collapsed it is a 76px icon dock, which is the shape a desktop application actually has and which
-   * leaves the workspace the width a wide monitor was bought for. Expanded it becomes a labelled
-   * sidebar for anyone who does not want to hover eleven times to learn where things are.
+   * Collapsed it is a 76px icon dock; expanded it is a labelled sidebar. The expanded state is the
+   * default because eleven icons in a column is a memory test: the labels are what tell a first-time
+   * reader that `COMPARE` and `REPLAY` both read stored runs rather than produce any. Collapsing is
+   * a deliberate act by someone who already knows the rail and wants the width back, not the price
+   * everyone pays for having a rail at all.
    *
    * It is local component state rather than a route or a stored preference, because it is a view
    * choice for this session, not a setting. `aria-expanded` on the toggle is what tells a screen
-   * reader that the labels are now visible.
+   * reader that the labels are visible.
    */
-  const [railExpanded, setRailExpanded] = useState(false);
+  const [railExpanded, setRailExpanded] = useState(true);
 
   return (
     <div className={`shell-frame${railExpanded ? " is-expanded" : ""}`}>
@@ -363,9 +360,6 @@ export function AppShell({
                         <Glyph size={20} />
                       </span>
                       <span className="nav-item-label">{label}</span>
-                      <span className="nav-item-index" aria-hidden="true">
-                        {route_index(id)}
-                      </span>
                     </button>
                   );
                 })}
@@ -394,6 +388,7 @@ export function AppShell({
         */}
         <header className="topbar">
           <div className="shell-header">
+            <span className="shell-index">{group_title(active)}</span>
             <h1 className="shell-title" aria-live="polite">
               {definition.title}
             </h1>
@@ -407,6 +402,35 @@ export function AppShell({
           </div>
         </header>
         <div className="shell-content">{routes[definition.id]}</div>
+        {/*
+          The status bar: where the application says where you are without asking you to look up.
+
+          It is a plain `div`, not a live region and not a `footer` landmark. The route change is
+          already announced by the `<h1>` above, so announcing it a second time from the bar would
+          make a screen reader read the page name twice on every navigation; and a `footer` nested
+          inside `<main>` is not a `contentinfo` landmark anyway, so the role would promise something
+          the DOM cannot deliver.
+        */}
+        <div className="statusbar">
+          <span className="statusbar-item is-key">
+            <span className={`status-light ${systemTone ?? ""}`} aria-hidden="true" />
+            {systemStatus ?? "—"}
+          </span>
+          <span className="statusbar-sep" aria-hidden="true" />
+          <span className="statusbar-item">{group_title(active)}</span>
+          <span className="statusbar-spacer" />
+          {/*
+            The scope claims used to sit in a footer under the workspace, which made them the last
+            thing on a scrolling page rather than the frame's own statement -- and it put a second
+            footer inside the application when the status bar already is one. They live here now,
+            where the frame keeps them on screen at every width and every scroll position.
+          */}
+          <span className="statusbar-item statusbar-optional">NO AUTH · NO CLOUD</span>
+          <span className="statusbar-sep" aria-hidden="true" />
+          <span className="statusbar-item statusbar-optional">DESKTOP VERTICAL SLICE</span>
+          <span className="statusbar-sep" aria-hidden="true" />
+          <span className="statusbar-item">{definition.label}</span>
+        </div>
       </main>
     </div>
   );

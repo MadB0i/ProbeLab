@@ -191,25 +191,40 @@ describe("keyboard navigation", () => {
     ]);
   });
 
-  it("numbers the rail so a destination can be named by position", () => {
+  /*
+   * The rail position number was decorative. It named no quantity the user acts on, it repeated in
+   * the toolbar and the status bar, and it consumed a grid track in every item. This pins its
+   * removal: the numbers must not return as a new class, a new element, or text inside the label.
+   */
+  it("renders no decorative position numbers anywhere in the rail", () => {
     renderShell();
-    const indices = Array.from(
-      nav().querySelectorAll<HTMLElement>(".nav-item-index"),
-    ).map((node) => node.textContent);
-    expect(indices).toHaveLength(Object.keys(PAGES).length);
-    expect(indices[0]).toBe("01");
-    expect(indices.at(-1)).toBe(Object.keys(PAGES).length.toString().padStart(2, "0"));
+    expect(nav().querySelectorAll<HTMLElement>(".nav-item-index")).toHaveLength(0);
+    expect(document.querySelectorAll<HTMLElement>(".nav-item-index")).toHaveLength(0);
+    for (const item of Array.from(nav().querySelectorAll<HTMLElement>(".nav-item"))) {
+      expect(item.textContent ?? "").not.toMatch(/\b0\d\b/);
+    }
   });
 
   /*
-   * The index is a visual affordance for scanning the rail. It must not reach the accessible name,
-   * because a destination announced as "zero two, Command Center" is worse for a screen-reader user
-   * than one announced as "Command Center".
+   * The header and the status bar used to carry an "03 / 11" coordinate. Both positions are stated by
+   * the destination name and the group title immediately beside them, so the counter was redundant.
    */
-  it("keeps the rail index out of each destination's accessible name", () => {
+  it("drops the redundant rail coordinate from the header and the status bar", () => {
+    renderShell();
+    expect(document.querySelector(".shell-index")?.textContent ?? "").not.toMatch(/\d+\s*\/\s*\d+/);
+    const strip = document.querySelector(".statusbar");
+    expect(strip?.textContent ?? "").not.toMatch(/\d+\s*\/\s*\d+/);
+  });
+
+  /*
+   * Removing the number must not damage the accessible name. The index used to be rendered but
+   * hidden from assistive technology; with it gone, each destination is announced by its label alone.
+   */
+  it("keeps each destination's accessible name as its label alone", () => {
     renderShell();
     expect(within(nav()).getByRole("button", { name: "LAB" })).toBeInTheDocument();
-    expect(within(nav()).queryByRole("button", { name: /0?2.*LAB/ })).toBeNull();
+    expect(within(nav()).queryByRole("button", { name: /\d.*LAB/ })).toBeNull();
+    expect(within(nav()).queryByRole("button", { name: /LAB.*\d/ })).toBeNull();
   });
 
   /**
