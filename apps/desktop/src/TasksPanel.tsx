@@ -11,11 +11,17 @@
 
 import { useEffect, useState } from "react";
 
-import type { GuidedPackageView, TaskBenchmarkSummary, TaskReport } from "./api";
+import type {
+  GuidedPackageView,
+  SavedPackage,
+  TaskBenchmarkSummary,
+  TaskReport,
+} from "./api";
 import {
   guidedTaskPackage,
   listTaskBenchmarks,
   runTaskEval,
+  saveGuidedPackage,
   scoreGuidedSubmission,
 } from "./api";
 
@@ -88,6 +94,8 @@ export function TasksPanel() {
   const [report, setReport] = useState<TaskReport | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [packageView, setPackageView] = useState<GuidedPackageView | null>(null);
+  const [savedPackage, setSavedPackage] = useState<SavedPackage | null>(null);
+  const [savingPackage, setSavingPackage] = useState(false);
   const [packageSeed, setPackageSeed] = useState("2000000");
   const [submissionText, setSubmissionText] = useState("");
   const [submissionLog, setSubmissionLog] = useState("");
@@ -127,6 +135,28 @@ export function TasksPanel() {
       setPackageView(await guidedTaskPackage(benchmarkId, seed));
     } catch (err) {
       setRunError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  /**
+   * Writes the generated package to disk.
+   *
+   * The destination is chosen by the backend from the benchmark and seed, not by anything this panel
+   * sends — the package's file names come from the benchmark definition, so a caller-supplied path
+   * would make every one of them a traversal candidate. Task inputs only; the hidden checks stay here.
+   */
+  const savePackage = async () => {
+    setSavingPackage(true);
+    setRunError(null);
+    setSavedPackage(null);
+    try {
+      const seed = Number.parseInt(packageSeed, 10);
+      if (!Number.isFinite(seed)) throw new Error("the package seed must be a number");
+      setSavedPackage(await saveGuidedPackage(benchmarkId, seed));
+    } catch (err) {
+      setRunError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingPackage(false);
     }
   };
 
@@ -253,6 +283,7 @@ export function TasksPanel() {
         <label>
           Package seed
           <input
+            type="text"
             value={packageSeed}
             onChange={(event) => setPackageSeed(event.target.value)}
             inputMode="numeric"
@@ -262,7 +293,33 @@ export function TasksPanel() {
           <button type="button" className="button-quiet" onClick={() => void loadPackage()}>
             GENERATE PACKAGE
           </button>
+          {packageView ? (
+            <button
+              type="button"
+              className="button-quiet"
+              onClick={() => void savePackage()}
+              disabled={savingPackage}
+              title="Write this package into a ProbeLab folder under Documents"
+            >
+              {savingPackage ? "SAVING…" : "SAVE PACKAGE TO DISK"}
+            </button>
+          ) : null}
         </div>
+        {savedPackage ? (
+          <div className="guided-saved" role="status">
+            <p>
+              <strong>
+                {savedPackage.fileCount} file{savedPackage.fileCount === 1 ? "" : "s"} written
+              </strong>{" "}
+              to <span className="mono">{savedPackage.directory}</span>
+            </p>
+            <p className="panel-note">
+              Task inputs only. Hidden checks, scoring logic, and credentials are never written there —
+              verification stays in ProbeLab. A second save to the same folder is refused rather than
+              overwriting what you may have edited.
+            </p>
+          </div>
+        ) : null}
         {packageView ? (
           <div className="guided-package">
             <p className="mono">

@@ -240,6 +240,41 @@ pub fn run_benchmark(
         "benchmark run accepted"
     );
 
+    /*
+     * The `running` row is written before the engine starts.
+     *
+     * This is what makes a crash during the run detectable: start-up marks any row still saying
+     * `running` as `interrupted`, because a row that says running and a process that has just started
+     * cannot both be true. Writing only at the end would leave a crash invisible, and the history would
+     * silently omit a run that had genuinely been started.
+     */
+    if let Err(error) = state
+        .results
+        .put_experiment(&probelab_telemetry::ExperimentRecord {
+            experiment_id: task_run_id.clone(),
+            benchmark_id: task_benchmark_id.clone(),
+            lifecycle: probelab_telemetry::ExperimentLifecycle::Running,
+            terminal_reason: None,
+            episodes_requested: 1,
+            episodes_completed: 0,
+            episodes_failed: 0,
+            has_score: false,
+            score: None,
+            result_json: None,
+            updated_unix_ms: unix_milliseconds(),
+            target_agent: Some(model_config.kind_name().to_owned()),
+            root_seed: None,
+        })
+    {
+        // Not fatal. The run is real either way; what is lost is the ability to tell a crash from a
+        // run that never started, and that is worth saying out loud rather than only in a log.
+        tracing::error!(
+            error = %error,
+            "could not record the running experiment; a crash during this run will be indistinguishable \
+             from a run that never started"
+        );
+    }
+
     tauri::async_runtime::spawn(async move {
         let run_id_for_engine = task_run_id.clone();
         let run_id_for_persist = task_run_id.clone();
@@ -284,6 +319,20 @@ pub fn run_benchmark(
 ///
 /// The repository writes both payloads in one transaction, so a `run-complete` event can
 /// never describe a run that `get_result` or `get_run_metadata` cannot read back.
+/// Writes a finished benchmark run: its immutable result **and** the lifecycle row the history reads.
+///
+/// # Why both
+///
+/// A run used to persist only through [`SqliteResultRepository::store_completed`], which writes the
+/// `results` row. The Command Center's stored-runs list reads the `experiments` table, so a run
+/// executed, produced a complete result, rendered every number correctly — and the history stayed
+/// permanently empty, on every launch. Nothing looked broken, because nothing *was* broken except one
+/// row that was never written.
+///
+/// The two writes are deliberately separate: `results` is immutable evidence guarded by a trigger, and
+/// `experiments` is a lifecycle record that is updated as a run progresses. Collapsing them would mean
+/// either relaxing the immutability trigger or losing crash recovery, so they stay two rows written
+/// together.
 fn persist_run(
     results: &SqliteResultRepository,
     run_id: &str,
@@ -291,7 +340,54 @@ fn persist_run(
 ) -> Result<(), String> {
     results
         .store_completed(run_id, completed)
-        .map_err(|error| format!("failed to store benchmark result: {error}"))
+        .map_err(|error| format!("failed to store benchmark result: {error}"))?;
+    record_completed_experiment(results, run_id, completed)
+}
+
+/// Writes the lifecycle row for a run that reached a terminal state.
+///
+/// Every field is taken from what the run recorded. A run whose result carries no score is stored with
+/// `has_score = false` and a null score, which the history renders as an explicit absence — never as a
+/// zero, because a zero is a measurement.
+fn record_completed_experiment(
+    results: &SqliteResultRepository,
+    run_id: &str,
+    completed: &CompletedRun,
+) -> Result<(), String> {
+    let outcome = completed.result.capability.task_success;
+    let episodes = 1usize;
+    results
+        .put_experiment(&probelab_telemetry::ExperimentRecord {
+            experiment_id: run_id.to_owned(),
+            benchmark_id: completed.metadata.benchmark_id.clone(),
+            lifecycle: probelab_telemetry::ExperimentLifecycle::Completed,
+            terminal_reason: Some(probelab_lab::TerminalReason::Completed.to_wire_json()),
+            episodes_requested: episodes,
+            episodes_completed: episodes,
+            episodes_failed: 0,
+            has_score: true,
+            // The score of a single-episode benchmark run is its outcome: this benchmark scores success
+            // as one and failure as zero, so `f64::from(outcome)` is the measurement rather than a
+            // restatement of it.
+            score: Some(f64::from(u8::from(outcome))),
+            result_json: None,
+            updated_unix_ms: completed.metadata.ended_at_unix_ms,
+            // Recorded so the comparison picker can offer this run. A row with no agent is one the
+            // picker refuses, and a run the lab cannot compare is a run it should still be able to list.
+            target_agent: Some(completed.metadata.model.clone()),
+            root_seed: None,
+        })
+        .map_err(|error| format!("failed to store the experiment history row: {error}"))
+}
+
+/// Now, in Unix milliseconds, for the lifecycle row's ordering column.
+///
+/// `0` rather than a panic: a clock before the epoch is absurd, and this column only orders history.
+fn unix_milliseconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 /// Reads a result only from the durable result repository.

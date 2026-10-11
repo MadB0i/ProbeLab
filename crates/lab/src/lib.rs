@@ -21,6 +21,7 @@
 
 mod agents;
 mod arena;
+pub mod arena_store;
 mod brain;
 pub mod comparison;
 mod events;
@@ -42,6 +43,7 @@ pub use arena::{
     available_games, ArenaGame, ArenaMatch, ArenaMatchSpec, ArenaMatchView, ArenaOutcome,
     ArenaRunError, ArenaRunner, IllegalMoveView, PlyView,
 };
+pub use arena_store::{ArenaMatchStoreError, ArenaMatchSummary, SqliteArenaMatchStore};
 pub use brain::{
     category_label, label_for, Anomaly, AnomalyDetector, BrainEvent, BrainPanel, BrainState,
     ExperimentPlan, ExperimentPlanError, LabBrain, ObservedCategory, PlanRequest, MAX_EPISODES,

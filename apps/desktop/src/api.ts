@@ -271,8 +271,22 @@ export async function getExperiment(experimentId: string): Promise<BrainReadMode
   return invoke<BrainReadModel>("get_experiment", { experiment_id: experimentId });
 }
 
-export async function listExperiments(): Promise<string[]> {
-  return invoke<string[]>("list_experiments");
+/**
+ * Every stored experiment with the fields a history list can actually show.
+ *
+ * # Why this and not `list_experiments`
+ *
+ * `list_experiments` returns identifiers only, which is enough to populate a count but not a table:
+ * lifecycle, episodes, score and timestamp all have to come from somewhere, and deriving them from an
+ * identifier would be inventing measurements. It also used to read a different store than this one,
+ * which is why two commands with similar names could disagree about what exists; both now read the
+ * durable record, so the wrapper below is gone rather than left as a second way to ask the same
+ * question and get a thinner answer.
+ *
+ * Reads the same durable store the comparison picker uses, so both agree on what exists.
+ */
+export async function listStoredExperiments(): Promise<StoredExperiment[]> {
+  return invoke<StoredExperiment[]>("list_comparable_experiments");
 }
 
 /**
@@ -603,19 +617,20 @@ export type PlyView = {
   ply: number;
   side: "first" | "second";
   /**
-   * The board as a tagged union, because the backend's `GameBoard` is one. The panel switches on
-   * `game` rather than assuming a shape, so an unimplemented game cannot render as a broken board.
+   * The board as a tagged union, because the backend's `GameBoard` is one. The serde wire format
+   * uses adjacent tagging (`tag = "game", content = "state"`), so cells live under `state`.
    */
   board:
-    | { game: "tic_tac_toe"; cells: GameCell[] }
-    | { game: string; cells?: unknown };
-  played: { tic_tac_toe?: number; [key: string]: unknown } | null;
+    | { game: "tic_tac_toe"; state: { cells: GameCell[] } }
+    | { game: string; state?: unknown };
+  /** Adjacent-tagged move: `{ game: "tic_tac_toe", move: 3 }`. */
+  played: { game?: string; move?: unknown; [key: string]: unknown } | null;
 };
 
 export type IllegalMoveView = {
   ply: number;
   /** Absent when the failure did not identify a move. Never a guess. */
-  attempted: { tic_tac_toe?: number; [key: string]: unknown } | null;
+  attempted: { game?: string; move?: unknown; [key: string]: unknown } | null;
   reason: string;
 };
 
@@ -631,10 +646,32 @@ export type ArenaMatchView = {
   plies: number;
   finalBoard: PlyView["board"];
   winner: "first" | "second" | null;
+  /**
+   * The three cells the winner completed a line on, as board indices.
+   *
+   * Produced by the engine's own winning-line rule. `null` for a draw, a loss, and any game without
+   * lines — absent rather than empty, so a renderer cannot draw a line nobody completed.
+   */
+  winningLine: [number, number, number] | null;
   illegalMoves: IllegalMoveView[];
   history: PlyView[];
   timeline: { sequence: number; code: string; severity: string; detail: string }[];
   failure: string | null;
+};
+
+/** One row of the match archive: what the history list draws without decoding a full recording. */
+export type ArenaMatchSummary = {
+  matchId: string;
+  game: string;
+  outcome: ArenaOutcome;
+  testedAgent: string;
+  opponentAgent: string;
+  testedSide: "first" | "second";
+  seed: number;
+  plies: number;
+  recordedUnixMs: number;
+  /** The recording's own digest, so a reopened match can be checked against what was stored. */
+  digest: string;
 };
 
 export type ArenaCommandError = {
@@ -662,6 +699,22 @@ export async function playArenaMatch(request: {
   seed: number;
 }): Promise<ArenaMatchView> {
   return invoke<ArenaMatchView>("play_arena_match", { request });
+}
+
+/**
+ * The stored match archive, newest first.
+ *
+ * Reads the durable archive rather than the session's in-memory list, so a match played before the
+ * last restart is still there. A summary is enough to draw a history row; the full recording is
+ * fetched by identifier when a match is opened.
+ */
+export async function listArenaMatches(limit = 50): Promise<ArenaMatchSummary[]> {
+  return invoke<ArenaMatchSummary[]>("list_arena_matches", { limit });
+}
+
+/** One stored match in full, by identifier. */
+export async function getArenaMatch(matchId: string): Promise<ArenaMatchView> {
+  return invoke<ArenaMatchView>("get_arena_match", { match_id: matchId });
 }
 /**
  * The Security Lab's read model.
@@ -937,6 +990,30 @@ export async function guidedTaskPackage(
   seed: number,
 ): Promise<GuidedPackageView> {
   return invoke<GuidedPackageView>("guided_task_package", { benchmark_id: benchmarkId, seed });
+}
+
+/** Where a generated package was written. */
+export type SavedPackage = {
+  directory: string;
+  fileCount: number;
+};
+
+/**
+ * Writes a generated package into a ProbeLab-owned folder under Documents.
+ *
+ * The destination is chosen by the backend from the benchmark and seed, never by the caller: the
+ * package's file names come from the benchmark definition, so a caller-supplied path would make
+ * every one of them a traversal candidate. Task inputs only — hidden checks and credentials are
+ * never written.
+ */
+export async function saveGuidedPackage(
+  benchmarkId: string,
+  seed: number,
+): Promise<SavedPackage> {
+  return invoke<SavedPackage>("save_guided_package", {
+    benchmark_id: benchmarkId,
+    seed,
+  });
 }
 
 export async function scoreGuidedSubmission(submission: {

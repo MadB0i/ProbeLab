@@ -22,6 +22,7 @@ import {
 } from "./api";
 import { BrainPanel } from "./BrainPanel";
 import { ArenaPanel } from "./ArenaPanel";
+import { ExperimentHistory } from "./ExperimentHistory";
 import { SecurityPanel } from "./SecurityPanel";
 import { ReplayPanel } from "./ReplayPanel";
 import { ReadinessPanel } from "./ReadinessPanel";
@@ -32,9 +33,10 @@ import {
   exportExperiment,
   getExperiment,
   listExecutors,
-  listExperiments,
+  listStoredExperiments,
   listLocalModels,
   type ExecutorDescriptor,
+  type StoredExperiment,
 } from "./api";
 import {
   latestSecurityReport,
@@ -47,9 +49,12 @@ import {
   latestArenaMatch,
   listArenaAgents,
   listArenaGames,
+  listArenaMatches,
+  getArenaMatch,
   playArenaMatch,
   type ArenaAgentSummary,
   type ArenaGameSummary,
+  type ArenaMatchSummary,
   type ArenaMatchView,
 } from "./api";
 
@@ -406,9 +411,42 @@ const SECURITY_SWEEP_SEED = 11;
 const SAMPLING_TEMPERATURE = 0;
 const MAX_COMPLETION_TOKENS = 200;
 
+/**
+ * A readable message from anything a command might reject with.
+ *
+ * A rejected Tauri invocation arrives as a plain object — `{message}`, or a typed error payload —
+ * not as an `Error`. `String(error)` on one of those is the literal text `[object Object]`, which is
+ * how a real failure reached the panel as a message that said nothing about what failed. The chain is
+ * walked rather than assumed, because the shape differs per command and a formatter that only knows
+ * one shape is a formatter that prints `[object Object]` for the rest.
+ */
 const formatError = (error: unknown): string => {
   if (error instanceof Error) {
     return error.message;
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  if (typeof error === "object" && error !== null) {
+    const record = error as Record<string, unknown>;
+    for (const key of ["message", "error", "reason", "detail"]) {
+      const candidate = record[key];
+      if (typeof candidate === "string" && candidate.length > 0) {
+        return candidate;
+      }
+      // A nested error object, such as `{ error: { message } }`.
+      if (candidate && typeof candidate === "object") {
+        const nested = formatError(candidate);
+        if (nested !== "[object Object]") {
+          return nested;
+        }
+      }
+    }
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return "an unknown error";
+    }
   }
   return String(error);
 };
@@ -618,7 +656,7 @@ const App = () => {
   const [executors, setExecutors] = useState<ExecutorDescriptor[]>([]);
   const [executorsError, setExecutorsError] = useState<string | null>(null);
   const [executorsLoading, setExecutorsLoading] = useState(false);
-  const [historyIds, setHistoryIds] = useState<string[]>([]);
+  const [historyRuns, setHistoryRuns] = useState<StoredExperiment[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
   /**
    * Model identifiers served by local executors, keyed by executor id.
@@ -643,6 +681,15 @@ const App = () => {
   const [arenaOpponent, setArenaOpponent] = useState("");
   const [arenaSide, setArenaSide] = useState<"first" | "second">("first");
   const [arenaSeed, setArenaSeed] = useState(7);
+  /**
+   * The stored match archive, and the identifier being opened.
+   *
+   * Loaded alongside the catalog rather than on demand, because a history list that only appears
+   * after a click is not a list. A match survives a restart, so this is populated from the first
+   * render of the panel rather than after the first match of the session.
+   */
+  const [arenaSummaries, setArenaSummaries] = useState<ArenaMatchSummary[]>([]);
+  const [arenaOpeningId, setArenaOpeningId] = useState<string | null>(null);
   // The Security Lab. A sweep runs the registered probes through the real enforcement path.
   const [securityProbes, setSecurityProbes] = useState<SecurityProbeListing[]>([]);
   const [securityReport, setSecurityReport] = useState<SecurityLabReport | null>(null);
@@ -889,6 +936,8 @@ const App = () => {
     setResult(stored);
     setRunState("complete");
     setRunError(null);
+    // A finished run is a stored experiment; refresh the list so it appears immediately.
+    void refreshHistory();
     try {
       const metadata = await invoke<RunMetadata>("get_run_metadata", { run_id: id });
       if (currentRunIdRef.current === id) {
@@ -1003,8 +1052,17 @@ const App = () => {
         // A finished run joins the history, so the history a reload shows includes this session.
         void refreshHistory();
       } catch (error) {
-        setBrainRunning(false);
         setBrainError(`The experiment could not start: ${formatError(error)}`);
+      } finally {
+        /*
+         * Cleared on both paths.
+         *
+         * This only ran in the `catch`, so one successful experiment left `brainRunning` true for the
+         * rest of the session: the run button stayed disabled, the stop control stayed live for a run
+         * that had ended, and anything conditioned on "not running" never appeared again. A run that
+         * succeeded was the case that broke the panel.
+         */
+        setBrainRunning(false);
       }
     },
     [benchmark, selectedStrategy, defaultEpisodes],
@@ -1114,10 +1172,16 @@ const App = () => {
   /**
    * Stored experiment history: identifiers from the durable store, loaded on
    * demand through the same read model the live panel renders.
+   *
+   * The full records are fetched rather than only their identifiers, because a list of opaque ids
+   * cannot answer the question a returning user has — "which of these was mine, and did it pass?".
+   * Everything drawn from a record is a field the backend actually recorded; a missing value is shown
+   * as absent rather than as a zero or a dash that could be mistaken for a measurement.
    */
   const refreshHistory = useCallback(async () => {
     try {
-      setHistoryIds(await listExperiments());
+      const runs = await listStoredExperiments();
+      setHistoryRuns(runs);
       setHistoryError(null);
     } catch (error) {
       setHistoryError(`History is unavailable: ${formatError(error)}`);
@@ -1211,21 +1275,31 @@ const App = () => {
   }, [securityBenchmark]);
 
   /**
-   * Loads the arena catalog and the most recent match.
+   * Loads the arena catalog, the stored match archive, and the most recent match.
    *
    * The agent list is fetched per game from the backend, which is where compatibility lives. The
    * frontend keeps no list of its own, so it cannot offer a pairing the arena would refuse.
+   *
+   * The archive is read here rather than on demand so the history list is populated the first time the
+   * panel is opened, and it is re-read after every match so a newly played one appears at the top
+   * without a reload.
    */
   useEffect(() => {
     let active = true;
-    Promise.all([listArenaGames(), listArenaAgents(arenaGame), latestArenaMatch()])
-      .then(([games, agents, latest]) => {
+    Promise.all([
+      listArenaGames(),
+      listArenaAgents(arenaGame),
+      latestArenaMatch(),
+      listArenaMatches(),
+    ])
+      .then(([games, agents, latest, summaries]) => {
         if (!active) {
           return;
         }
         setArenaGames(games);
         setArenaAgents(agents);
         setArenaMatch(latest);
+        setArenaSummaries(summaries);
         setArenaError(null);
         // Default both seats to a real policy rather than leaving the select empty, but only when the
         // current selection is not itself playable.
@@ -1252,8 +1326,12 @@ const App = () => {
    * Plays one match.
    *
    * The whole match runs in the engine and comes back projected, so there is no local state to fall
-   * out of step with the environment. Changing a seat or the seed clears the displayed match, because
-   * a board from a different configuration sitting under new selectors would be actively misleading.
+   * out of step with the environment. Playing again replaces the displayed match with a genuinely new
+   * engine run — it is never a re-render of the previous one.
+   *
+   * The archive is re-read afterwards so the new match appears in the history list. A failure there
+   * does not fail the match: the match genuinely happened and the caller is holding it, so the
+   * history is left as it was rather than the result being discarded.
    */
   const playArena = useCallback(async () => {
     setArenaPlaying(true);
@@ -1267,6 +1345,11 @@ const App = () => {
         seed: arenaSeed,
       });
       setArenaMatch(result);
+      try {
+        setArenaSummaries(await listArenaMatches());
+      } catch {
+        // The archive is a convenience; the match itself is the result and it is already on screen.
+      }
     } catch (error) {
       setArenaError(`The match could not be played: ${formatError(error)}`);
     } finally {
@@ -1274,6 +1357,48 @@ const App = () => {
     }
   }, [arenaGame, arenaTested, arenaOpponent, arenaSide, arenaSeed]);
 
+  /**
+   * Reopens a stored match into the viewer.
+   *
+   * The identifier travels with the match, which is what makes a recording reachable again. An earlier
+   * build cleared the match whenever a selector changed, so this id was discarded and the recording —
+   * still held by the backend — became impossible to reach from the interface.
+   */
+  const openArenaMatch = useCallback(async (matchId: string) => {
+    setArenaOpeningId(matchId);
+    setArenaError(null);
+    try {
+      setArenaMatch(await getArenaMatch(matchId));
+    } catch (error) {
+      setArenaError(`That match could not be opened: ${formatError(error)}`);
+    } finally {
+      setArenaOpeningId(null);
+    }
+  }, []);
+
+  /**
+   * Whether the displayed match came from a different configuration than the selectors now describe.
+   *
+   * The seed is deliberately excluded. Tic-tac-toe ignores it — its opening does not depend on it — and
+   * the panel says so; treating a seed difference as staleness would flag every match as stale on a
+   * screen where the seed is not exposed anyway.
+   */
+  const arenaStale = useMemo(
+    () =>
+      arenaMatch !== null &&
+      (arenaMatch.testedAgent !== arenaTested ||
+        arenaMatch.opponentAgent !== arenaOpponent ||
+        arenaMatch.testedSide !== arenaSide),
+    [arenaMatch, arenaTested, arenaOpponent, arenaSide],
+  );
+
+  /**
+   * Returns the panel to setup.
+   *
+   * A view operation and nothing else: it drops the displayed match from the screen and leaves the
+   * archive, the telemetry, and every stored recording untouched. Deleting a recorded match is not
+   * something any control on this page does.
+   */
   const clearArenaMatch = useCallback(() => {
     setArenaMatch(null);
   }, []);
@@ -1505,6 +1630,9 @@ const App = () => {
           onCancel={() => void cancelRun()}
           canCancel={brainRunning && brain?.experiment?.experimentId !== undefined}
           onExport={(format) => void exportRun(format)}
+          onCompare={() => {
+            window.location.hash = "#/comparison";
+          }}
 canExport={brain?.experiment !== null && brain?.experiment !== undefined}
         />
   );
@@ -1521,27 +1649,21 @@ canExport={brain?.experiment !== null && brain?.experiment !== undefined}
     <section className="panel history-panel" aria-label="Experiment history">
       <div className="panel-heading">
         <h3>Stored runs</h3>
-        <span className="catalog-count">{historyIds.length.toString().padStart(2, "0")}</span>
+        <span className="catalog-count">{historyRuns.length.toString().padStart(2, "0")}</span>
       </div>
+      <p className="section-note">
+        Every run this machine has recorded, newest first. Loading one brings it back into the
+        reporting panels.
+      </p>
       {historyError ? (
         <p className="panel-note">{historyError}</p>
-      ) : historyIds.length === 0 ? (
-        <p className="panel-note">No stored experiments yet. Finished runs appear here.</p>
       ) : (
-        <ul className="history-list">
-          {historyIds.map((id) => (
-            <li key={id}>
-              <button
-                type="button"
-                className="history-load"
-                onClick={() => void loadHistory(id)}
-                disabled={brainRunning}
-              >
-                <span className="mono">{id}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
+        <ExperimentHistory
+          runs={historyRuns}
+          selectedId={brain?.experiment?.experimentId ?? null}
+          loading={brainRunning}
+          onOpen={(id) => void loadHistory(id)}
+        />
       )}
     </section>
   );
@@ -1553,6 +1675,19 @@ canExport={brain?.experiment !== null && brain?.experiment !== undefined}
           loading={replayLoading}
           canLoad={arenaMatch !== null}
           matchId={arenaMatch?.matchId ?? ""}
+          onViewInArena={async () => {
+            /*
+             * Reopening by identifier, then navigating, rather than only navigating.
+             *
+             * The Replay panel holds a recording the Arena may not currently have on screen — it could
+             * have been superseded by a later match, or loaded from the archive. Carrying the id across
+             * is what guarantees the board the user lands on is the match they asked for.
+             */
+            if (replay?.recordingId) {
+              await openArenaMatch(replay.recordingId);
+            }
+            window.location.hash = "#/arena";
+          }}
         />
   );
   const viewsecurityPanel = (
@@ -1581,30 +1716,30 @@ canExport={brain?.experiment !== null && brain?.experiment !== undefined}
           games={arenaGames}
           agents={arenaAgents}
           match={arenaMatch}
+          matchSummaries={arenaSummaries}
+          openingId={arenaOpeningId}
           error={arenaError}
           playing={arenaPlaying}
+          stale={arenaStale}
           selectedGame={arenaGame}
           selectedTested={arenaTested}
           selectedOpponent={arenaOpponent}
           selectedSide={arenaSide}
           onPlay={() => void playArena()}
           onReset={clearArenaMatch}
-          onGameChange={(game) => {
-            setArenaGame(game);
-            clearArenaMatch();
-          }}
-          onTestedChange={(agent) => {
-            setArenaTested(agent);
-            clearArenaMatch();
-          }}
-          onOpponentChange={(agent) => {
-            setArenaOpponent(agent);
-            clearArenaMatch();
-          }}
-          onSideChange={(side) => {
-            setArenaSide(side);
-            clearArenaMatch();
-          }}
+          onOpenMatch={(matchId) => void openArenaMatch(matchId)}
+          /*
+           * A selector change deliberately does *not* clear the match.
+           *
+           * It used to, and that was the worst bug in the panel: changing a seat after a match
+           * silently destroyed the recording and its identifier, which also made the replay unreachable
+           * even though the backend still held both. The board now stays on screen, marked stale, and
+           * the user decides when to replace it.
+           */
+          onGameChange={setArenaGame}
+          onTestedChange={setArenaTested}
+          onOpponentChange={setArenaOpponent}
+          onSideChange={setArenaSide}
           canPlay={arenaTested !== "" && arenaOpponent !== "" && arenaGames.length > 0}
         />
     </>
@@ -2536,17 +2671,6 @@ return (
           replay: <div className="route-stack">{viewreplayPanel}</div>,
         }}
       />
-
-      <footer className="app-footer">
-        {/*
-          The build's own scope, stated once. It used to sit in the same line as the product name,
-          which made "DESKTOP VERTICAL SLICE" read as a subtitle -- the third of three different
-          descriptions of what this product is. The name now lives in the lockup above, and the footer
-          carries only the claim that actually varies.
-        */}
-        <span>DESKTOP VERTICAL SLICE</span>
-        <span>NO AUTH · NO CLOUD · CONNECTED PROVIDER OPTIONAL</span>
-      </footer>
     </div>
   );
 };

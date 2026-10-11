@@ -73,7 +73,12 @@ describe("ReadinessPanel", () => {
      */
     expect(screen.getByText(/1 of 2 ready/i)).toBeDefined();
     expect(screen.getByText(/no binary/)).toBeDefined();
-    expect(screen.getByText(/install it/)).toBeDefined();
+    // The remedy is stated twice: on its own card, and in the page-level next step that names the
+    // blocker shared by the most executors. Both are wanted, so the assertion is "at least one"
+    // rather than picking a surface.
+    expect(screen.getAllByText(/install it/).length).toBeGreaterThan(0);
+    // And the page answers the question the cards together cannot.
+    expect(screen.getByText(/share one blocker/i)).toBeDefined();
   });
 
   it("renders discovery failure as a state, not an empty panel", () => {

@@ -113,6 +113,50 @@ fn a_weak_policy_loses_and_the_winner_is_named() {
     assert!(played.result.expect("a result").lost());
 }
 
+/// The recorded winning line is the engine's own, and it agrees with the terminal board.
+///
+/// The panel highlights these cells, so they have to come from the engine rather than be re-derived
+/// in the renderer. This asserts the line belongs to the winner, is complete on the final board, and
+/// is the cells the winner actually completed.
+#[test]
+fn a_win_records_the_winning_line_from_the_engine() {
+    let played = play(FIRST_LEGAL, PERFECT, GameSide::First);
+    assert_eq!(played.view.outcome, ArenaOutcome::Loss);
+    let line = played
+        .view
+        .winning_line
+        .expect("a decided match records the line the winner completed");
+    assert_eq!(line.len(), 3);
+    let cells = cells(&played.view.final_board);
+    let winner_mark = match played.view.winner.expect("a winner") {
+        GameSide::First => "First",
+        GameSide::Second => "Second",
+    };
+    for index in line {
+        assert_eq!(
+            cells[usize::from(index)],
+            winner_mark,
+            "cell {index} is not the winner's mark, so this is not a line the winner completed"
+        );
+    }
+    assert_ne!(
+        line[0], line[1],
+        "a line cannot complete on the same cell twice"
+    );
+}
+
+/// A draw has no winning line. Nobody won, so there is nothing to highlight.
+#[test]
+fn a_draw_records_no_winning_line() {
+    let played = play(PERFECT, PERFECT, GameSide::First);
+    assert_eq!(played.view.outcome, ArenaOutcome::Draw);
+    assert_eq!(played.view.winner, None);
+    assert_eq!(
+        played.view.winning_line, None,
+        "a draw must not report a winning line; inventing one would claim a winner nobody had"
+    );
+}
+
 /// A weak policy playing second also loses, which checks the seat handling.
 #[test]
 fn a_weak_policy_also_loses_from_the_second_seat() {

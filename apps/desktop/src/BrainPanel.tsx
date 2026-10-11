@@ -496,6 +496,7 @@ export function BrainPanel({
   canCancel,
   onExport,
   canExport,
+  onCompare,
 }: {
   model: BrainReadModel | null;
   error: string | null;
@@ -528,6 +529,13 @@ export function BrainPanel({
   onExport?: (format: "json" | "csv") => void;
   /** Whether a finished experiment is available to export. */
   canExport?: boolean;
+  /**
+   * Sends the user to the comparison panel.
+   *
+   * Present because comparing is the point of running twice, and a finished run with no route to the
+   * place runs are compared makes the second run something the user has to go and discover.
+   */
+  onCompare?: () => void;
 }) {
   if (error) {
     return (
@@ -696,6 +704,45 @@ export function BrainPanel({
         </div>
       ) : (
         <>
+          {/*
+            What to do with a finished run.
+
+            The facts above already say what happened — score, interval, episodes, duration — and
+            repeating them here would give the panel two places that answer "how did it score", which is
+            how a panel ends up showing two numbers that can disagree. What was missing was not another
+            summary but the decision: a run that finishes leaves the user standing in front of data
+            with no route onward. This is that route.
+
+            So it carries no measurements. It carries the three things a person does with a finished
+            experiment — run it again, put it beside another run, or take it out of the lab — and each
+            is wired to a real command.
+          */}
+          {!running && onCompare ? (
+            <nav className="brain-next" aria-label="What to do with this run">
+              <span className="brain-next-label">Next</span>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={onRun}
+                disabled={!canRun}
+              >
+                RUN AGAIN
+              </button>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={onCompare}>
+                COMPARE RUNS
+              </button>
+              {onExport && canExport ? (
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => onExport("json")}
+                >
+                  EXPORT
+                </button>
+              ) : null}
+            </nav>
+          ) : null}
+
           <section className="brain-section">
             <h3>Current experiment</h3>
             <ExperimentBody experiment={experiment} />

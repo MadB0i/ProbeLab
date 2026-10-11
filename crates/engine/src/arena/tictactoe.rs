@@ -102,6 +102,24 @@ pub fn has_won(cells: &[TicTacToeCell; CELLS], side: GameSide) -> bool {
         .any(|line| line.iter().all(|index| cells[*index] == mark))
 }
 
+/// The three cells a side completed a line on, or `None` when it has not won.
+///
+/// This is the same [`LINES`] table [`has_won`] decides from, read out rather than reduced to a
+/// boolean, so the cells a panel highlights are the cells the engine decided on. A caller that
+/// wanted to draw a winning line had to re-derive it in the renderer; that is exactly the kind of
+/// duplication that agrees with the engine until the two drift apart.
+///
+/// Returns the first completed line in [`LINES`] order when more than one is complete, which cannot
+/// happen in legal play — the move that completes a second line is legal, so it is a property of the
+/// recorded position rather than an assertion about how the match was played.
+pub fn winning_line(cells: &[TicTacToeCell; CELLS], side: GameSide) -> Option<[usize; 3]> {
+    let mark = TicTacToe::mark(side);
+    LINES
+        .iter()
+        .find(|line| line.iter().all(|index| cells[*index] == mark))
+        .copied()
+}
+
 impl super::Game for TicTacToe {
     type State = TicTacToe;
 

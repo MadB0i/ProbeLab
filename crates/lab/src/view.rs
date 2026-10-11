@@ -27,7 +27,7 @@
 
 use std::collections::BTreeMap;
 
-use probelab_core::{IntegrityEventKind, TestResult};
+use probelab_core::{IntegrityEventKind, RunMetadata, TestResult};
 use serde::{Deserialize, Serialize};
 
 use crate::brain::{Anomaly, BrainState};
@@ -92,6 +92,26 @@ impl BrainReadModel {
             findings,
             signals,
             security,
+        }
+    }
+
+    /// Rebuilds a read model from a stored result and its durable metadata.
+    ///
+    /// For a run that a previous process supervised. The live [`ExperimentRun`] is gone; what survived
+    /// is what was written down, and this projects exactly that. Everything the live path recorded in
+    /// memory only — the planner's decisions, the event timeline, per-episode failures — is absent here,
+    /// and is left absent rather than reconstructed.
+    pub fn from_stored(experiment_id: &str, result: &TestResult, metadata: &RunMetadata) -> Self {
+        let experiment = ExperimentView::from_stored(experiment_id, result, metadata);
+        let results = vec![result.clone()];
+        Self {
+            brain_state: BrainState::Completed,
+            next_intent: "idle".to_owned(),
+            experiment: Some(experiment),
+            observed_events: result.telemetry_event_count,
+            findings: Vec::new(),
+            signals: signals_from(&results, &[]),
+            security: SecuritySummary::from_results(&results),
         }
     }
 }
@@ -431,6 +451,62 @@ impl ExperimentView {
                 .map(TimelineEntryView::from)
                 .collect(),
             security: SecuritySummary::from_results(&run.results),
+        }
+    }
+
+    /// Projects a *stored* result back into the panel's view of it.
+    ///
+    /// A run reopened from the history list was supervised by a process that has since exited, so the
+    /// in-memory [`ExperimentRun`] is gone. What survives is the stored bundle: the deterministic result
+    /// and the durable run metadata. This rebuilds the view from exactly those two, and reports absent
+    /// fields as absent.
+    ///
+    /// What it cannot recover is stated by being absent rather than invented: the decisions the planner
+    /// made, the live timeline, and the episode failures are properties of the running process and were
+    /// never written down. A run loaded this way shows its measurements and its provenance, and the
+    /// panel's per-episode rows come from the stored trace — which is what a reader needs to judge it.
+    pub fn from_stored(experiment_id: &str, result: &TestResult, metadata: &RunMetadata) -> Self {
+        let episodes = vec![EpisodeView::from_result(0, result)];
+        let success = result.capability.task_success;
+        let aggregate = ExperimentAggregate::from_results(
+            std::slice::from_ref(result),
+            // A stored single-episode run carries no seed pool, and saying so is better than implying
+            // the run was sampled from one.
+            0.95,
+            None,
+        );
+        Self {
+            experiment_id: experiment_id.to_owned(),
+            benchmark_id: metadata.benchmark_id.clone(),
+            target_agent: metadata.model.clone(),
+            provider: Some(metadata.provider.clone()).filter(|value| !value.is_empty()),
+            model: Some(metadata.model.clone()).filter(|value| !value.is_empty()),
+            probe_agents: Vec::new(),
+            // A stored benchmark result is a single episode. Saying so is the honest count; reporting
+            // the configured episode count would claim a sample size that was never run.
+            episodes_requested: 1,
+            episodes_completed: 1,
+            episodes_failed: 0,
+            mean_success_fraction: Some(f64::from(u8::from(success))),
+            aggregate,
+            lifecycle: ExperimentState::Completed,
+            /*
+             * A stored run reached a terminal state by running to the end of its budget, whether or
+             * not the goal was reached. Reporting only `Completed` for a run that failed its goal
+             * would be the same class of error as calling a failed match a loss: the run completed,
+             * and the *outcome* is carried by the score, which is a separate field. The distinction
+             * this enum exists to draw — "did not finish" versus "finished and did not succeed" — is
+             * drawn by the score, not by inventing a reason here.
+             */
+            terminal_reason: Some(TerminalReason::Completed),
+            // A clock that went backwards would otherwise wrap into an enormous duration, which would read as
+            // a run that took longer than the universe has existed.
+            elapsed_ms: u64::try_from(metadata.ended_at_unix_ms - metadata.started_at_unix_ms).ok(),
+            decisions: Vec::new(),
+            episodes,
+            failures: Vec::new(),
+            timeline: Vec::new(),
+            security: SecuritySummary::from_results(std::slice::from_ref(result)),
         }
     }
 }

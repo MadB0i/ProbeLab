@@ -342,6 +342,33 @@ export function ComparisonPanel() {
     return null;
   };
 
+  /*
+   * What the selection would compare, stated before the button is pressed.
+   *
+   * The refusal is not a change to the panel's behaviour — the gate is untouched and still decides —
+   * but a user who can see that two picked runs differ in benchmark or seed does not have to press
+   * Compare and read a refusal to find out. The preview is descriptive and does not rank anything, so
+   * it cannot be mistaken for the result.
+   */
+  const selectionPreview = useMemo(() => {
+    if (selected.length < 2) {
+      return null;
+    }
+    const picked = experiments.filter((experiment) => selected.includes(experiment.experimentId));
+    const differing: string[] = [];
+    for (const [label, read] of [
+      ["benchmark", (run: StoredExperiment) => run.benchmarkId],
+      ["seed", (run: StoredExperiment) => (run.rootSeed === null ? null : String(run.rootSeed))],
+      ["target agent", (run: StoredExperiment) => run.targetAgent],
+    ] as const) {
+      const values = new Set(picked.map(read));
+      if (values.size > 1) {
+        differing.push(label);
+      }
+    }
+    return { count: picked.length, differing };
+  }, [selected, experiments]);
+
   return (
     <section className="panel compare-panel" aria-label="Comparison">
       <div className="panel-heading">
@@ -421,6 +448,20 @@ export function ComparisonPanel() {
                 : `${selected.length} selected.`}
             </span>
           </div>
+
+          {selectionPreview ? (
+            selectionPreview.differing.length > 0 ? (
+              <div className="compare-preview compare-preview--will-refuse" role="note">
+                <strong>These {selectionPreview.count} runs differ in:</strong>{" "}
+                {selectionPreview.differing.join(", ")}. Comparing them will be refused, because a
+                ranking across a difference in what was measured is not a comparison.
+              </div>
+            ) : (
+              <div className="compare-preview" role="note">
+                These {selectionPreview.count} runs match on benchmark, seed, and target agent, so they can be compared.
+              </div>
+            )
+          ) : null}
 
           {outcome?.kind === "comparable" && <ComparisonTable comparison={outcome.detail} />}
           {outcome?.kind === "not_comparable" && (

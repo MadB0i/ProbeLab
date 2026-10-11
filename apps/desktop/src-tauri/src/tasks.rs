@@ -15,7 +15,9 @@ use probelab_tasks::{
     runner::{TaskPolicy, TaskRunError},
 };
 use serde::{Deserialize, Serialize};
-use tauri::State;
+// `Manager` is what puts `path()` on the handle. Without it the write target would have to be
+// passed in from the frontend, which is the thing this command exists to avoid.
+use tauri::{Manager, State};
 
 use crate::AppState;
 
@@ -34,6 +36,13 @@ pub enum TaskCommandError {
     /// The guided submission could not be imported.
     #[error("the submission could not be imported: {0}")]
     Import(String),
+    /// The package could not be written where it was asked to go.
+    ///
+    /// Its own variant rather than a reuse of [`TaskCommandError::Run`], because a failure to write
+    /// is not a failure to run anything: the task was never executed here, and saying otherwise in
+    /// an error message would misdescribe what happened.
+    #[error("{0}")]
+    Storage(String),
 }
 
 impl Serialize for TaskCommandError {
@@ -254,6 +263,205 @@ pub fn guided_task_package(
     })
 }
 
+/// A package written to disk, and where it landed.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedPackage {
+    /// The directory the package was written into.
+    pub directory: String,
+    /// How many files were written, excluding the manifest.
+    pub file_count: usize,
+}
+
+/// Writes a guided package into a ProbeLab-owned directory and opens nothing.
+///
+/// # Why the directory is chosen here and not by the caller
+///
+/// The package's file names come from the benchmark definition, so a path built from them is a path
+/// built from data. Taking a destination from the frontend would make every one of those names a
+/// traversal candidate. Instead the caller names the benchmark and seed, and this builds
+/// `<Documents>/ProbeLab/Packages/<benchmark>-seed-<n>/`, refusing any component that is not a plain
+/// identifier before it is ever joined onto a path.
+///
+/// # What is written
+///
+/// Exactly the files the package declares, plus one manifest recording what was written and when. No
+/// file is created that the package did not name, and nothing outside the package directory is
+/// touched. A file that exists is refused rather than overwritten, so a second click cannot silently
+/// replace an edited task with a fresh copy.
+/// The directory ProbeLab writes its packages into, or a typed refusal.
+///
+/// Tauri resolves Documents through the shell, which can legitimately fail: a redirected OneDrive
+/// folder whose path the shell cannot resolve returns `None` rather than a wrong path. Falling back to
+/// the application data directory keeps the feature working on such a machine, and the caller is told
+/// which directory it got so the report cannot imply a location nothing was written to.
+fn package_root(app: &tauri::AppHandle) -> Result<std::path::PathBuf, TaskCommandError> {
+    if let Ok(documents) = app.path().document_dir() {
+        if !documents.as_os_str().is_empty() {
+            return Ok(documents.join("ProbeLab").join("Packages"));
+        }
+    }
+    // No resolvable Documents folder. The app data directory always exists and is this product's own.
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join("Packages"))
+        .map_err(|error| {
+            TaskCommandError::Storage(format!(
+                "this machine exposes neither a documents folder nor an application data folder: {error}"
+            ))
+        })
+}
+
+/// Writes a generated package into a ProbeLab-owned folder and opens nothing.
+///
+/// The destination is `<Documents>/ProbeLab/Packages/<benchmark>-seed-<n>/`, falling back to the
+/// application data directory on a machine whose Documents folder the shell cannot resolve. The
+/// caller names the benchmark and seed and nothing else, so no path in this command is supplied by the
+/// frontend.
+///
+/// # What is written
+///
+/// Exactly the files the package declares, plus one manifest. No file is created that the package did
+/// not name, and nothing outside the package directory is touched. A folder that already holds a
+/// package is refused rather than overwritten, so a second click cannot silently replace an edited
+/// task with a fresh copy.
+#[tauri::command(rename_all = "snake_case")]
+pub fn save_guided_package(
+    app: tauri::AppHandle,
+    benchmark_id: String,
+    seed: u64,
+) -> Result<SavedPackage, TaskCommandError> {
+    let package = guided_task_package(benchmark_id.clone(), seed)?;
+    let root = package_root(&app)?;
+
+    // The folder name is built from the benchmark, so it is validated rather than trusted. This is
+    // the only thing standing between a package name and the filesystem.
+    let folder = format!("{}-seed-{}", safe_component(&benchmark_id)?, seed);
+    let directory = root.join(&folder);
+    if !directory.starts_with(&root) {
+        return Err(TaskCommandError::Storage(
+            "the package folder would fall outside the packages directory".to_owned(),
+        ));
+    }
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        TaskCommandError::Storage(format!(
+            "{} could not be created: {error}",
+            directory.display()
+        ))
+    })?;
+
+    // Refused before anything is written, so a folder that already holds a package is left exactly as
+    // it is rather than being half-overwritten by a second click.
+    let manifest_path = directory.join("probelab-package.json");
+    if manifest_path.exists() {
+        return Err(TaskCommandError::Storage(format!(
+            "{} already holds a package; move or delete it before generating another",
+            directory.display()
+        )));
+    }
+
+    let mut written = 0usize;
+    for (relative, contents) in &package.files {
+        let target = resolve_inside(&directory, relative)?;
+        if target.exists() {
+            return Err(TaskCommandError::Storage(format!(
+                "{} already exists; move or delete it before generating the package again",
+                target.display()
+            )));
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                TaskCommandError::Storage(format!(
+                    "{} could not be created: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+        std::fs::write(&target, contents).map_err(|error| {
+            TaskCommandError::Storage(format!(
+                "{} could not be written: {error}",
+                target.display()
+            ))
+        })?;
+        written += 1;
+    }
+
+    let manifest = serde_json::json!({
+        "benchmarkId": package.benchmark_id,
+        "benchmarkVersion": package.benchmark_version,
+        "seed": package.seed,
+        "formatVersion": package.format_version,
+        "fileCount": written,
+        "instructionsFile": "INSTRUCTIONS.md",
+        "note": "Task inputs only. Hidden checks, scoring logic, and credentials are never written \
+                 here; verification stays in ProbeLab.",
+    });
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap_or_default(),
+    )
+    .map_err(|error| {
+        TaskCommandError::Storage(format!(
+            "{} could not be written: {error}",
+            manifest_path.display()
+        ))
+    })?;
+
+    Ok(SavedPackage {
+        directory: directory.to_string_lossy().to_string(),
+        file_count: written,
+    })
+}
+
+/// A path component that is a plain identifier, or an error.
+///
+/// Refuses anything containing a separator, a parent reference, or a character outside the set a
+/// benchmark or seed name can legitimately use. This is what makes the package directory safe to
+/// build from data rather than from a literal.
+fn safe_component(raw: &str) -> Result<String, TaskCommandError> {
+    let usable = !raw.is_empty()
+        && raw.len() <= 64
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if usable {
+        return Ok(raw.to_owned());
+    }
+    Err(TaskCommandError::Storage(format!(
+        "{raw:?} cannot be used as a folder name; only letters, digits, dash, and underscore are allowed"
+    )))
+}
+
+/// Joins a package-relative path onto a directory, refusing anything that escapes it.
+///
+/// The check is on the components rather than on the joined string, so `a/../../b` is refused on the
+/// component that tries to climb out rather than on the separator that made the climb possible.
+fn resolve_inside(
+    directory: &std::path::Path,
+    relative: &str,
+) -> Result<std::path::PathBuf, TaskCommandError> {
+    let refuses = |detail: &str| {
+        TaskCommandError::Storage(format!(
+            "{relative:?} names a location outside the package folder ({detail}); refusing to write it"
+        ))
+    };
+    let candidate = std::path::Path::new(relative);
+    if candidate.is_absolute() {
+        return Err(refuses("absolute path"));
+    }
+    if relative
+        .split(['/', '\\'])
+        .any(|part| part == ".." || part == "~")
+    {
+        return Err(refuses("parent-directory reference"));
+    }
+    let target = directory.join(candidate);
+    if !target.starts_with(directory) {
+        return Err(refuses("resolved outside the package folder"));
+    }
+    Ok(target)
+}
+
 /// A submission for independent verification.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -292,6 +500,87 @@ pub fn score_guided_submission(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /*
+     * The package folder name is built from the benchmark identifier, so it is the one place a
+     * benchmark name becomes a filesystem path. Every shape that could climb out of, or escape, the
+     * packages directory is refused here rather than sanitised into something the caller did not ask
+     * for.
+     */
+    #[test]
+    fn a_folder_name_refuses_anything_that_is_not_a_plain_identifier() {
+        assert_eq!(
+            safe_component("coding-repair").expect("usable"),
+            "coding-repair"
+        );
+        assert_eq!(
+            safe_component("memory_latch9").expect("usable"),
+            "memory_latch9"
+        );
+
+        for hostile in [
+            "",
+            "..",
+            "../escape",
+            "a/b",
+            "a\\b",
+            "C:evil",
+            "with space",
+            "with*glob",
+            "with\0null",
+            "with:colon",
+            "..\\..\\escape",
+        ] {
+            assert!(
+                safe_component(hostile).is_err(),
+                "{hostile:?} must not become a folder name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_folder_name_is_bounded() {
+        // A 300-character name is legal on NTFS but is not a benchmark identifier, and an unbounded
+        // name is how a path limit turns into an error the caller cannot act on.
+        let long = "a".repeat(65);
+        assert!(safe_component(&long).is_err());
+        assert!(safe_component(&"a".repeat(64)).is_ok());
+    }
+
+    /*
+     * Package file names come from the benchmark definition, so every one of them is untrusted input
+     * to a path join. Each of these must be refused rather than written.
+     */
+    #[test]
+    fn a_package_file_path_refuses_to_leave_the_package_folder() {
+        let root = std::path::Path::new("/packages/coding-repair-seed-1");
+
+        for hostile in [
+            "../escape.txt",
+            "..\\escape.txt",
+            "sub/../../escape.txt",
+            "~/escape.txt",
+            "/etc/passwd",
+            "C:\\Windows\\system32\\evil",
+        ] {
+            assert!(
+                resolve_inside(root, hostile).is_err(),
+                "{hostile:?} must not resolve inside the package folder"
+            );
+        }
+    }
+
+    #[test]
+    fn a_package_file_path_that_stays_inside_is_accepted() {
+        let root = std::path::Path::new("/packages/coding-repair-seed-1");
+        for relative in ["task.py", "INSTRUCTIONS.md", "nested/dir/file.txt", "a.b.c"] {
+            let resolved = resolve_inside(root, relative).expect("stays inside");
+            assert!(
+                resolved.starts_with(root),
+                "{relative:?} resolved to {resolved:?}, outside {root:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_task_catalog_lists_both_benchmarks_with_digests() {

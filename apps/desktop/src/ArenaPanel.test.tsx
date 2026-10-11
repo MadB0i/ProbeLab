@@ -7,7 +7,7 @@
  * result when the backend refuses.
  */
 
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -59,9 +59,12 @@ function match(overrides: Partial<ArenaMatchView> = {}): ArenaMatchView {
     plies: 9,
     finalBoard: {
       game: "tic_tac_toe",
-      cells: ["first", "second", "first", "first", "second", "second", "second", "first", "second"],
+      state: {
+        cells: ["first", "second", "first", "first", "second", "second", "second", "first", "second"],
+      },
     },
     winner: null,
+    winningLine: null,
     illegalMoves: [],
     history: [
       {
@@ -69,18 +72,18 @@ function match(overrides: Partial<ArenaMatchView> = {}): ArenaMatchView {
         side: "first",
         board: {
           game: "tic_tac_toe",
-          cells: ["first", "empty", "empty", "empty", "empty", "empty", "empty", "empty", "empty"],
+          state: { cells: ["first", "empty", "empty", "empty", "empty", "empty", "empty", "empty", "empty"] },
         },
-        played: { tic_tac_toe: 0 },
+        played: { game: "tic_tac_toe", move: 0 },
       },
       {
         ply: 2,
         side: "second",
         board: {
           game: "tic_tac_toe",
-          cells: ["first", "second", "empty", "empty", "empty", "empty", "empty", "empty", "empty"],
+          state: { cells: ["first", "second", "empty", "empty", "empty", "empty", "empty", "empty", "empty"] },
         },
-        played: { tic_tac_toe: 1 },
+        played: { game: "tic_tac_toe", move: 1 },
       },
     ],
     timeline: [
@@ -108,6 +111,9 @@ function renderPanel(props: Partial<Parameters<typeof ArenaPanel>[0]> = {}) {
       games={[GAME]}
       agents={[PERFECT, FIRST_LEGAL]}
       match={null}
+      matchSummaries={[]}
+      openingId={null}
+      stale={false}
       error={null}
       playing={false}
       selectedGame="tic_tac_toe"
@@ -116,6 +122,7 @@ function renderPanel(props: Partial<Parameters<typeof ArenaPanel>[0]> = {}) {
       selectedSide="first"
       onPlay={() => {}}
       onReset={() => {}}
+      onOpenMatch={() => {}}
       onGameChange={() => {}}
       onTestedChange={() => {}}
       onOpponentChange={() => {}}
@@ -139,15 +146,15 @@ describe("board helpers", () => {
   });
 
   it("reads a tic-tac-toe board and refuses anything else", () => {
-    const cells = ticTacToeCells({ game: "tic_tac_toe", cells: ["empty", "first"] });
+    const cells = ticTacToeCells({ game: "tic_tac_toe", state: { cells: ["empty", "first"] } });
     expect(cells).toBeNull();
     // An unimplemented game must not be coerced into a board of the wrong size.
-    expect(ticTacToeCells({ game: "connect_four", cells: [] })).toBeNull();
+    expect(ticTacToeCells({ game: "connect_four" })).toBeNull();
     expect(ticTacToeCells(null)).toBeNull();
     expect(
       ticTacToeCells({
         game: "tic_tac_toe",
-        cells: new Array(9).fill("empty"),
+        state: { cells: new Array(9).fill("empty") },
       }),
     ).toHaveLength(9);
   });
@@ -156,13 +163,28 @@ describe("board helpers", () => {
     // The backend indexes cells from zero; the panel speaks in one-based cells so it matches what a
     // human counts, and says so rather than silently shifting.
     expect(
-      moveLabel({ ply: 1, side: "first", board: { game: "tic_tac_toe", cells: [] }, played: { tic_tac_toe: 4 } }),
+      moveLabel({
+        ply: 1,
+        side: "first",
+        board: { game: "tic_tac_toe", state: { cells: [] } },
+        played: { game: "tic_tac_toe", move: 4 },
+      }),
     ).toBe("cell 5");
     expect(
-      moveLabel({ ply: 1, side: "first", board: { game: "tic_tac_toe", cells: [] }, played: null }),
+      moveLabel({
+        ply: 1,
+        side: "first",
+        board: { game: "tic_tac_toe", state: { cells: [] } },
+        played: null,
+      }),
     ).toMatch(/no move/);
     expect(
-      moveLabel({ ply: 1, side: "first", board: { game: "tic_tac_toe", cells: [] }, played: {} }),
+      moveLabel({
+        ply: 1,
+        side: "first",
+        board: { game: "tic_tac_toe", state: { cells: [] } },
+        played: {},
+      }),
     ).toMatch(/not identified/);
   });
 });
@@ -232,17 +254,31 @@ describe("ArenaPanel — no human seat", () => {
 });
 
 describe("ArenaPanel — board rendering", () => {
+  /*
+   * Playback opens on the opening position, so a test that wants the final board has to seek to it.
+   * Going through the real transport rather than a prop is deliberate: it exercises the control the
+   * user actually presses, so "the last frame shows the final board" is a claim about the panel rather
+   * than about a test-only shortcut.
+   */
+  function seekToEnd() {
+    const end = screen.getByLabelText("Go to the last frame");
+    expect(end).not.toBeDisabled();
+    fireEvent.click(end);
+  }
+
   it("renders the engine's board, not a locally derived one", () => {
     renderPanel({ match: match() });
+    seekToEnd();
     const cells = document.querySelectorAll(".arena-cell");
     expect(cells).toHaveLength(9);
-    // The fixture's board is X O X / X O O / O X O.
+    // The fixture's final board is X O X / X O O / O X O.
     const marks = Array.from(cells).map((cell) => cell.querySelector(".arena-cell-mark")!.textContent);
     expect(marks).toEqual(["X", "O", "X", "X", "O", "O", "O", "X", "O"]);
   });
 
   it("describes each cell for assistive technology, so the board is not colour-only", () => {
     renderPanel({ match: match() });
+    seekToEnd();
     const board = screen.getByRole("img", { name: /board/i });
     expect(board).toBeInTheDocument();
     expect(screen.getByLabelText("Cell 1: X")).toBeInTheDocument();
@@ -259,16 +295,17 @@ describe("ArenaPanel — board rendering", () => {
         plies: 1,
         finalBoard: {
           game: "tic_tac_toe",
-          cells: ["first", "empty", "empty", "empty", "empty", "empty", "empty", "empty", "empty"],
+          state: { cells: ["first", "empty", "empty", "empty", "empty", "empty", "empty", "empty", "empty"] },
         },
       }),
     });
+    seekToEnd();
     expect(screen.getByLabelText("Cell 5: empty")).toBeInTheDocument();
   });
 
   it("refuses to draw a board it does not understand", () => {
     renderPanel({
-      match: match({ finalBoard: { game: "connect_four", cells: [] } }),
+      match: match({ finalBoard: { game: "connect_four" }, history: [] }),
     });
     expect(document.querySelector(".arena-board")).toBeNull();
     expect(screen.getByText(/cannot draw/i)).toBeInTheDocument();
@@ -280,16 +317,20 @@ describe("ArenaPanel — board rendering", () => {
         outcome: "no_result",
         failure: "illegal move",
         plies: 1,
+        history: [],
         finalBoard: {
           game: "tic_tac_toe",
-          cells: ["first", "empty", "empty", "empty", "empty", "empty", "empty", "empty", "empty"],
+          state: { cells: ["first", "empty", "empty", "empty", "empty", "empty", "empty", "empty", "empty"] },
         },
       }),
     });
+    // One recorded position and no transport to seek with: the board itself is the whole recording,
+    // and it is the terminal board.
     const cells = document.querySelectorAll(".arena-cell");
     expect(cells).toHaveLength(9);
     expect(cells[0].querySelector(".arena-cell-mark")!.textContent).toBe("X");
     expect(cells[8].querySelector(".arena-cell-mark")!.textContent).toBe("");
+    expect(screen.getByText(/nothing to step through/i)).toBeInTheDocument();
   });
 });
 

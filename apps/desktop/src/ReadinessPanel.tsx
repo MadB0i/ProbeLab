@@ -8,7 +8,7 @@
  * not.
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import type { ExecutorDescriptor, GuestIsolation, PreflightReport } from "./api";
 import { inspectGuestIsolation, preflightExecutor } from "./api";
@@ -109,6 +109,7 @@ export function ReadinessPanel({
   const [checkError, setCheckError] = useState<string | null>(null);
   const [guest, setGuest] = useState<GuestIsolation | null>(null);
   const [guestChecking, setGuestChecking] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
 
   if (error) {
     return (
@@ -130,6 +131,61 @@ export function ReadinessPanel({
   const groups = groupByMode(executors);
   const ready = executors.filter((executor) => executor.availability.state === "available").length;
   const restricted = executors.filter(isRestricted).length;
+
+  /*
+    * The remedy that would unblock the most unavailable executors.
+    *
+    * Chosen by how many cards carry the same remedy, so a single missing credential is surfaced once
+    * with its real reach rather than nine times in nine cards. An environment-variable remedy names
+    * the variable so it can be copied rather than transcribed.
+    */
+  const nextStep = useMemo(() => {
+    const byRemedy = new Map<
+      string,
+      { remedy: string; envVar: string | null; count: number }
+    >();
+    for (const executor of executors) {
+      // `remedy` only exists on the unavailable variant; narrowing rather than reading it off the
+      // union keeps this from silently treating `null` on an available executor as a blocker.
+      const availability = executor.availability;
+      if (availability.state !== "unavailable") {
+        continue;
+      }
+      const remedy = availability.remedy;
+      if (!remedy) {
+        continue;
+      }
+      const envVar = /environment variable|API_KEY|api key/i.test(remedy)
+        ? (remedy.match(/[A-Z][A-Z0-9_]{5,}/)?.[0] ?? null)
+        : null;
+      const existing = byRemedy.get(remedy);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        byRemedy.set(remedy, { remedy, envVar, count: 1 });
+      }
+    }
+    const best = [...byRemedy.values()].sort((a, b) => b.count - a.count)[0];
+    if (!best) {
+      return null;
+    }
+    return {
+      text: `${best.count} of ${executors.length - ready} unavailable executors share one blocker: ${best.remedy}`,
+      envVar: best.envVar,
+      route: best.envVar ? ("settings" as const) : ("lab" as const),
+      routeLabel: best.envVar ? "SETTINGS" : "THE LAB",
+    };
+  }, [executors, ready]);
+
+  const copyEnvVar = async (name: string) => {
+    try {
+      await navigator.clipboard.writeText(name);
+      setCopied(name);
+      setTimeout(() => setCopied(null), 1800);
+    } catch {
+      setCopied(null);
+    }
+  };
 
   const runPreflight = async (id: string) => {
     setChecking(id);
@@ -175,22 +231,16 @@ export function ReadinessPanel({
         should learn what is runnable and what is not without opening a single card.
       */}
       <div className="readiness-overview">
-        <div className="readiness-stat">
-          <span className="readiness-stat-value" style={{ color: "#0d7a60" }}>
-            {ready}
-          </span>
+        <div className={`readiness-stat${ready > 0 ? " is-ready" : ""}`}>
+          <span className="readiness-stat-value">{ready}</span>
           <span className="readiness-stat-label">Can run now</span>
         </div>
-        <div className="readiness-stat">
-          <span className="readiness-stat-value" style={{ color: "var(--ink-2)" }}>
-            {executors.length - ready}
-          </span>
+        <div className={`readiness-stat${executors.length - ready > 0 ? " is-warn" : ""}`}>
+          <span className="readiness-stat-value">{executors.length - ready}</span>
           <span className="readiness-stat-label">Unavailable</span>
         </div>
-        <div className="readiness-stat">
-          <span className="readiness-stat-value" style={{ color: "var(--ink-2)" }}>
-            {restricted}
-          </span>
+        <div className={`readiness-stat${restricted > 0 ? " is-off" : ""}`}>
+          <span className="readiness-stat-value">{restricted}</span>
           <span className="readiness-stat-label">Restricted by policy</span>
         </div>
         <p className="readiness-overview-note">
@@ -198,6 +248,56 @@ export function ReadinessPanel({
           Offline, agent and guided modes need no API key.
         </p>
       </div>
+
+      {/*
+        The single next action.
+
+        Every card below carries its own remedy, so the facts are all present — but that puts the
+        answer in nine places and none of them is *the* answer. A reader who arrives asking "what do I
+        do about the eight that are unavailable" has to collect eight remedies and decide which one
+        unblocks the most. This names the one with the broadest effect and offers the control that
+        performs it, so the page answers a question rather than only reporting state.
+
+        It is deliberately the most common remedy, not the first one. Taking the first would be simpler
+        to write and would help whoever happens to be alphabetically first.
+      */}
+      {nextStep ? (
+        <div className="readiness-next" role="note">
+          <span className="readiness-next-label">Next step</span>
+          <p>{nextStep.text}</p>
+          <div className="readiness-next-actions">
+            {nextStep.envVar ? (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => void copyEnvVar(nextStep.envVar as string)}
+              >
+                {copied === nextStep.envVar ? "COPIED" : `COPY ${nextStep.envVar}`}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => {
+                window.location.hash = "#/settings";
+              }}
+            >
+              OPEN SETTINGS
+            </button>
+            {nextStep.route ? (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => {
+                  window.location.hash = `#/${nextStep.route}`;
+                }}
+              >
+                GO TO {nextStep.routeLabel ?? nextStep.route.toUpperCase()}
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       {groups.map((group) => (
         <section key={group.mode} className="readiness-group">

@@ -16,7 +16,9 @@ use probelab_core::{
     Action, GameBoard, GameKind, GameMove, GameSide, ModelDecision, ModelProvider, ModelRequest,
     TelemetryEvent, TelemetryRecorder, TicTacToeCell,
 };
-use probelab_engine::arena::tictactoe::{PerfectTicTacToe, TicTacToe, MAX_PLIES};
+use probelab_engine::arena::tictactoe::{
+    has_won, winning_line, PerfectTicTacToe, TicTacToe, MAX_PLIES,
+};
 use probelab_engine::arena::{play_match, Game, MatchConfig, MatchOutcome, NullRecorder};
 
 /// Thirty matches. The rules have no seed dependence, so every match is the same game; the count is
@@ -572,4 +574,75 @@ fn ttt_the_opening_board_is_nine_empty_cells() {
     };
     assert_eq!(cells.len(), 9);
     assert!(cells.iter().all(|cell| *cell == TicTacToeCell::Empty));
+}
+
+/// The winning line is read out of the same table `has_won` decides from.
+///
+/// The panel highlights these cells, so they have to be the engine's answer rather than a second
+/// opinion drawn in the renderer. This asserts they agree, for every completed line.
+#[test]
+fn ttt_the_winning_line_agrees_with_whether_a_side_has_won() {
+    let all_lines: [[usize; 3]; 8] = [
+        [0, 1, 2],
+        [3, 4, 5],
+        [6, 7, 8],
+        [0, 3, 6],
+        [1, 4, 7],
+        [2, 5, 8],
+        [0, 4, 8],
+        [2, 4, 6],
+    ];
+    for line in all_lines {
+        for side in [GameSide::First, GameSide::Second] {
+            let mark = if side == GameSide::First {
+                TicTacToeCell::First
+            } else {
+                TicTacToeCell::Second
+            };
+            let mut cells = [TicTacToeCell::Empty; 9];
+            for index in line {
+                cells[index] = mark;
+            }
+            assert!(
+                has_won(&cells, side),
+                "a completed line {line:?} must count as a win for {side:?}"
+            );
+            let reported = winning_line(&cells, side).expect("a completed line is reported");
+            let mut sorted_reported = reported;
+            sorted_reported.sort_unstable();
+            let mut sorted_expected = line;
+            sorted_expected.sort_unstable();
+            assert_eq!(
+                sorted_reported, sorted_expected,
+                "the reported line must be the cells the engine decided on"
+            );
+            // Every reported cell really is that side's mark, which is what a renderer highlights.
+            for index in reported {
+                assert_eq!(cells[index], mark);
+            }
+        }
+    }
+}
+
+/// An undecided position has no winning line, rather than an empty or invented one.
+#[test]
+fn ttt_an_undecided_position_reports_no_winning_line() {
+    let mut cells = [TicTacToeCell::Empty; 9];
+    cells[0] = TicTacToeCell::First;
+    cells[4] = TicTacToeCell::Second;
+    for side in [GameSide::First, GameSide::Second] {
+        assert!(!has_won(&cells, side));
+        assert_eq!(winning_line(&cells, side), None);
+    }
+}
+
+/// A board one mark short of a line is not a win, and reports no line.
+#[test]
+fn ttt_a_near_miss_is_not_reported_as_a_win() {
+    let mut cells = [TicTacToeCell::Empty; 9];
+    cells[0] = TicTacToeCell::First;
+    cells[1] = TicTacToeCell::First;
+    cells[2] = TicTacToeCell::Empty;
+    assert!(!has_won(&cells, GameSide::First));
+    assert_eq!(winning_line(&cells, GameSide::First), None);
 }

@@ -218,6 +218,12 @@ pub struct ArenaMatchView {
     pub final_board: GameBoard,
     /// The side that won, when there is one.
     pub winner: Option<GameSide>,
+    /// The three cells the winner completed a line on, when the game has lines.
+    ///
+    /// Produced by the engine's own winning-line rule rather than by the panel. The renderer used to
+    /// have to be told nothing about a result and inferred everything from the final board, which
+    /// meant a highlight drawn in the UI was a second, unaudited opinion about who won what.
+    pub winning_line: Option<[u8; 3]>,
     /// Illegal moves the tested side returned.
     pub illegal_moves: Vec<IllegalMoveView>,
     /// The recorded ply history, in order.
@@ -283,6 +289,19 @@ impl ArenaMatchView {
             Some(GameSide::Second) => "second",
         });
         absorb(&self.plies.to_string());
+        // The winning line is part of the result the panel renders, so a recording claiming a
+        // different line has to move the digest for the same reason a changed outcome does.
+        absorb(
+            self.winning_line
+                .map(|line| {
+                    line.iter()
+                        .map(|cell| cell.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default()
+                .as_str(),
+        );
         absorb(
             serde_json::to_string(&self.final_board)
                 .unwrap_or_default()
@@ -630,6 +649,9 @@ impl ArenaRunner {
                         result.illegal_moves.len()
                     ),
                 ));
+                // Read out of the terminal board before it is moved into the view: the winning line
+                // is the engine's own answer about that position, not a second opinion drawn later.
+                let winning_line = winning_line_for(&final_board, result.outcome, spec.tested_side);
                 Ok(ArenaMatch {
                     view: ArenaMatchView {
                         match_id: spec.match_id.clone(),
@@ -651,6 +673,7 @@ impl ArenaRunner {
                             MatchOutcome::Loss => Some(spec.tested_side.other()),
                             MatchOutcome::Draw => None,
                         },
+                        winning_line,
                         illegal_moves: result
                             .illegal_moves
                             .iter()
@@ -705,6 +728,8 @@ impl ArenaRunner {
                             .map(|ply| ply.board.clone())
                             .unwrap_or(GameBoard::TicTacToe { cells: vec![] }),
                         winner: None,
+                        // A match that failed has no winner, so it has no winning line either.
+                        winning_line: None,
                         illegal_moves: illegal,
                         history: plies.iter().map(PlyView::from).collect(),
                         timeline: timeline.events().to_vec(),
@@ -726,6 +751,37 @@ fn empty_tictactoe_board() -> GameBoard {
     GameBoard::TicTacToe {
         cells: vec![probelab_core::TicTacToeCell::Empty; 9],
     }
+}
+
+/// The cells a winner completed, read out of the engine's own winning-line rule.
+///
+/// `None` for a draw, for a loss, and for any game without lines — a board nobody won on has no
+/// winning line, and inventing one from the final position would be a claim the engine never made.
+fn winning_line_for(
+    board: &GameBoard,
+    outcome: MatchOutcome,
+    tested_side: GameSide,
+) -> Option<[u8; 3]> {
+    if outcome == MatchOutcome::Draw {
+        return None;
+    }
+    let GameBoard::TicTacToe { cells } = board else {
+        return None;
+    };
+    if cells.len() != 9 {
+        return None;
+    }
+    let mut fixed: [probelab_core::TicTacToeCell; 9] = [probelab_core::TicTacToeCell::Empty; 9];
+    for (slot, cell) in fixed.iter_mut().zip(cells.iter()) {
+        *slot = *cell;
+    }
+    let winner = match outcome {
+        MatchOutcome::Win => tested_side,
+        MatchOutcome::Loss => tested_side.other(),
+        MatchOutcome::Draw => return None,
+    };
+    probelab_engine::arena::tictactoe::winning_line(&fixed, winner)
+        .map(|line| line.map(|index| index as u8))
 }
 impl Default for ArenaRunner {
     fn default() -> Self {

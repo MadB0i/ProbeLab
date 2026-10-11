@@ -131,24 +131,79 @@ pub fn brain_panel(state: State<'_, AppState>) -> BrainReadModel {
 
 /// Returns one experiment's read model by identifier.
 ///
+/// Reads the Brain's in-memory surface first, then the durable store. The fallback is what makes a
+/// stored run loadable after a restart: the surface only knows about runs supervised by *this*
+/// process, while the history list is populated from the durable store, so a run from an earlier
+/// session was listed but could not be opened — the panel said the run did not exist when it did.
+///
 /// See [`brain_panel`] for why this takes `State<AppState>`.
 #[tauri::command(rename_all = "snake_case")]
 pub fn get_experiment(
     state: State<'_, AppState>,
     experiment_id: String,
 ) -> Result<BrainReadModel, BrainCommandError> {
-    state.brain.experiment(&experiment_id).ok_or_else(|| {
-        BrainCommandError::not_found(format!("no experiment named {experiment_id:?}"))
-    })
+    if let Some(model) = state.brain.experiment(&experiment_id) {
+        return Ok(model);
+    }
+    load_stored_experiment(&state, &experiment_id)
 }
 
-/// Lists experiment identifiers, newest first, so a finished run stays reachable after it ends.
+/// Rebuilds a read model from a stored result.
 ///
-/// See [`brain_panel`] for why this takes `State<AppState>`.
-#[tauri::command(rename_all = "snake_case")]
-pub fn list_experiments(state: State<'_, AppState>) -> Vec<String> {
-    state.brain.experiment_ids()
+/// The stored bundle is the run's own projection, projected through the same view the live panel uses,
+/// so a run reopened from history is rendered identically to the run that produced it. A result the
+/// store does not hold is reported as absent rather than reconstructed from partial fields.
+fn load_stored_experiment(
+    state: &AppState,
+    experiment_id: &str,
+) -> Result<BrainReadModel, BrainCommandError> {
+    let result = state
+        .results
+        .get(experiment_id)
+        .map_err(|error| {
+            BrainCommandError::execution(format!("the stored result could not be read: {error}"))
+        })?
+        .ok_or_else(|| {
+            BrainCommandError::not_found(format!("no experiment named {experiment_id:?}"))
+        })?;
+    let metadata = state
+        .results
+        .get_metadata(experiment_id)
+        .map_err(|error| {
+            BrainCommandError::execution(format!(
+                "the stored run metadata could not be read: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
+            BrainCommandError::not_found(format!(
+                "run {experiment_id:?} has a result but no recorded run metadata"
+            ))
+        })?;
+    Ok(BrainReadModel::from_stored(
+        experiment_id,
+        &result,
+        &metadata,
+    ))
 }
+
+/*
+ * One command answers "what runs exist".
+ *
+ * This module used to expose `list_experiments`, returning bare identifiers, alongside
+ * `list_comparable_experiments`, which returns full records. They disagreed: this one read the
+ * Brain's in-memory surface and knew only about runs supervised by *this* process, while the history
+ * the user actually saw was rendered from the durable store. After a restart the second still held
+ * every run while the first returned an empty or partial set — and because nothing crashed and every
+ * number on screen was correct, the history was simply always empty.
+ *
+ * Removing it was the fix, not aligning it. Two commands whose names both say "list experiments" are
+ * two answers to one question, and the thinner answer is never the one a panel wants: lifecycle,
+ * episodes, score and timestamp cannot be derived from an identifier, and a run that is listed but
+ * cannot be reopened is worse than one that is not listed at all.
+ *
+ * The session surface remains the authority for *live* state — whether a run is in progress right now
+ * — which is a different question and is answered by [`brain_panel`].
+ */
 
 /// The agent identifier a connected run registers its model under.
 ///
@@ -369,7 +424,11 @@ pub async fn run_experiment(
             target_agent: Some(running_agent),
             root_seed: request_root_seed,
         }) {
-            tracing::error!(error = %error, "could not persist the terminal experiment state");
+            tracing::error!(
+                error = %error,
+                run = %run_id,
+                "could not persist the terminal experiment state"
+            );
         }
     }
     if let Err(error) = app.emit(BRAIN_EVENT, result.clone()) {
@@ -798,6 +857,50 @@ mod tests {
         assert_eq!(panel.observed_events, 0);
         assert!(surface.experiment_ids().is_empty());
         assert!(surface.experiment("nope").is_none());
+    }
+
+    /*
+     * Exactly one command may answer "what runs exist", and it must read the durable store.
+     *
+     * The regression that made the stored-runs list permanently empty was not a crash or a wrong
+     * shape: it was two commands with the same name answering from two different stores. The thinner
+     * one is gone; this asserts it stays gone, and that the one that remains reads the record rather
+     * than the session surface.
+     *
+     * Checked against the source because the failure is invisible at run time — every run succeeds and
+     * every number is right while the list stays empty. This is the same source-scan approach
+     * `arena.rs` uses to prove a command cannot steer an authorization.
+     */
+    #[test]
+    fn exactly_one_experiment_listing_exists_and_it_reads_the_durable_store() {
+        let source = include_str!("brain.rs");
+        // The needle is assembled rather than written out, because this test quotes it in its own
+        // source and a literal would match itself forever.
+        let listing_signature = format!("pub fn list_{}experiments(", "");
+        assert!(
+            !source.contains(&listing_signature),
+            "a second experiment listing would be a second answer to one question; \
+             list_comparable_experiments is the one"
+        );
+
+        let comparison = include_str!("comparison.rs");
+        let listing = comparison
+            .split("pub fn list_comparable_experiments")
+            .nth(1)
+            .expect("the comparison listing exists")
+            .split("/// Compares two or more")
+            .next()
+            .expect("it has a body");
+        assert!(
+            listing.contains("state") && listing.contains(".results"),
+            "the experiment listing must read the durable store, or a run is unreachable after a \
+             restart:\n{listing}"
+        );
+        assert!(
+            !listing.contains("state.brain"),
+            "the experiment listing must not read the session surface, which forgets every run the \
+             moment the process exits:\n{listing}"
+        );
     }
 
     #[test]

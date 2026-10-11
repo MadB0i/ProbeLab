@@ -1005,6 +1005,7 @@ fn drawn_match() -> probelab_lab::ArenaMatchView {
             cells: cells.clone(),
         },
         winner: None,
+        winning_line: None,
         illegal_moves: Vec::new(),
         history: vec![probelab_lab::PlyView {
             ply: 1,

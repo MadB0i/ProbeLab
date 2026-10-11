@@ -13,11 +13,25 @@
  * inviting-looking board that does nothing, because a grid of apparently-interactive squares that
  * silently ignore clicks is worse than a static one.
  *
- * # No winning line
+ * # A match survives a configuration change
  *
- * The backend's `GameBoard` does not expose a winning line, and one is not synthesised here for the
- * sake of an animation. If a future game needs it, it belongs in the read model as a real field the
- * engine produces — not in the renderer.
+ * Changing a seat does not discard the match on screen. An earlier build cleared it, which meant that
+ * adjusting a selector after a match silently destroyed the recording and orphaned its replay: the
+ * backend still held it and the panel had thrown away the only key to it. The configuration and the
+ * displayed match are now separate facts, and a mismatch is *stated* — a stale board is dimmed and
+ * labelled with the configuration it came from, so the user decides when to replace it rather than
+ * discovering later that it is gone.
+ *
+ * # Playback replays; it does not re-run
+ *
+ * `usePlayback` steps through the recorded positions. It contacts no backend and holds no engine, so
+ * it cannot produce a match the recording does not already contain.
+ *
+ * # No winning line is synthesised
+ *
+ * `ArenaMatchView.winningLine` comes from the engine's own winning-line rule. If it is absent, no line
+ * is drawn: a board nobody completed a line on has no line, and inferring one in the renderer would be
+ * a second opinion about the result.
  *
  * # No score
  *
@@ -25,13 +39,17 @@
  * the plies, and the illegal moves, which are the facts the engine actually produced.
  */
 
+import { useMemo, useState } from "react";
+
 import type {
   ArenaAgentSummary,
   ArenaGameSummary,
+  ArenaMatchSummary,
   ArenaMatchView,
   GameCell,
   PlyView,
 } from "./api";
+import { PLAYBACK_SPEEDS, playbackFrames, usePlayback, type PlaybackSpeedLabel } from "./usePlayback";
 
 /** The glyph a cell shows. Derived from the backend's own enum names. */
 export function cellGlyph(cell: GameCell): string {
@@ -60,7 +78,7 @@ export function ticTacToeCells(board: PlyView["board"] | null): GameCell[] | nul
   if (!board || board.game !== "tic_tac_toe") {
     return null;
   }
-  const cells = (board as { cells?: unknown }).cells;
+  const cells = (board as { state?: { cells?: unknown } }).state?.cells;
   if (!Array.isArray(cells) || cells.length !== 9) {
     return null;
   }
@@ -98,32 +116,116 @@ export function outcomeGloss(match: ArenaMatchView): string {
   }
 }
 
+/** How the tested policy did, in words a reader can act on. */
+export function testedResultLabel(match: ArenaMatchView): string {
+  switch (match.outcome) {
+    case "win":
+      return "Under test WON";
+    case "loss":
+      return "Under test LOST";
+    case "draw":
+      return "Under test DREW";
+    default:
+      return "Under test: no result";
+  }
+}
+
 /** Describes a move in the game's own vocabulary, or reports the absence honestly. */
 export function moveLabel(ply: PlyView): string {
   if (!ply.played) {
     return "no move on this ply";
   }
-  const index = (ply.played as { tic_tac_toe?: number }).tic_tac_toe;
-  if (typeof index !== "number") {
+  const move = (ply.played as { move?: unknown }).move;
+  if (typeof move !== "number") {
     return "move not identified";
   }
-  return `cell ${index + 1}`;
+  return `cell ${move + 1}`;
 }
 
-function Board({ cells }: { cells: GameCell[] }) {
+/** The cell index a ply played in, when the engine named one. */
+function playedCell(ply: PlyView | null): number | null {
+  if (!ply?.played) {
+    return null;
+  }
+  const move = (ply.played as { move?: unknown }).move;
+  return typeof move === "number" && move >= 0 && move <= 8 ? move : null;
+}
+
+/**
+ * An identifier short enough to read on a panel, with the rest still reachable.
+ *
+ * A match id now carries a timestamp and a counter, so the full string runs past twenty characters
+ * and used to wrap across four lines inside a narrow telemetry card. The tail is kept because it is
+ * the part that distinguishes two matches of the same seed.
+ */
+export function shortId(id: string, keep = 14): string {
+  if (id.length <= keep + 1) {
+    return id;
+  }
+  return `${id.slice(0, keep)}…`;
+}
+
+/** When a match was played, or an honest "unknown" rather than a fabricated relative time. */
+export function recordedLabel(unixMs: number, now = Date.now()): string {
+  if (!Number.isFinite(unixMs) || unixMs <= 0) {
+    return "time not recorded";
+  }
+  const elapsed = now - unixMs;
+  if (elapsed < 0) {
+    return new Date(unixMs).toLocaleString();
+  }
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 1) {
+    return "just now";
+  }
+  if (minutes < 60) {
+    return `${minutes} min ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours} h ago`;
+  }
+  const days = Math.floor(hours / 24);
+  if (days < 30) {
+    return `${days} d ago`;
+  }
+  return new Date(unixMs).toLocaleDateString();
+}
+
+function Board({
+  cells,
+  winningLine,
+  lastMove,
+}: {
+  cells: GameCell[];
+  winningLine: readonly number[] | null;
+  lastMove: number | null;
+}) {
+  const winning = useMemo(() => new Set(winningLine ?? []), [winningLine]);
   return (
     <div className="arena-board" role="img" aria-label="Tic-tac-toe board">
-      {cells.map((cell, index) => (
-        <div
-          key={index}
-          className={`arena-cell arena-cell--${cell}`}
-          // The cell index is the backend's own coordinate, so the accessible name matches the rules
-          // the engine applied rather than a UI-invented numbering.
-          aria-label={`Cell ${index + 1}: ${cell === "empty" ? "empty" : cellGlyph(cell)}`}
-        >
-          <span className="arena-cell-mark">{cellGlyph(cell)}</span>
-        </div>
-      ))}
+      {cells.map((cell, index) => {
+        const classes = ["arena-cell", `arena-cell--${cell}`];
+        if (winning.has(index)) {
+          classes.push("arena-cell--winning");
+        }
+        if (lastMove === index) {
+          classes.push("arena-cell--latest");
+        }
+        return (
+          <div
+            key={index}
+            className={classes.join(" ")}
+            // The cell index is the backend's own coordinate, so the accessible name matches the rules
+            // the engine applied rather than a UI-invented numbering.
+            aria-label={`Cell ${index + 1}: ${cell === "empty" ? "empty" : cellGlyph(cell)}${
+              winning.has(index) ? ", winning line" : ""
+            }${lastMove === index ? ", last move played" : ""}`}
+          >
+            <span className="arena-cell-mark">{cellGlyph(cell)}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -154,11 +256,36 @@ function Seat({
 }
 
 function Telemetry({ match }: { match: ArenaMatchView }) {
+  const [copied, setCopied] = useState(false);
+
+  /*
+   * Copying the full identifier is the only way to get it out of the panel, and it is worth having:
+   * the id is what ties a match to its recording and to a support question.
+   */
+  const copyId = async () => {
+    try {
+      await navigator.clipboard.writeText(match.matchId);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setCopied(false);
+    }
+  };
+
   return (
     <div className="arena-telemetry">
-      <div className="arena-telemetry-card">
+      <div className="arena-telemetry-card arena-telemetry-card--wide">
         <span className="telemetry-label">Match</span>
-        <span className="telemetry-value mono">{match.matchId}</span>
+        <button
+          type="button"
+          className="telemetry-value telemetry-copy"
+          onClick={() => void copyId()}
+          title={match.matchId}
+          aria-label={`Match identifier ${match.matchId}. Activate to copy.`}
+        >
+          <span className="mono">{shortId(match.matchId)}</span>
+          <span className="telemetry-copy-hint">{copied ? "copied" : "copy"}</span>
+        </button>
       </div>
       <div className="arena-telemetry-card">
         <span className="telemetry-label">Seed</span>
@@ -166,9 +293,7 @@ function Telemetry({ match }: { match: ArenaMatchView }) {
       </div>
       <div className="arena-telemetry-card">
         <span className="telemetry-label">Plies</span>
-        <span className="telemetry-value mono">
-          {match.plies} / {match.history.length > 0 ? match.history.length : match.plies}
-        </span>
+        <span className="telemetry-value mono">{match.plies}</span>
       </div>
       <div className="arena-telemetry-card">
         <span className="telemetry-label">Winner</span>
@@ -184,6 +309,120 @@ function Telemetry({ match }: { match: ArenaMatchView }) {
         <span className="telemetry-label">Tested seat</span>
         <span className="telemetry-value">{match.testedSide}</span>
       </div>
+    </div>
+  );
+}
+
+/** The transport: first, previous, play/pause, next, last, a scrubber, and a speed. */
+function Playback({ playback }: { playback: ReturnType<typeof usePlayback> }) {
+  const { frames, position, current, playing, speed, atStart, atEnd } = playback;
+  if (frames.length < 2) {
+    return (
+      <p className="panel-note">
+        This match recorded {frames.length === 1 ? "one position" : "no positions"}, so there is
+        nothing to step through. The final board above is the whole recording.
+      </p>
+    );
+  }
+
+  const ply = current?.ply;
+  const moveCell = playedCell(ply ?? null);
+
+  return (
+    <div className="arena-playback">
+      <div className="arena-playback-transport">
+        <button
+          type="button"
+          className="arena-transport-button"
+          onClick={playback.toStart}
+          disabled={atStart}
+          aria-label="Go to the first frame"
+          title="First frame"
+        >
+          ⏮
+        </button>
+        <button
+          type="button"
+          className="arena-transport-button"
+          onClick={() => playback.step(-1)}
+          disabled={atStart}
+          aria-label="Previous frame"
+          title="Previous frame"
+        >
+          ◀
+        </button>
+        <button
+          type="button"
+          className="arena-transport-button arena-transport-button--primary"
+          onClick={playback.toggle}
+          aria-label={playing ? "Pause playback" : "Play the recorded match"}
+          title={playing ? "Pause" : "Play"}
+        >
+          {playing ? "❚❚ PAUSE" : "▶ PLAY"}
+        </button>
+        <button
+          type="button"
+          className="arena-transport-button"
+          onClick={() => playback.step(1)}
+          disabled={atEnd}
+          aria-label="Next frame"
+          title="Next frame"
+        >
+          ▶
+        </button>
+        <button
+          type="button"
+          className="arena-transport-button"
+          onClick={playback.toEnd}
+          disabled={atEnd}
+          aria-label="Go to the last frame"
+          title="Last frame"
+        >
+          ⏭
+        </button>
+      </div>
+
+      <label className="arena-scrubber">
+        <span className="arena-scrubber-label">Frame</span>
+        <input
+          type="range"
+          min={0}
+          max={frames.length - 1}
+          step={1}
+          value={position}
+          onChange={(event) => playback.setPosition(Number(event.target.value))}
+          aria-label={`Frame position, ${position + 1} of ${frames.length}`}
+        />
+        <span className="arena-frame-counter mono" aria-live="polite">
+          {position + 1} / {frames.length}
+        </span>
+      </label>
+
+      <div className="arena-playback-meta">
+        <span className="arena-now-playing">
+          {ply
+            ? `Ply ${ply.ply} · ${sideMark(ply.side)} (${ply.side}) · ${moveLabel(ply)}`
+            : "Opening position — before any move"}
+        </span>
+        <label className="arena-speed">
+          <span className="arena-speed-label">Speed</span>
+          <select
+            value={speed}
+            onChange={(event) => playback.setSpeed(event.target.value as PlaybackSpeedLabel)}
+            aria-label="Playback speed"
+          >
+            {PLAYBACK_SPEEDS.map((option) => (
+              <option key={option.label} value={option.label}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      {moveCell !== null ? (
+        <p className="arena-move-note">The highlighted cell is the move the engine recorded on this ply.</p>
+      ) : null}
     </div>
   );
 }
@@ -205,18 +444,74 @@ function History({ match }: { match: ArenaMatchView }) {
   );
 }
 
+function MatchArchive({
+  summaries,
+  openId,
+  loadingId,
+  onOpen,
+}: {
+  summaries: ArenaMatchSummary[];
+  openId: string | null;
+  loadingId: string | null;
+  onOpen: (matchId: string) => void;
+}) {
+  if (summaries.length === 0) {
+    return (
+      <p className="panel-note">
+        No matches recorded yet. A match is written here the moment it finishes, and stays readable
+        after the application is closed.
+      </p>
+    );
+  }
+  return (
+    <ul className="arena-archive">
+      {summaries.map((summary) => (
+        <li key={summary.matchId}>
+          <button
+            type="button"
+            className={`arena-archive-row${summary.matchId === openId ? " arena-archive-row--open" : ""}`}
+            onClick={() => onOpen(summary.matchId)}
+            disabled={loadingId !== null}
+            aria-current={summary.matchId === openId ? "true" : undefined}
+          >
+            <span className={`arena-archive-outcome arena-archive-outcome--${summary.outcome}`}>
+              {outcomeLabel(summary.outcome)}
+            </span>
+            <span className="arena-archive-main">
+              <span className="arena-archive-pairing">
+                {summary.testedAgent} vs {summary.opponentAgent}
+              </span>
+              <span className="arena-archive-meta">
+                {summary.testedSide} · {summary.plies} {summary.plies === 1 ? "ply" : "plies"} ·{" "}
+                {recordedLabel(summary.recordedUnixMs)}
+              </span>
+            </span>
+            <span className="arena-archive-action">
+              {loadingId === summary.matchId ? "OPENING…" : "OPEN"}
+            </span>
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function ArenaPanel({
   games,
   agents,
   match,
+  matchSummaries,
+  openingId,
   error,
   playing,
+  stale,
   selectedGame,
   selectedTested,
   selectedOpponent,
   selectedSide,
   onPlay,
   onReset,
+  onOpenMatch,
   onGameChange,
   onTestedChange,
   onOpponentChange,
@@ -226,14 +521,20 @@ export function ArenaPanel({
   games: ArenaGameSummary[];
   agents: ArenaAgentSummary[];
   match: ArenaMatchView | null;
+  matchSummaries: ArenaMatchSummary[];
+  /** The identifier currently being fetched from the archive, if any. */
+  openingId: string | null;
   error: string | null;
   playing: boolean;
+  /** Whether the shown match came from a different configuration than the selectors describe. */
+  stale: boolean;
   selectedGame: string;
   selectedTested: string;
   selectedOpponent: string;
   selectedSide: "first" | "second";
   onPlay: () => void;
   onReset: () => void;
+  onOpenMatch: (matchId: string) => void;
   onGameChange: (game: string) => void;
   onTestedChange: (agent: string) => void;
   onOpponentChange: (agent: string) => void;
@@ -243,7 +544,18 @@ export function ArenaPanel({
   const game = games.find((candidate) => candidate.id === selectedGame) ?? games[0];
   const tested = agents.find((agent) => agent.id === selectedTested);
   const opponent = agents.find((agent) => agent.id === selectedOpponent);
-  const cells = ticTacToeCells(match?.finalBoard ?? null);
+  const playback = usePlayback(match, { stale, autoPlay: true });
+  const { frames, current } = playback;
+  const shownCells = current?.cells ?? ticTacToeCells(match?.finalBoard ?? null);
+
+  /*
+   * The winning line is shown only on the final frame, where it is the line that decided the match.
+   * Drawing it on an intermediate frame would be true of that board too, but it would read as "this
+   * is how the match ended" on a board that has not ended, which is a different claim.
+   */
+  const atFinalFrame = frames.length > 0 && playback.position === frames.length - 1;
+  const shownWinningLine =
+    match && stale === false && atFinalFrame && match.outcome !== "draw" ? match.winningLine : null;
 
   if (error) {
     return (
@@ -278,22 +590,64 @@ export function ArenaPanel({
     );
   }
 
+  const configurationSummary =
+    `${tested?.name ?? "Not selected"} vs ${opponent?.name ?? "Not selected"} · ${selectedSide === "first" ? "First (X)" : "Second (O)"}`;
+
   return (
     <section className="panel arena-panel" aria-labelledby="arena-heading">
       <div className="panel-heading">
         <h2 id="arena-heading">ARENA</h2>
         <span className="arena-header-game">{game?.name ?? "—"}</span>
-        <span className={match ? `arena-status arena-status--${match.outcome}` : "arena-status arena-status--idle"}>
+        <span
+          className={
+            match ? `arena-status arena-status--${match.outcome}` : "arena-status arena-status--idle"
+          }
+        >
           {match ? outcomeLabel(match.outcome) : "NO ACTIVE MATCH"}
         </span>
       </div>
 
       <div className="arena-layout">
         <div className="arena-main">
-          {match && cells ? (
+          {match && shownCells ? (
             <>
+              {stale ? (
+                <div className="arena-stale" role="status">
+                  <span className="arena-stale-badge">PREVIOUS CONFIGURATION</span>
+                  <p>
+                    This board is the match that was played, not one your selectors describe now. It was{" "}
+                    <strong>{match.testedAgent}</strong> against <strong>{match.opponentAgent}</strong>{" "}
+                    playing <strong>{match.testedSide}</strong>. Your selectors now read{" "}
+                    <strong>{configurationSummary}</strong>. Play a match to record the new pairing.
+                  </p>
+                </div>
+              ) : null}
+              {/*
+                * The transport sits above the board rather than below it.
+                *
+                * A board is the tallest thing on this panel, and putting the controls after it meant
+                * they landed below the fold on a 900px window — the controls for watching a match were
+                * the one thing you had to scroll to find. Above the board they are visible while the
+                * board is, which is what a viewer needs: the position, and the means to move it, at the
+                * same time.
+                */}
+              {frames.length > 1 ? (
+                <section className="brain-section arena-playback-section" aria-labelledby="arena-replay-heading">
+                  <h3 id="arena-replay-heading">Watch this match</h3>
+                  <p className="section-note">
+                    Recorded positions from the engine&rsquo;s own telemetry, played back in order.
+                    Playback reads the recording and contacts nothing — it cannot re-run the match or
+                    reach a model.
+                  </p>
+                  <Playback playback={playback} />
+                </section>
+              ) : null}
               <div className="arena-board-frame">
-                <Board cells={cells} />
+                <Board
+                  cells={shownCells}
+                  winningLine={shownWinningLine}
+                  lastMove={playedCell(current?.ply ?? null)}
+                />
               </div>
               <p className="arena-outcome-gloss">{outcomeGloss(match)}</p>
             </>
@@ -315,12 +669,7 @@ export function ArenaPanel({
 
         <aside className="arena-side">
           <div className="arena-seats">
-            <Seat
-              label="Under test"
-              agent={tested}
-              side={selectedSide}
-              isTested
-            />
+            <Seat label="Under test" agent={tested} side={selectedSide} isTested />
             <Seat
               label="Opponent"
               agent={opponent}
@@ -330,6 +679,24 @@ export function ArenaPanel({
           </div>
 
           {match ? <Telemetry match={match} /> : null}
+
+          {match && match.outcome !== "no_result" ? (
+            <div className={`arena-result arena-result--${match.outcome}`}>
+              <span className="arena-result-label">{testedResultLabel(match)}</span>
+              <span className="arena-result-detail">
+                {match.outcome === "draw"
+                  ? "No side completed a line; the board filled."
+                  : `${sideMark(match.winner ?? "first")} (${match.winner}) completed the winning line.`}
+              </span>
+            </div>
+          ) : null}
+
+          {match && match.failure ? (
+            <div className="arena-result arena-result--failure">
+              <span className="arena-result-label">MATCH FAILED</span>
+              <span className="arena-result-detail">{match.failure}</span>
+            </div>
+          ) : null}
 
           {match && match.illegalMoves.length > 0 ? (
             <div className="arena-illegal">
@@ -413,7 +780,16 @@ export function ArenaPanel({
           onClick={onPlay}
           disabled={!canPlay || playing}
         >
-          {playing ? "PLAYING…" : "PLAY MATCH"}
+          {playing ? "PLAYING…" : match ? "RUN AGAIN" : "PLAY MATCH"}
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={onReset}
+          disabled={!match || playing}
+          title="Clear the board and return to setup. Stored matches are kept."
+        >
+          NEW MATCH
         </button>
       </div>
 
@@ -428,11 +804,32 @@ export function ArenaPanel({
         only thing that moves the board.
       </p>
 
+      {match && frames.length < 2 ? (
+        <section className="brain-section" aria-labelledby="arena-replay-heading">
+          <h3 id="arena-replay-heading">Watch this match</h3>
+          <Playback playback={playback} />
+        </section>
+      ) : null}
+
+      <section className="brain-section" aria-labelledby="arena-archive-heading">
+        <h3 id="arena-archive-heading">Match archive</h3>
+        <p className="section-note">
+          Every match this machine has played, newest first. Stored matches are never deleted by the
+          controls on this page.
+        </p>
+        <MatchArchive
+          summaries={matchSummaries}
+          openId={match?.matchId ?? null}
+          loadingId={openingId}
+          onOpen={onOpenMatch}
+        />
+      </section>
+
       {match ? (
         <section className="brain-section">
           <h3>Action history</h3>
           <p className="section-note">
-            One row per ply, from the engine&rsquo;s own telemetry. Each row carries the board the
+            One row per ply, from the engine&apos;s own telemetry. Each row carries the board the
             engine recorded for that position.
           </p>
           <History match={match} />

@@ -31,6 +31,7 @@ fn drawn_match() -> ArenaMatchView {
         plies: 2,
         final_board: board(["first", "second", "first"]),
         winner: None,
+        winning_line: None,
         illegal_moves: Vec::new(),
         history: vec![
             ply(1, GameSide::First, ["first"], Some(0)),

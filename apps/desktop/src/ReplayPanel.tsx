@@ -57,6 +57,7 @@ export function ReplayPanel({
   loading,
   canLoad,
   matchId,
+  onViewInArena,
 }: {
   replay: Replay | null;
   error: string | null;
@@ -64,6 +65,15 @@ export function ReplayPanel({
   loading: boolean;
   canLoad: boolean;
   matchId: string;
+  /**
+   * Sends the user to the Arena, where the recorded positions can be watched on the board.
+   *
+   * This panel's frames carry labels and digests but no board, so it can show that a match was recorded
+   * and that the recording is intact, and it cannot show the positions. The Arena can, from the same
+   * recording. Splitting those two jobs — audit here, watch there — is better than either panel doing
+   * half of both, and it means a recording is never stuck on the screen that can only list it.
+   */
+  onViewInArena?: () => void;
 }) {
   // Stepping state lives here because it is a *view* concern -- the recording is immutable and the
   // backend is not consulted when the user moves between frames. That is what makes navigation instant
@@ -225,6 +235,18 @@ export function ReplayPanel({
       </dl>
 
       <p className="replay-capability-note">{capabilityExplanation(replay)}</p>
+
+      {onViewInArena && replay.kind === "arena_match" && matchId ? (
+        <div className="replay-arena-link">
+          <button type="button" className="btn btn-secondary btn-sm" onClick={onViewInArena}>
+            VIEW THIS MATCH ON THE BOARD
+          </button>
+          <p className="replay-arena-note">
+            This panel checks that the recording is intact. The Arena shows the recorded positions on
+            the board, from the same recording — it replays them rather than re-running the match.
+          </p>
+        </div>
+      ) : null}
 
       <div className="replay-stepper">
         <button

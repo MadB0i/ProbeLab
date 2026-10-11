@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use probelab_benchmarks::BenchmarkCatalog;
 use probelab_core::{TelemetryEvent, TestResult};
+use probelab_lab::SqliteArenaMatchStore;
 use probelab_lab::SqliteSettingsStore;
 use probelab_telemetry::{SqliteResultRepository, SqliteTelemetryRecorder};
 use serde::Serialize;
@@ -28,18 +29,18 @@ pub use executors::{
     list_local_models, preflight_executor, CancelRegistry, ExecutorCommandError, ExperimentExport,
 };
 pub use tasks::{
-    guided_task_package, list_task_benchmarks, run_task_eval, score_guided_submission,
-    GuidedPackageView, GuidedSubmission, TaskBenchmarkSummary, TaskCommandError, TaskEvalRequest,
+    guided_task_package, list_task_benchmarks, run_task_eval, save_guided_package,
+    score_guided_submission, GuidedPackageView, GuidedSubmission, TaskBenchmarkSummary,
+    TaskCommandError, TaskEvalRequest,
 };
 
 pub use arena::{
-    get_arena_match, latest_arena_match, list_arena_agents, list_arena_games, play_arena_match,
-    replay_arena_match, ArenaAgentSummary, ArenaCommandError, ArenaGameSummary, ArenaMatchRequest,
-    ArenaSurface,
+    get_arena_match, latest_arena_match, list_arena_agents, list_arena_games, list_arena_matches,
+    play_arena_match, replay_arena_match, ArenaAgentSummary, ArenaCommandError, ArenaGameSummary,
+    ArenaMatchRequest, ArenaSurface,
 };
 pub use brain::{
-    brain_panel, get_experiment, list_experiments, run_experiment, BrainCommandError, BrainSurface,
-    ExperimentRequest,
+    brain_panel, get_experiment, run_experiment, BrainCommandError, BrainSurface, ExperimentRequest,
 };
 pub use commands::{
     get_provider_status, get_result, get_run_metadata, list_agents, list_benchmark_details,
@@ -149,6 +150,12 @@ pub struct AppState {
     pub arena: ArenaSurface,
     /// The most recent security sweep, so a completed one stays inspectable.
     pub security: SecuritySurface,
+    /// Durable storage for played arena matches, so a finished match can be reopened later.
+    ///
+    /// Separate from `results` because a match and an experiment run are different claims recorded by
+    /// different subsystems; sharing a table would mean one immutability trigger governed both. Both
+    /// are append-only, and neither is reachable from any delete path in the UI.
+    pub arena_matches: Arc<SqliteArenaMatchStore>,
     recorder: Arc<SqliteTelemetryRecorder>,
     results: Arc<SqliteResultRepository>,
     recent_events: RecentEventBuffer,
@@ -216,6 +223,9 @@ impl AppState {
         );
         let settings =
             Arc::new(SqliteSettingsStore::open(&settings_path).map_err(|error| error.to_string())?);
+        let arena_matches = Arc::new(
+            SqliteArenaMatchStore::open(&database_path).map_err(|error| error.to_string())?,
+        );
         let brain = BrainSurface::default();
         brain
             .set_recorder(recorder.clone())
@@ -225,6 +235,7 @@ impl AppState {
             brain,
             arena: ArenaSurface::default(),
             security: SecuritySurface::default(),
+            arena_matches,
             recorder,
             results,
             recent_events: RecentEventBuffer::default(),
@@ -289,6 +300,17 @@ pub fn run() {
                 },
             )?);
             let results = Arc::new(SqliteResultRepository::new(&database_path)?);
+            // Arena matches are evidence about what happened, so they are durable rather than
+            // session-only. Opened here for the same reason settings are: a failure to open the
+            // archive is a start-up fact, not a surprise the first time someone looks for a match.
+            let arena_matches = Arc::new(
+                SqliteArenaMatchStore::open(&database_path).map_err(|error| {
+                    format!(
+                        "could not open the arena match archive at {}: {error}",
+                        database_path.display()
+                    )
+                })?,
+            );
             // Settings live in their own file. Opened here so a failure to read them is a start-up
             // error rather than a surprise the first time someone opens the settings page, and so the
             // real path can be reported on that page as a read-only fact.
@@ -343,6 +365,7 @@ pub fn run() {
                 brain,
                 arena: ArenaSurface::default(),
                 security: SecuritySurface::default(),
+                arena_matches,
                 recorder,
                 results,
                 recent_events,
@@ -372,7 +395,6 @@ pub fn run() {
             inspect_guest_isolation,
             list_comparable_experiments,
             list_executors,
-            list_experiments,
             list_local_models,
             preflight_executor,
             read_settings,
@@ -384,6 +406,7 @@ pub fn run() {
             list_providers,
             get_provider_status,
             guided_task_package,
+            save_guided_package,
             list_task_benchmarks,
             run_benchmark,
             run_task_eval,
@@ -393,6 +416,7 @@ pub fn run() {
             subscribe_telemetry,
             get_arena_match,
             latest_arena_match,
+            list_arena_matches,
             list_arena_agents,
             list_arena_games,
             play_arena_match,
@@ -409,9 +433,9 @@ pub fn run() {
 mod tests {
     use super::{
         brain_panel, get_arena_match, get_experiment, latest_arena_match, latest_security_report,
-        list_agents, list_arena_agents, list_arena_games, list_benchmark_details, list_experiments,
-        list_providers, list_security_probes, new_run_id, replay_arena_match, AgentSummary,
-        AppState, ArenaCommandError, BenchmarkDetail, BrainCommandError, ProviderSummary,
+        list_agents, list_arena_agents, list_arena_games, list_benchmark_details, list_providers,
+        list_security_probes, new_run_id, replay_arena_match, AgentSummary, AppState,
+        ArenaCommandError, BenchmarkDetail, BrainCommandError, ProviderSummary,
     };
     use probelab_lab::AgentCategory;
     use probelab_lab::AgentRegistry;
@@ -739,13 +763,12 @@ mod tests {
     /// rather than left to rot.
     #[test]
     fn every_registered_command_is_reachable_or_declared() {
-        // Read-only accessors and a durable read-back path that the API deliberately keeps exposed
-        // even where no panel currently calls it. Each entry states why it is still here.
-        const DECLARED_UNUSED: &[(&str, &str)] = &[(
-            "get_arena_match",
-            "read-only single-match accessor, paired with the 20-match retained surface; \
-                 `latest_arena_match` is what the panel calls",
-        )];
+        // Every dispatched command has a caller, or an explicitly justified exception. There is
+        // currently no exception left: `get_arena_match` used to sit here, because the Arena only ever
+        // asked for the latest match. It is now bound, because reopening a stored match is the whole
+        // point of keeping an archive — and a declared-unused entry that has become used is a stale
+        // exception, which hides the next one.
+        const DECLARED_UNUSED: &[(&str, &str)] = &[];
         let invoked = frontend_invoked_commands();
         let dispatched = dispatched_commands();
         let unaccounted: Vec<&String> = dispatched
@@ -822,7 +845,8 @@ mod tests {
     /// compiles, passes every test that calls the function directly (tests never run Tauri's state
     /// resolution), and then fails on *every* invocation in the built application with "state not
     /// managed". That is precisely what happened to `brain_panel`, `get_experiment`,
-    /// `list_experiments`, `latest_arena_match`, `replay_arena_match`, and `get_arena_match`: the
+    /// `list_comparable_experiments`, `latest_arena_match`, `replay_arena_match`, and
+    /// `get_arena_match`: the
     /// command center's entire read path and the arena's read path were dead in the built app while
     /// the suite was green.
     ///
@@ -836,7 +860,6 @@ mod tests {
         let _ = brain_panel as fn(State<'static, AppState>) -> BrainReadModel;
         let _ = get_experiment
             as fn(State<'static, AppState>, String) -> Result<BrainReadModel, BrainCommandError>;
-        let _ = list_experiments as fn(State<'static, AppState>) -> Vec<String>;
         // Arena read path.
         let _ = latest_arena_match as fn(State<'static, AppState>) -> Option<ArenaMatchView>;
         let _ = replay_arena_match

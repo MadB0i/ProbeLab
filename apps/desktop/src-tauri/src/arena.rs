@@ -209,12 +209,60 @@ pub fn list_arena_agents(game: String) -> Result<Vec<ArenaAgentSummary>, ArenaCo
 ///
 /// `None` is a real state — an empty arena — and the panel renders it as one rather than as a fault.
 ///
-/// Takes `State<AppState>` — the one type the application manages — and reads the arena surface
-/// through it. Taking `State<ArenaSurface>` directly compiled and passed every test while failing on
-/// every invocation in the built application with "state not managed".
+/// Reads the durable archive first and falls back to the session surface, so a match played before the
+/// last restart is still the most recent match rather than an empty arena.
+///
+/// See [`latest_arena_match`] for why this takes `State<AppState>`.
 #[tauri::command(rename_all = "snake_case")]
 pub fn latest_arena_match(state: State<'_, AppState>) -> Option<ArenaMatchView> {
+    if let Some(latest) = state
+        .arena_matches
+        .list(1)
+        .ok()
+        .and_then(|summaries| summaries.into_iter().next())
+    {
+        if let Ok(Some(view)) = state.arena_matches.get(&latest.match_id) {
+            return Some(view);
+        }
+    }
     state.arena.latest()
+}
+
+/// Every stored match, newest first.
+///
+/// A summary list rather than full recordings: the history list draws one line per match and should
+/// not have to decode every full board recording to do it. The full match is fetched on open.
+#[tauri::command(rename_all = "snake_case")]
+pub fn list_arena_matches(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<probelab_lab::ArenaMatchSummary>, ArenaCommandError> {
+    let limit = limit.unwrap_or(50).clamp(1, 200);
+    state
+        .arena_matches
+        .list(limit)
+        .map_err(|error| ArenaCommandError {
+            code: "history_unavailable".to_owned(),
+            message: format!("the match archive could not be read: {error}"),
+        })
+}
+
+/// The full recording of one stored match.
+///
+/// Reads the durable archive, so a match can be reopened after a restart. See [`latest_arena_match`]
+/// for why this takes `State<AppState>`.
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_arena_match(
+    state: State<'_, AppState>,
+    match_id: String,
+) -> Result<ArenaMatchView, ArenaCommandError> {
+    if let Ok(Some(view)) = state.arena_matches.get(&match_id) {
+        return Ok(view);
+    }
+    state.arena.get(&match_id).ok_or_else(|| ArenaCommandError {
+        code: "not_found".to_owned(),
+        message: format!("no match named {match_id:?}"),
+    })
 }
 
 /// Reconstructs a stored match as a deterministic replay.
@@ -223,34 +271,19 @@ pub fn latest_arena_match(state: State<'_, AppState>) -> Option<ArenaMatchView> 
 /// therefore cannot produce a different result than the recording, and cannot call a model even by
 /// accident — which is what makes it a replay rather than a second run.
 ///
+/// Reads the durable archive, so a match played in an earlier session can still be replayed.
+///
 /// See [`latest_arena_match`] for why this takes `State<AppState>`.
 #[tauri::command(rename_all = "snake_case")]
 pub fn replay_arena_match(
     state: State<'_, AppState>,
     match_id: String,
 ) -> Result<probelab_lab::Replay, ArenaCommandError> {
-    let view = state
-        .arena
-        .get(&match_id)
-        .ok_or_else(|| ArenaCommandError {
-            code: "not_found".to_owned(),
-            message: format!("no match named {match_id:?}"),
-        })?;
-    Ok(probelab_lab::replay_match(&view))
-}
-
-/// One stored match by identifier.
-///
-/// See [`latest_arena_match`] for why this takes `State<AppState>`.
-#[tauri::command(rename_all = "snake_case")]
-pub fn get_arena_match(
-    state: State<'_, AppState>,
-    match_id: String,
-) -> Result<ArenaMatchView, ArenaCommandError> {
-    state.arena.get(&match_id).ok_or_else(|| ArenaCommandError {
+    let view = get_arena_match(state, match_id.clone()).map_err(|_| ArenaCommandError {
         code: "not_found".to_owned(),
         message: format!("no match named {match_id:?}"),
-    })
+    })?;
+    Ok(probelab_lab::replay_match(&view))
 }
 
 /// Plays one match and returns what the engine produced.
@@ -281,11 +314,32 @@ pub fn play_arena_match(
         )
         .map_err(ArenaCommandError::from)?;
 
-    // A match that played successfully but could not be retained is still a real result, and the
-    // caller is holding it. The failure to retain is reported through the surface's own state rather
-    // than by discarding the match.
+    // A match that played successfully but could not be retained in the session surface is still a
+    // real result, and the caller is holding it. The failure to retain is reported through the
+    // surface's own state rather than by discarding the match.
     state.arena.store(match_id, played.view.clone())?;
+    // The durable archive is written second, and a failure there does not fail the match. The match
+    // genuinely happened and the caller is holding the full recording; failing the whole command would
+    // discard a real result because a cache could not be written. The loss is logged instead, so the
+    // gap between what was played and what is archived is visible rather than silent.
+    if let Err(error) = state.arena_matches.put(&played.view, unix_milliseconds()) {
+        tracing::error!(
+            match_id = %played.view.match_id,
+            error = %error,
+            "a played arena match could not be written to the durable archive; it remains in this \
+             session only and will be lost when the application closes"
+        );
+    }
     Ok(played.view)
+}
+
+/// Now, in Unix milliseconds. `0` rather than a panic: a clock before the epoch is absurd, and it
+/// only orders history, so refusing to record a match over it would be the wrong trade.
+fn unix_milliseconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Parses a game identifier, refusing anything this build cannot play.
@@ -311,9 +365,24 @@ fn parse_side(side: &str) -> Result<GameSide, ArenaCommandError> {
     }
 }
 
-/// A match identifier derived from the seed, so the same seed names the same match.
+/// A match identifier: the seed it was played with, plus a timestamp and counter that make each play
+/// unique.
+///
+/// The identifier doubles as the telemetry `run_id`, and the telemetry schema enforces a gap-free
+/// sequence per run. A seed-derived id would therefore reuse a run that already holds events, and the
+/// second play would be rejected before it started. The timestamp is taken from the wall clock, so it
+/// stays unique across restarts — a counter alone would reset to 1 and collide with the run a
+/// previous session already recorded under the same seed. The counter disambiguates two matches that
+/// land in the same millisecond.
+static MATCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 fn new_match_id(seed: u64) -> String {
-    format!("arena-ttt-{seed}")
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0);
+    let ordinal = MATCH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("arena-ttt-{seed}-{millis}-{ordinal}")
 }
 
 #[cfg(test)]
@@ -460,9 +529,15 @@ mod tests {
     }
 
     #[test]
-    fn a_match_id_is_derived_from_the_seed_so_a_seed_names_its_match() {
-        assert_eq!(new_match_id(7), "arena-ttt-7");
-        assert_eq!(new_match_id(7), new_match_id(7));
+    fn a_match_id_carries_the_seed_but_is_unique_per_play() {
+        let first = new_match_id(7);
+        let second = new_match_id(7);
+        assert!(first.starts_with("arena-ttt-7-"), "got {first}");
+        assert!(second.starts_with("arena-ttt-7-"), "got {second}");
+        assert_ne!(
+            first, second,
+            "two plays of the same seed must be two telemetry runs, or the second is rejected"
+        );
     }
 
     #[test]
@@ -511,11 +586,29 @@ mod tests {
                 cells: vec![probelab_core::TicTacToeCell::Empty; 9],
             },
             winner: None,
+            winning_line: None,
             illegal_moves: Vec::new(),
             history: Vec::new(),
             timeline: Vec::new(),
             failure: None,
         }
+    }
+
+    /// The frontend parses the board and move from the adjacent-tagged wire shape. If serde ever
+    /// changes the tag or content keys, this test catches it before the UI silently stops drawing.
+    #[test]
+    fn game_board_and_move_serialize_with_adjacent_tags() {
+        let board = probelab_core::GameBoard::TicTacToe {
+            cells: vec![probelab_core::TicTacToeCell::First; 9],
+        };
+        let value = serde_json::to_value(&board).expect("board serializes");
+        assert_eq!(value["game"], "tic_tac_toe");
+        assert!(value["state"]["cells"].as_array().is_some());
+
+        let mov = probelab_core::GameMove::TicTacToe(4);
+        let value = serde_json::to_value(mov).expect("move serializes");
+        assert_eq!(value["game"], "tic_tac_toe");
+        assert_eq!(value["move"], 4);
     }
 
     const SURFACE_SOURCE: &str = include_str!("arena.rs");
