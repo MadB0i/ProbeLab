@@ -85,12 +85,11 @@ SHARED_COMMANDS = {
 # Commands the frontend does not invoke, with the reason each is still registered. Checked in the
 # reverse direction by `every_dispatched_command_is_invoked_or_declared`, so an entry that stops being
 # true has to be deleted rather than left to rot.
-DECLARED_UNUSED_COMMANDS = {
-    "get_arena_match": (
-        "read-only single-match accessor, paired with the 20-match retained surface; "
-        "`latest_arena_match` is what the panel calls"
-    ),
-}
+#
+# Empty. `get_arena_match` used to sit here, because the Arena only asked for the most recent match and
+# the per-match accessor had no caller. Reopening a stored match is now the point of keeping an archive,
+# so the command is bound and the exception is gone.
+DECLARED_UNUSED_COMMANDS: dict[str, str] = {}
 
 
 def fail(message: str) -> None:
@@ -350,7 +349,12 @@ def rust_command_params() -> dict[str, set[str]]:
                 if not param:
                     continue
                 ident, typename = param.group(1), param.group(2).strip()
-                base = re.split(r"[<>,:\s&'\"]", typename, maxsplit=1)[0]
+                # Strip a module path before reading the type name: a command written as
+                # `app: tauri::AppHandle` is the same injectable as one written `app: AppHandle`, and
+                # treating the path as the type made the gate demand the frontend send something Tauri
+                # injects itself.
+                bare = typename.rsplit("::", 1)[-1]
+                base = re.split(r"[<>,:\s&'\"]", bare, maxsplit=1)[0]
                 if base in INJECTED_TYPES:
                     continue
                 keys.add(ident if snake else to_camel(ident))
