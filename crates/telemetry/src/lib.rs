@@ -1083,6 +1083,62 @@ impl SqliteResultRepository {
             .transpose()
             .map_err(Into::into)
     }
+
+    /// Reads back one run's committed telemetry, in sequence order.
+    ///
+    /// # Why this exists
+    ///
+    /// A run's events were written append-only and then, until now, could only be had *while the
+    /// process that recorded them was still alive* — the command-center's live buffer holds the last
+    /// few hundred events of the current session. So a recording was only ever replayable inside the
+    /// window in which it happened. A grid episode is exactly the kind of thing a person wants to watch
+    /// a second time, and after a restart or a crash the events were still on disk and unreadable.
+    ///
+    /// Nothing is stored *for* this reader: the events were already recorded in full, so the read
+    /// reconstructs a playback from data the run committed rather than adding a second, possibly
+    /// divergent, trace beside it.
+    ///
+    /// # Why this is a read and not a re-run
+    ///
+    /// There is no model here, no provider, and no engine. Every field returned is a field the run
+    /// committed, which is what makes a replayed episode the same episode rather than a second
+    /// experiment wearing a familiar name — see `probelab_lab::replay` for the same argument at the
+    /// arena's layer.
+    ///
+    /// # Ordering, and why it is ordered rather than assumed
+    ///
+    /// `ORDER BY sequence` is the whole contract. A viewer that reconstructed an episode in
+    /// insertion order would depend on SQLite's physical layout, and `id` is an autoincrement column
+    /// that only happens to agree with `sequence` today. The trigger on the table already refuses a
+    /// gap, so the order read here is the order the run executed in.
+    ///
+    /// An unknown run identifier yields an empty vector rather than an error: "nothing was recorded
+    /// under that name" is the truthful answer, and an error would force every caller to invent a
+    /// distinction between a run that never happened and a run whose recording is missing.
+    pub fn telemetry_events(
+        &self,
+        run_id: impl AsRef<str>,
+    ) -> Result<Vec<TelemetryEvent>, ResultRepositoryError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| ResultRepositoryError::LockPoisoned)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT event_json FROM telemetry_events \
+                 WHERE run_id = ?1 ORDER BY sequence ASC",
+            )
+            .map_err(ResultRepositoryError::Sqlite)?;
+        let mut rows = statement
+            .query(rusqlite::params![run_id.as_ref()])
+            .map_err(ResultRepositoryError::Sqlite)?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next().map_err(ResultRepositoryError::Sqlite)? {
+            let event_json: String = row.get(0).map_err(ResultRepositoryError::Sqlite)?;
+            events.push(serde_json::from_str(&event_json)?);
+        }
+        Ok(events)
+    }
 }
 
 /// A typed result repository failure.

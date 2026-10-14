@@ -25,14 +25,16 @@
 //! its own state transitions, and the whole reason to trust this panel is that the environment is the
 //! only thing that moves the board. A match is agent against agent, and the panel says so.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use probelab_core::{
-    GameBoard, GameKind, GameMove, GameSide, GameTelemetry, IntegrityEventKind, TelemetryEvent,
-    TelemetryRecorder,
+    GameBoard, GameKind, GameMove, GameSide, GameTelemetry, IntegrityEventKind, ModelCallFailure,
+    TelemetryEvent, TelemetryRecorder, TokenUsage,
 };
 use probelab_engine::arena::{
-    play_match, ArenaError, IllegalMove, MatchConfig, MatchOutcome, MatchResult,
+    play_match, ArenaError, BoxedSeat, IllegalMove, MatchConfig, MatchOutcome, MatchResult,
+    PlyOutcome, SeatKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -42,8 +44,8 @@ use crate::events::{EventSource, LabEvent, LabTimeline, Severity};
 /// The games the arena can currently be asked to play.
 ///
 /// A closed list rather than a probe of the registry, because it is a statement about what this build
-/// supports. Connect four, rock-paper-scissors, and battleship have types in the schema and no
-/// implementation behind this command, and listing them would offer a match that fails.
+/// supports. Rock-paper-scissors and battleship have types in the schema and no implementation behind
+/// this command, and listing them would offer a match that fails.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ArenaGame {
     /// Stable identifier, matching the core game kind.
@@ -61,18 +63,50 @@ pub struct ArenaGame {
 }
 
 /// Every game this build can play.
+///
+/// The two shipped games are chosen because they measure different things, not because they are the
+/// only two that exist in the schema. Tic-tac-toe has a *proved* ceiling: against a perfect opponent
+/// the best a policy can do is draw, so every non-loss is evidence about not blundering. Connect four
+/// has no proved ceiling and a reference opponent that can be beaten, which is what makes it the game
+/// a real model is worth running against.
 pub fn available_games() -> Vec<ArenaGame> {
-    vec![ArenaGame {
-        id: "tic_tac_toe".to_owned(),
-        name: "Tic-Tac-Toe".to_owned(),
-        description:
-            "Three by three, first side first. Exhaustively solvable, so the ceiling is a \
-                      true ceiling rather than a good heuristic."
-                .to_owned(),
-        width: 3,
-        height: 3,
-        max_plies: 9,
-    }]
+    vec![
+        ArenaGame {
+            id: "tic_tac_toe".to_owned(),
+            name: "Tic-Tac-Toe".to_owned(),
+            description:
+                "Three by three, first side first. Exhaustively solvable, so the ceiling is a \
+                          true ceiling rather than a good heuristic."
+                    .to_owned(),
+            width: 3,
+            height: 3,
+            max_plies: 9,
+        },
+        ArenaGame {
+            id: "connect_four".to_owned(),
+            name: "Connect Four".to_owned(),
+            description:
+                "Seven columns by six rows, played by dropping discs under gravity. No proved \
+                          ceiling: the reference opponent is a depth-bounded search with published \
+                          limits, so it can be beaten and its strength is a stated number."
+                    .to_owned(),
+            width: 7,
+            height: 6,
+            max_plies: 42,
+        },
+    ]
+}
+
+/// The display name for a game, falling back to its stable identifier.
+///
+/// One lookup, so a view cannot call the same match "Connect Four" in the header and "connect_four"
+/// in the archive.
+fn game_name(kind: GameKind) -> String {
+    available_games()
+        .into_iter()
+        .find(|game| game.id == kind.as_str())
+        .map(|game| game.name)
+        .unwrap_or_else(|| kind.as_str().to_owned())
 }
 
 /// Why an arena match could not be started.
@@ -192,6 +226,63 @@ impl ArenaOutcome {
     }
 }
 
+/// What one turn cost, and who played it.
+///
+/// Separated from [`PlyView`] on purpose. A `PlyView` is the *board*: what happened. This is the
+/// *cost*: how long it took, what it cost in tokens, and under which prompt template. They are kept
+/// apart because they answer different questions and have different lifetimes — the board is needed
+/// to replay, the cost is needed to explain — and because merging them would make the replay
+/// projection carry provider metadata it does not use.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnTelemetry {
+    /// One-based ply index.
+    pub ply: u32,
+    /// Which side moved.
+    pub side: GameSide,
+    /// What kind of seat moved: a shipped policy or a real model.
+    pub seat: SeatKind,
+    /// The seat's label, so a transcript reads without a lookup.
+    pub seat_label: String,
+    /// How long the decision took, in milliseconds.
+    pub elapsed_ms: u64,
+    /// Provider token usage, when the seat is model-backed and the provider reported it.
+    ///
+    /// `None` is meaningful, not missing: a policy seat has no tokens, and so does a provider that
+    /// does not report them. Reporting zero for either would make "cost nothing" indistinguishable
+    /// from "we do not know".
+    pub usage: Option<TokenUsage>,
+    /// The prompt template that produced the decision.
+    pub prompt_template_version: Option<String>,
+    /// The model's own reply, sanitized and bounded, when the seat is model-backed.
+    pub response_text: Option<String>,
+    /// A sanitized failure, when the decision failed.
+    pub failure: Option<ModelCallFailure>,
+    /// The board this seat was actually shown.
+    ///
+    /// Carried so "the model was shown the legal state available to its side" is a checkable claim
+    /// rather than a promise in a comment. A seat that were ever shown a hidden cell would show up
+    /// here, and the assertion in the arena tests is on this field rather than on the outcome.
+    pub request_board: GameBoard,
+}
+
+impl From<&PlyOutcome> for TurnTelemetry {
+    fn from(outcome: &PlyOutcome) -> Self {
+        Self {
+            ply: outcome.ply,
+            side: outcome.side,
+            seat: outcome.seat,
+            seat_label: outcome.seat_label.clone(),
+            elapsed_ms: outcome.elapsed_ms,
+            usage: outcome.usage.clone(),
+            prompt_template_version: outcome.prompt_template_version.clone(),
+            response_text: outcome.response_text.clone(),
+            failure: outcome.failure.clone(),
+            request_board: outcome.request_board.clone(),
+        }
+    }
+}
+
 /// The full record of one played match.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -208,7 +299,11 @@ pub struct ArenaMatchView {
     pub tested_agent: String,
     /// The opponent's identifier.
     pub opponent_agent: String,
-    /// Which side the tested policy played.
+    /// What kind of seat the tested side was.
+    pub tested_seat: SeatKind,
+    /// What kind of seat the opponent was.
+    pub opponent_seat: SeatKind,
+    /// Which side the tested agent played.
     pub tested_side: GameSide,
     /// The seed the opening was derived from, so the match replays.
     pub seed: u64,
@@ -218,20 +313,31 @@ pub struct ArenaMatchView {
     pub final_board: GameBoard,
     /// The side that won, when there is one.
     pub winner: Option<GameSide>,
-    /// The three cells the winner completed a line on, when the game has lines.
+    /// The cells the winner completed a line on, when the game has lines.
     ///
     /// Produced by the engine's own winning-line rule rather than by the panel. The renderer used to
     /// have to be told nothing about a result and inferred everything from the final board, which
     /// meant a highlight drawn in the UI was a second, unaudited opinion about who won what.
-    pub winning_line: Option<[u8; 3]>,
+    ///
+    /// Four cells for connect four and three for tic-tac-toe, so it is a flat list of coordinates
+    /// rather than a fixed triple: a fixed `[u8; 3]` cannot express a four-in-a-row without either
+    /// truncating it — which would highlight the wrong cells — or being a different type per game.
+    pub winning_line: Option<Vec<[u8; 2]>>,
     /// Illegal moves the tested side returned.
     pub illegal_moves: Vec<IllegalMoveView>,
     /// The recorded ply history, in order.
     pub history: Vec<PlyView>,
+    /// Per-turn cost and identity, in order.
+    pub turns: Vec<TurnTelemetry>,
     /// The match's own event stream.
     pub timeline: Vec<LabEvent>,
     /// Why the match ended, when it failed.
     pub failure: Option<String>,
+    /// Whether the match was stopped by the operator rather than played out.
+    ///
+    /// Distinct from `failure`: a cancelled match is not broken, and reporting it as a failure would
+    /// put a deliberate stop into the same bucket as a provider that refused a connection.
+    pub cancelled: bool,
 }
 
 impl ArenaMatchView {
@@ -293,11 +399,12 @@ impl ArenaMatchView {
         // different line has to move the digest for the same reason a changed outcome does.
         absorb(
             self.winning_line
+                .as_ref()
                 .map(|line| {
                     line.iter()
-                        .map(|cell| cell.to_string())
+                        .map(|cell| format!("{},{}", cell[0], cell[1]))
                         .collect::<Vec<_>>()
-                        .join(",")
+                        .join(";")
                 })
                 .unwrap_or_default()
                 .as_str(),
@@ -338,15 +445,53 @@ impl ArenaMatchView {
     }
 }
 
-/// Captures the telemetry the engine records during a match, in memory, and tees it onward.
+/// A digest over an ordered list of strings.
+///
+/// # Why this exists
+///
+/// [`ArenaMatchView::replay_digest`] fingerprints one recording. Statistics over a group of recordings
+/// need the same thing one level up: a single value that changes if, and only if, the set of
+/// recordings behind a number changes. That lets two statistics blocks carrying the same digest be
+/// known to have come from identical inputs, so they cannot disagree unless one of them is wrong.
+///
+/// It lives here rather than in the statistics module because this is where the hashing primitive
+/// already is. A second copy of FNV-1a in a sibling module is the kind of quiet duplication that lets
+/// two digests of "the same" thing stop matching, and neither copy would be wrong on its own.
+///
+/// # Order matters
+///
+/// The digest is over a *sequence*, not a set. Reordering the inputs changes it. That is deliberate:
+/// statistics are computed in a defined order and the output is stable, so the provenance should be
+/// sensitive to the order rather than hiding it.
+pub fn provenance_digest<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in parts {
+        for byte in part.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        // A separator, so ["ab", "c"] and ["a", "bc"] cannot collide.
+        hash ^= 0x1f;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// Captures what the engine records during a match, in memory, and tees it onward.
 ///
 /// The engine already writes every ply to a recorder; this holds a copy so the panel can project a
 /// board history, and forwards the identical event to the durable sink when one is installed. Doing
 /// both in one `record` call is the point: if forwarding were a separate step it could be skipped on
 /// an early return, and the stored record and the panel would then disagree about the same match.
+///
+/// `turns` is filled by the runner's per-ply callback rather than by parsing telemetry events back
+/// apart. The engine already hands the runner a fully-formed [`PlyOutcome`] with the provider
+/// metadata attached; recovering the same facts from a round-tripped event would mean re-deriving
+/// fields the engine had in hand, and a round trip is where such fields quietly go missing.
 #[derive(Clone, Default)]
 struct MatchCapture {
     plies: Arc<Mutex<Vec<GameTelemetry>>>,
+    turns: Arc<Mutex<Vec<TurnTelemetry>>>,
     timeline: Arc<Mutex<LabTimeline>>,
     integrity: Arc<Mutex<Vec<IntegrityEventKind>>>,
     /// The durable recorder, when the caller installed one.
@@ -361,6 +506,12 @@ impl MatchCapture {
             .lock()
             .map_err(|_| CAPTURE_LOCK_POISONED.to_owned())? = Some(sink);
         Ok(())
+    }
+
+    fn push_turn(&self, turn: TurnTelemetry) {
+        if let Ok(mut turns) = self.turns.lock() {
+            turns.push(turn);
+        }
     }
 }
 
@@ -501,6 +652,11 @@ impl ArenaRunner {
         }
     }
 
+    /// Builds a runner over a supplied registry, for tests and for a registry with extra entries.
+    pub fn with_agents(agents: AgentRegistry) -> Self {
+        Self { agents }
+    }
+
     /// Every agent that can legally be seated in `game`.
     ///
     /// The filter is the registry's own `supported_games`, so compatibility is a backend fact. An agent
@@ -547,6 +703,14 @@ impl ArenaRunner {
             .map_err(|_| CAPTURE_LOCK_POISONED.to_owned())
     }
 
+    fn capture_turns(&self, capture: &MatchCapture) -> Result<Vec<TurnTelemetry>, String> {
+        capture
+            .turns
+            .lock()
+            .map(|turns| turns.clone())
+            .map_err(|_| CAPTURE_LOCK_POISONED.to_owned())
+    }
+
     /// The timeline recorded during a match.
     fn capture_timeline(&self, capture: &MatchCapture) -> Result<LabTimeline, String> {
         capture
@@ -556,37 +720,88 @@ impl ArenaRunner {
             .map_err(|_| CAPTURE_LOCK_POISONED.to_owned())
     }
 
-    /// Plays one match and projects it.
+    /// Builds both seats for a specification from the agent registry.
     ///
-    /// Takes both seats as registry identifiers. A caller cannot hand the arena a policy that is not
-    /// registered, which is what keeps the panel's agent list and the arena's capabilities the same
-    /// set.
-    pub fn play(
+    /// Performs the compatibility check first, so an unsupported pairing is a refusal rather than a
+    /// match that fails on the first ply. Kept separate from [`ArenaRunner::play`] because a caller
+    /// may seat a *model*, which is not a registry entry at all — it is a runtime configuration — and
+    /// the two paths must reach the same `play` for that to be safe.
+    pub fn seats_for(
+        &self,
+        spec: &ArenaMatchSpec,
+    ) -> Result<(BoxedSeat, BoxedSeat), ArenaRunError> {
+        self.require_supported_game(spec.game)?;
+        self.require_compatible(&spec.tested_agent, spec.game)?;
+        self.require_compatible(&spec.opponent_agent, spec.game)?;
+        let tested = self
+            .agents
+            .build_seat(&spec.tested_agent, spec.seed)
+            .map_err(|_| ArenaRunError::UnknownAgent(spec.tested_agent.clone()))?;
+        let opponent = self
+            .agents
+            .build_seat(&spec.opponent_agent, spec.seed)
+            .map_err(|_| ArenaRunError::UnknownAgent(spec.opponent_agent.clone()))?;
+        Ok((tested, opponent))
+    }
+
+    /// Refuses a game this build does not implement.
+    fn require_supported_game(&self, game: GameKind) -> Result<(), ArenaRunError> {
+        if matches!(game, GameKind::TicTacToe | GameKind::ConnectFour) {
+            return Ok(());
+        }
+        Err(ArenaRunError::UnknownGame(format!("{game:?}")))
+    }
+
+    /// Plays one match with no live view and no cancel button.
+    ///
+    /// The convenience form of [`ArenaRunner::play`], for callers that genuinely have neither a UI to
+    /// drive nor a way to stop — a batch run, a test, a one-shot command. It is a thin wrapper rather
+    /// than a separate implementation so a batch run and a watched run execute identical code; the
+    /// only difference is that nobody is watching.
+    pub fn play_simple(
         &self,
         spec: &ArenaMatchSpec,
         sink: Option<Arc<dyn TelemetryRecorder>>,
     ) -> Result<ArenaMatch, ArenaRunError> {
-        // The game is checked first, on purpose. A user who asks for connect four should be told this
-        // build cannot play it — not that their agent is incompatible with it, which would send them
-        // off to fix the wrong thing.
-        if !matches!(spec.game, GameKind::TicTacToe) {
-            return Err(ArenaRunError::UnknownGame(format!("{:?}", spec.game)));
-        }
+        let (tested, opponent) = self.seats_for(spec)?;
+        self.play(
+            spec,
+            tested,
+            opponent,
+            sink,
+            None,
+            &mut |_turn: &TurnTelemetry| {},
+        )
+    }
 
-        // Compatibility is checked before anything runs, so an unsupported pairing is a refusal rather
-        // than a match that fails on the first ply. Doing it early also means the error names the
-        // actual problem instead of surfacing as a confusing engine failure.
-        self.require_compatible(&spec.tested_agent, spec.game)?;
-        self.require_compatible(&spec.opponent_agent, spec.game)?;
-
-        let mut agent = self
-            .agents
-            .build(&spec.tested_agent, spec.seed)
-            .map_err(|_| ArenaRunError::UnknownAgent(spec.tested_agent.clone()))?;
-        let mut reference = self
-            .agents
-            .build_reference(&spec.opponent_agent, spec.seed)
-            .map_err(|_| ArenaRunError::UnknownAgent(spec.opponent_agent.clone()))?;
+    /// Plays one match from two already-built seats and projects it.
+    ///
+    /// Takes seats rather than registry identifiers so a caller can seat a real model: a model is a
+    /// runtime configuration, not a registry entry, and pretending otherwise would mean either
+    /// registering every conceivable model (impossible) or refusing model seats (which loses the
+    /// feature this exists for).
+    ///
+    /// The seats still arrive through the same `ArenaSeat` boundary, so neither can reach the board,
+    /// the rules, the telemetry sink, or anything the environment did not put in the request.
+    /// Compatibility for registry policies is checked by [`ArenaRunner::seats_for`], which a caller
+    /// building seats itself is expected to have consulted; the game check happens here, because
+    /// playing a game with no implementation would be a silent nonsense result rather than an error.
+    ///
+    /// `on_turn` is called after each ply with the authoritative board and that turn's cost, so a
+    /// caller can drive a live view; `cancel` is polled at the same point, so stopping a match needs no
+    /// second mechanism and cannot race with the turn loop.
+    pub fn play(
+        &self,
+        spec: &ArenaMatchSpec,
+        mut tested: BoxedSeat,
+        mut opponent: BoxedSeat,
+        sink: Option<Arc<dyn TelemetryRecorder>>,
+        cancel: Option<&AtomicBool>,
+        on_turn: &mut dyn FnMut(&TurnTelemetry),
+    ) -> Result<ArenaMatch, ArenaRunError> {
+        self.require_supported_game(spec.game)?;
+        let tested_seat_kind = tested.kind();
+        let opponent_seat_kind = opponent.kind();
 
         let capture = MatchCapture::default();
         // The durable recorder is installed before the first ply, so the tee forwards from the very
@@ -609,31 +824,57 @@ impl ArenaRunner {
         // an enum would mean a variant per game plus a match to reconstruct one — all to avoid a
         // two-line match. Dispatching here keeps the engine's generic `play_match` generic, and adding
         // a game later is exactly one more arm.
+        let mut record_turn = |outcome: PlyOutcome| {
+            let turn = TurnTelemetry::from(&outcome);
+            on_turn(&turn);
+            capture.push_turn(turn);
+            // The single cancellation point. Polled in the same callback that drives the live view,
+            // so "stop" and "observe" can never disagree about which ply is current, and there is no
+            // second code path in which a match stops.
+            cancel.is_none_or(|flag| !flag.load(Ordering::SeqCst))
+        };
         let played = match spec.game {
             GameKind::TicTacToe => {
-                let tic_tac_toe = probelab_engine::arena::tictactoe::TicTacToe::default_game();
+                let game = probelab_engine::arena::tictactoe::TicTacToe::default_game();
                 play_match(
-                    &tic_tac_toe,
-                    agent.as_mut(),
-                    reference.as_mut(),
+                    &game,
+                    tested.as_mut(),
+                    opponent.as_mut(),
                     spec.tested_side,
                     &config,
                     &capture,
+                    &mut record_turn,
+                )
+            }
+            GameKind::ConnectFour => {
+                let game = probelab_engine::arena::connect_four::ConnectFour::default_game();
+                play_match(
+                    &game,
+                    tested.as_mut(),
+                    opponent.as_mut(),
+                    spec.tested_side,
+                    &config,
+                    &capture,
+                    &mut record_turn,
                 )
             }
             // Unreachable: the guard above already refused every other kind. Kept exhaustive so a
             // future GameKind variant cannot fall through silently into a broken match.
             other => return Err(ArenaRunError::UnknownGame(format!("{other:?}"))),
         };
+
         match played {
             Ok(result) => {
                 let plies = self
                     .capture_plies(&capture)
                     .map_err(ArenaRunError::Engine)?;
+                let turns = self
+                    .capture_turns(&capture)
+                    .map_err(ArenaRunError::Engine)?;
                 let final_board = plies
                     .last()
                     .map(|ply| ply.board.clone())
-                    .unwrap_or_else(empty_tictactoe_board);
+                    .unwrap_or_else(|| empty_board(spec.game));
                 let mut timeline = self
                     .capture_timeline(&capture)
                     .map_err(ArenaRunError::Engine)?;
@@ -656,7 +897,7 @@ impl ArenaRunner {
                     view: ArenaMatchView {
                         match_id: spec.match_id.clone(),
                         game: spec.game.as_str().to_owned(),
-                        game_name: "Tic-Tac-Toe".to_owned(),
+                        game_name: game_name(spec.game),
                         outcome: match result.outcome {
                             MatchOutcome::Win => ArenaOutcome::Win,
                             MatchOutcome::Draw => ArenaOutcome::Draw,
@@ -664,6 +905,8 @@ impl ArenaRunner {
                         },
                         tested_agent: spec.tested_agent.clone(),
                         opponent_agent: spec.opponent_agent.clone(),
+                        tested_seat: tested_seat_kind,
+                        opponent_seat: opponent_seat_kind,
                         tested_side: spec.tested_side,
                         seed: spec.seed,
                         plies: result.plies,
@@ -680,8 +923,10 @@ impl ArenaRunner {
                             .map(IllegalMoveView::from)
                             .collect(),
                         history: plies.iter().map(PlyView::from).collect(),
+                        turns,
                         timeline: timeline.events().to_vec(),
                         failure: None,
+                        cancelled: false,
                     },
                     result: Some(result),
                 })
@@ -691,6 +936,9 @@ impl ArenaRunner {
                 // and never as a loss, and the illegal move the engine refused is kept if it named one.
                 let plies = self
                     .capture_plies(&capture)
+                    .map_err(ArenaRunError::Engine)?;
+                let turns = self
+                    .capture_turns(&capture)
                     .map_err(ArenaRunError::Engine)?;
                 let mut timeline = self
                     .capture_timeline(&capture)
@@ -710,30 +958,44 @@ impl ArenaRunner {
                         attempted: None,
                         reason: reason.clone(),
                     }],
+                    // A seat that named an unusable move is recorded as the rule violation it is, so
+                    // it is counted beside every other illegal move rather than filed as a fault.
+                    // The ply stays absent for the same reason as above: the parser refused the move
+                    // before it became a board action, so there is no move to report.
+                    ArenaError::SeatRefused { label, failure } => vec![IllegalMoveView {
+                        ply: 0,
+                        attempted: None,
+                        reason: format!("{label} returned a move the board refuses: {failure}"),
+                    }],
                     _ => Vec::new(),
                 };
+                let cancelled = matches!(error, ArenaError::Cancelled { .. });
                 Ok(ArenaMatch {
                     view: ArenaMatchView {
                         match_id: spec.match_id.clone(),
                         game: spec.game.as_str().to_owned(),
-                        game_name: "Tic-Tac-Toe".to_owned(),
+                        game_name: game_name(spec.game),
                         outcome: ArenaOutcome::NoResult,
                         tested_agent: spec.tested_agent.clone(),
                         opponent_agent: spec.opponent_agent.clone(),
+                        tested_seat: tested_seat_kind,
+                        opponent_seat: opponent_seat_kind,
                         tested_side: spec.tested_side,
                         seed: spec.seed,
                         plies: u32::try_from(plies.len()).unwrap_or(u32::MAX),
                         final_board: plies
                             .last()
                             .map(|ply| ply.board.clone())
-                            .unwrap_or(GameBoard::TicTacToe { cells: vec![] }),
+                            .unwrap_or_else(|| empty_board(spec.game)),
                         winner: None,
                         // A match that failed has no winner, so it has no winning line either.
                         winning_line: None,
                         illegal_moves: illegal,
                         history: plies.iter().map(PlyView::from).collect(),
+                        turns,
                         timeline: timeline.events().to_vec(),
                         failure: Some(error.to_string()),
+                        cancelled,
                     },
                     result: None,
                 })
@@ -744,12 +1006,35 @@ impl ArenaRunner {
 
 /// The opening board, for a match that produced no plies at all.
 ///
-/// Nine empty cells rather than an empty vector, because a zero-length board would render as nothing
+/// Nine empty cells or forty-two, never an empty vector: a zero-length board would render as nothing
 /// and look like a missing result rather than a real one. This is reached only when a match failed on
 /// its very first ply.
-fn empty_tictactoe_board() -> GameBoard {
-    GameBoard::TicTacToe {
-        cells: vec![probelab_core::TicTacToeCell::Empty; 9],
+fn empty_board(kind: GameKind) -> GameBoard {
+    match kind {
+        GameKind::TicTacToe => GameBoard::TicTacToe {
+            cells: vec![probelab_core::TicTacToeCell::Empty; 9],
+        },
+        GameKind::ConnectFour => GameBoard::ConnectFour {
+            columns: probelab_engine::arena::connect_four::COLUMNS,
+            rows: probelab_engine::arena::connect_four::ROWS,
+            cells: vec![
+                probelab_core::ConnectFourCell::Empty;
+                probelab_engine::arena::connect_four::CELLS
+            ],
+        },
+        other => {
+            // Unreachable for the two implemented games. Reached only if a third game is added
+            // without a board to show, in which case an empty tic-tac-toe is a visible placeholder
+            // rather than a silent panic.
+            debug_assert_eq!(
+                other,
+                GameKind::Rps,
+                "unimplemented game reached empty_board"
+            );
+            GameBoard::TicTacToe {
+                cells: vec![probelab_core::TicTacToeCell::Empty; 9],
+            }
+        }
     }
 }
 
@@ -761,28 +1046,39 @@ fn winning_line_for(
     board: &GameBoard,
     outcome: MatchOutcome,
     tested_side: GameSide,
-) -> Option<[u8; 3]> {
+) -> Option<Vec<[u8; 2]>> {
     if outcome == MatchOutcome::Draw {
         return None;
-    }
-    let GameBoard::TicTacToe { cells } = board else {
-        return None;
-    };
-    if cells.len() != 9 {
-        return None;
-    }
-    let mut fixed: [probelab_core::TicTacToeCell; 9] = [probelab_core::TicTacToeCell::Empty; 9];
-    for (slot, cell) in fixed.iter_mut().zip(cells.iter()) {
-        *slot = *cell;
     }
     let winner = match outcome {
         MatchOutcome::Win => tested_side,
         MatchOutcome::Loss => tested_side.other(),
         MatchOutcome::Draw => return None,
     };
-    probelab_engine::arena::tictactoe::winning_line(&fixed, winner)
-        .map(|line| line.map(|index| index as u8))
+    match board {
+        GameBoard::TicTacToe { cells } => {
+            if cells.len() != 9 {
+                return None;
+            }
+            let mut fixed: [probelab_core::TicTacToeCell; 9] =
+                [probelab_core::TicTacToeCell::Empty; 9];
+            for (slot, cell) in fixed.iter_mut().zip(cells.iter()) {
+                *slot = *cell;
+            }
+            probelab_engine::arena::tictactoe::winning_line(&fixed, winner)
+                .map(|line| line.iter().map(|index| [*index as u8, 0u8]).collect())
+        }
+        GameBoard::ConnectFour { .. } => {
+            probelab_engine::arena::connect_four::winning_cells_for(board, winner).map(|line| {
+                line.iter()
+                    .map(|(column, row)| [*column as u8, *row as u8])
+                    .collect()
+            })
+        }
+        _ => None,
+    }
 }
+
 impl Default for ArenaRunner {
     fn default() -> Self {
         Self::new()

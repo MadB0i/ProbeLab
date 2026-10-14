@@ -8,7 +8,7 @@
  */
 
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ReadinessPanel, groupByMode, modeLabel } from "./ReadinessPanel";
 import type { ExecutorDescriptor } from "./api";
@@ -102,5 +102,47 @@ describe("ReadinessPanel", () => {
     expect(screen.getByRole("button", { name: /inspect guest support/i })).toBeDefined();
     // The standing rule is stated before any inspection runs.
     expect(screen.getByText(/stays disabled regardless/i)).toBeDefined();
+  });
+
+  /*
+   * The hook-order regression, reproduced as a user would hit it.
+   *
+   * A `useMemo` used to sit *after* the discovery-error early return, so the component's hook count
+   * changed the instant `error` cleared. React does not reconcile that: it throws "Rendered more
+   * hooks than during the previous render" and unmounts the tree. The effect was that pressing RETRY
+   * DISCOVERY and succeeding — the single action the button exists for — broke the panel instead of
+   * repairing it.
+   *
+   * Rendering with an error and then clearing it is the only way to reach that state, so this test
+   * does exactly that and asserts the panel recovers rather than throwing.
+   */
+  it("recovers when discovery succeeds after an earlier failure", () => {
+    const { rerender } = render(
+      <ReadinessPanel executors={[]} error="socket refused" loading={false} onRefresh={() => {}} />,
+    );
+    expect(screen.getByText(/DISCOVERY FAILED/)).toBeInTheDocument();
+
+    // React logs the hook violation as an error; failing the test on a console error would make this
+    // test assert the *fix*, which is what matters, rather than the noise it used to produce.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      rerender(
+        <ReadinessPanel
+          executors={[executor()]}
+          error={null}
+          loading={false}
+          onRefresh={() => {}}
+        />,
+      );
+      expect(screen.queryByText(/DISCOVERY FAILED/)).not.toBeInTheDocument();
+      expect(screen.getByText(/1 of 1 ready/i)).toBeInTheDocument();
+      expect(
+        consoleError.mock.calls.some((call) =>
+          String(call[0]).includes("Rendered more hooks than during the previous render"),
+        ),
+      ).toBe(false);
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });

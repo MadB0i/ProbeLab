@@ -928,3 +928,135 @@ fn a_comparable_run_keeps_the_identity_the_comparison_judges_on() {
         "the interval must be typed on the wire, not a bare number"
     );
 }
+
+/// The arena statistics types are pinned on the wire, for the same reason as everything else in this
+/// file: the frontend reads these field names, so renaming one is a silent break that no Rust test
+/// would otherwise notice.
+#[test]
+fn the_arena_statistics_types_keep_their_field_names() {
+    use probelab_lab::{arena_statistics, ArenaMatchView, ArenaOutcome};
+
+    let view = ArenaMatchView {
+        match_id: "arena-connect_four-7-1700000000000-1".to_owned(),
+        game: "connect_four".to_owned(),
+        game_name: "Connect Four".to_owned(),
+        outcome: ArenaOutcome::Loss,
+        tested_agent: "qwen2.5:3b".to_owned(),
+        opponent_agent: "depth_bounded_connect_four".to_owned(),
+        tested_seat: probelab_engine::arena::SeatKind::Model,
+        opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
+        tested_side: probelab_core::GameSide::First,
+        seed: 7,
+        plies: 8,
+        final_board: probelab_core::GameBoard::ConnectFour {
+            columns: 7,
+            rows: 6,
+            cells: vec![probelab_core::ConnectFourCell::Empty; 42],
+        },
+        winner: Some(probelab_core::GameSide::Second),
+        winning_line: Some(vec![[4, 0], [4, 1], [4, 2], [4, 3]]),
+        illegal_moves: Vec::new(),
+        history: Vec::new(),
+        turns: Vec::new(),
+        timeline: Vec::new(),
+        failure: None,
+        cancelled: false,
+    };
+
+    let statistics = arena_statistics(&[view]);
+    let value = serde_json::to_value(&statistics).expect("statistics serialise");
+
+    // The group shape the panel reads.
+    let group = &value["groups"][0];
+    for field in [
+        "game",
+        "gameName",
+        "testedAgent",
+        "opponentAgent",
+        "matches",
+        "matchIds",
+        "provenanceDigest",
+        "decisions",
+        "plies",
+        "illegalMoves",
+        "matchesWithIllegalMoves",
+        "costs",
+        "sampleIsSmall",
+    ] {
+        assert!(
+            group.get(field).is_some(),
+            "MatchStatistics must serialise {field}; the panel reads it"
+        );
+    }
+
+    // The four-way outcome vocabulary, with `noResult` separate from `loss`.
+    let outcomes = &group["decisions"]["outcomes"];
+    for field in ["win", "draw", "loss", "noResult"] {
+        assert!(
+            outcomes.get(field).is_some(),
+            "OutcomeCounts must serialise {field}; folding no_result into loss would remove the \
+             distinction from the wire as well as from the arithmetic"
+        );
+    }
+
+    // Both rates, each a typed interval rather than a bare fraction.
+    let decisions = &group["decisions"];
+    for field in [
+        "outcomes",
+        "winRate",
+        "decisiveWinRate",
+        "cancelled",
+        "withFailure",
+        "hasDecided",
+    ] {
+        assert!(
+            decisions.get(field).is_some(),
+            "DecisionStatistics must serialise {field}"
+        );
+    }
+    for field in ["point", "lower", "upper", "confidence"] {
+        assert!(
+            decisions["winRate"].get(field).is_some(),
+            "the interval must serialise {field}, not a bare number"
+        );
+    }
+
+    // Costs distinguish "absent" from zero, so absence has to survive as `null`.
+    let costs = &group["costs"];
+    for field in [
+        "measuredTurns",
+        "unmeasuredTurns",
+        "totalElapsedMs",
+        "meanElapsedMs",
+        "maxElapsedMs",
+        "promptTokens",
+        "completionTokens",
+        "totalTokens",
+        "turnsWithoutUsage",
+    ] {
+        assert!(
+            costs.get(field).is_some(),
+            "CostStatistics must serialise {field}"
+        );
+    }
+    assert!(
+        costs["promptTokens"].is_null(),
+        "a policy-only batch has no tokens, and that has to reach the panel as null rather than 0"
+    );
+
+    // Ply statistics.
+    for field in ["total", "mean", "min", "max"] {
+        assert!(
+            group["plies"].get(field).is_some(),
+            "PlyStatistics must serialise {field}"
+        );
+    }
+
+    // The envelope.
+    for field in ["groups", "matchesRead", "ungrouped"] {
+        assert!(
+            value.get(field).is_some(),
+            "ArenaStatistics must serialise {field}"
+        );
+    }
+}

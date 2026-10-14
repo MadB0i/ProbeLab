@@ -439,6 +439,7 @@ impl GeminiProvider {
                     response_text: Some(sanitize_response_text(&error.to_string(), &credential)),
                     usage: None,
                     elapsed_ms: Some(elapsed_ms(started)),
+                    http_status: None,
                 }
             })?;
 
@@ -449,15 +450,24 @@ impl GeminiProvider {
             response_text: Some(sanitize_response_text(&error.to_string(), &credential)),
             usage: None,
             elapsed_ms: Some(elapsed_ms(started)),
+            http_status: None,
         })?;
 
         if !status.is_success() {
+            // Classified through the shared rules, for the same reason the Anthropic adapter does:
+            // one classification for every adapter, so a UI branch written once works on all three.
+            let kind = crate::classify_http_failure(status.as_u16(), &raw);
             return Err(ModelCallFailure {
-                kind: ModelCallFailureKind::HttpError,
-                message: format!("the Gemini API returned HTTP {}", status.as_u16()),
+                kind,
+                message: format!(
+                    "the Gemini API returned HTTP {}: {}",
+                    status.as_u16(),
+                    crate::first_useful_line(&raw)
+                ),
                 response_text: Some(sanitize_response_text(&raw, &credential)),
                 usage: None,
                 elapsed_ms: Some(elapsed_ms(started)),
+                http_status: Some(status.as_u16()),
             });
         }
 
@@ -471,6 +481,7 @@ impl GeminiProvider {
                 )),
                 usage: None,
                 elapsed_ms: Some(elapsed_ms(started)),
+                http_status: Some(status.as_u16()),
             })?;
 
         let elapsed = elapsed_ms(started);
@@ -492,6 +503,7 @@ impl GeminiProvider {
                     response_text: Some(sanitize_response_text(&raw, &credential)),
                     usage: Some(usage),
                     elapsed_ms: Some(elapsed),
+                    http_status: Some(status.as_u16()),
                 })
             }
             Err(error) => {
@@ -501,6 +513,7 @@ impl GeminiProvider {
                     response_text: Some(sanitize_response_text(&raw, &credential)),
                     usage: Some(usage),
                     elapsed_ms: Some(elapsed),
+                    http_status: Some(status.as_u16()),
                 })
             }
         };
@@ -519,6 +532,7 @@ impl GeminiProvider {
                     response_text: Some(sanitized),
                     usage: Some(usage),
                     elapsed_ms: Some(elapsed),
+                    http_status: Some(status.as_u16()),
                 })
             }
         };

@@ -128,12 +128,14 @@ fn every_registered_agent_actually_produces_a_decision() {
             .unwrap_or_else(|error| panic!("{} should build: {error}", spec.id));
         // An arena-only policy answers a board request, and refusing a grid request is the correct
         // behaviour for it rather than a failure — which is what the companion test below pins.
-        if spec
-            .supported_games
-            .contains(&probelab_core::GameKind::TicTacToe)
-        {
+        if !spec.supported_games.is_empty() {
+            let game = spec
+                .supported_games
+                .first()
+                .copied()
+                .expect("the filter found a game");
             let decision = agent
-                .decide(tictactoe_request())
+                .decide(game_request(game))
                 .unwrap_or_else(|error| panic!("{} should decide a game: {error}", spec.id));
             assert!(
                 matches!(decision, probelab_core::ModelDecision::GameMove(_)),
@@ -181,22 +183,29 @@ fn every_registered_agent_actually_produces_a_decision() {
 /// The companion to the test above. An agent-only policy is useless, but a policy that claims a game
 /// in the registry and then refuses that game's request is worse — the arena would offer it and fail
 /// on the first ply. This is the check that keeps `supported_games` honest.
+///
+/// Written per *declared* game rather than for tic-tac-toe alone, which is what lets a second game
+/// ship without weakening the test: adding `GameKind::ConnectFour` to a policy and forgetting to
+/// make it playable would fail here rather than surfacing as an arena command that errors on ply one.
 #[test]
 fn every_arena_agent_answers_its_declared_game() {
+    let implemented = probelab_lab::available_games()
+        .into_iter()
+        .map(|game| game.id)
+        .collect::<Vec<_>>();
     for spec in AgentRegistry::built_in().specs() {
         for game in &spec.supported_games {
-            assert_eq!(
-                *game,
-                probelab_core::GameKind::TicTacToe,
+            assert!(
+                implemented.contains(&game.as_str().to_owned()),
                 "{} declares {game:?}, which this build does not implement",
                 spec.id
             );
             let mut agent = AgentRegistry::built_in()
                 .build(&spec.id, 11)
                 .unwrap_or_else(|error| panic!("{} should build: {error}", spec.id));
-            let decision = agent.decide(tictactoe_request()).unwrap_or_else(|error| {
+            let decision = agent.decide(game_request(*game)).unwrap_or_else(|error| {
                 panic!(
-                    "{} declares tic-tac-toe but could not decide it: {error}",
+                    "{} declares {game:?} but could not decide it: {error}",
                     spec.id
                 )
             });
@@ -205,6 +214,22 @@ fn every_arena_agent_answers_its_declared_game() {
                 "{} returned {decision:?} for a game request, which is not a move",
                 spec.id
             );
+            // The move it returned must be one the request actually offered. A policy that answered
+            // with a plausible-looking but unplayable move would pass a shape-only check and then lose
+            // the match on ply one, which is the failure this whole test exists to prevent.
+            let offered = game_request(*game)
+                .game
+                .as_ref()
+                .expect("the fixture carries a game")
+                .legal_moves
+                .clone();
+            if let probelab_core::ModelDecision::GameMove(played) = decision {
+                assert!(
+                    offered.contains(&played),
+                    "{} answered {played:?}, which the request did not offer",
+                    spec.id
+                );
+            }
         }
     }
 }
@@ -223,6 +248,96 @@ fn an_arena_only_agent_refuses_a_grid_request() {
         agent.decide(grid_request()).is_err(),
         "a tic-tac-toe policy should not pretend it can navigate a grid"
     );
+}
+
+/// The same refusal holds for a connect-four policy, for the same reason.
+#[test]
+fn a_connect_four_only_agent_refuses_a_grid_request() {
+    let mut agent = AgentRegistry::built_in()
+        .build("depth_bounded_connect_four", 3)
+        .expect("build");
+    assert!(
+        agent.decide(grid_request()).is_err(),
+        "a connect-four policy should not pretend it can navigate a grid"
+    );
+}
+
+/// A connect-four policy refuses *tic-tac-toe*, not just the grid.
+///
+/// The stronger claim, and the one that matters once two games ship. "This agent knows about games"
+/// is not the same as "this agent knows about *this* game", and only the second prevents the arena
+/// from seating a search against a board whose rules it has never seen.
+#[test]
+fn a_connect_four_policy_refuses_a_tic_tac_toe_board() {
+    let mut agent = AgentRegistry::built_in()
+        .build("depth_bounded_connect_four", 3)
+        .expect("build");
+    assert!(
+        agent.decide(tictactoe_request()).is_err(),
+        "a connect-four policy must not answer a tic-tac-toe board"
+    );
+    let mut baseline = AgentRegistry::built_in()
+        .build("first_legal_connect_four", 3)
+        .expect("build");
+    assert!(
+        baseline.decide(tictactoe_request()).is_err(),
+        "the connect-four baseline takes whatever move is offered, so it must be checked too"
+    );
+}
+
+/// A realistic opening request for one of the implemented arena games.
+///
+/// Built by hand rather than through the game implementations so the fixture is an independent
+/// statement of the wire format — if the engine changed the request shape, this would fail and say so,
+/// rather than silently following the change.
+fn game_request(kind: probelab_core::GameKind) -> ModelRequest {
+    let (board, legal, remaining) = match kind {
+        probelab_core::GameKind::TicTacToe => (
+            probelab_core::GameBoard::TicTacToe {
+                cells: vec![probelab_core::TicTacToeCell::Empty; 9],
+            },
+            (0..9).map(probelab_core::GameMove::TicTacToe).collect(),
+            8,
+        ),
+        probelab_core::GameKind::ConnectFour => (
+            probelab_core::GameBoard::ConnectFour {
+                columns: 7,
+                rows: 6,
+                cells: vec![probelab_core::ConnectFourCell::Empty; 42],
+            },
+            (0..7).map(probelab_core::GameMove::ConnectFour).collect(),
+            41,
+        ),
+        other => panic!("no arena fixture for {other:?}"),
+    };
+    ModelRequest {
+        episode_id: "registry-game".to_owned(),
+        turn: 1,
+        observation: probelab_core::Observation {
+            turn: 1,
+            position: probelab_core::NO_GRID_POSITION,
+            grid_size: probelab_core::NO_GRID,
+            current_tile: probelab_core::TileKind::Safe,
+            visible_neighbors: Vec::new(),
+            distance_to_goal: 0,
+            max_turns: 42,
+            remaining_turns: 42,
+            available_actions: Vec::new(),
+        },
+        available_actions: Vec::new(),
+        process_spawn_available: false,
+        history: Vec::new(),
+        game: Some(probelab_core::GameRequest {
+            kind,
+            ply: 1,
+            side: probelab_core::GameSide::First,
+            board,
+            legal_moves: legal,
+            history: Vec::new(),
+            remaining_plies: remaining,
+            last_move: None,
+        }),
+    }
 }
 
 /// A realistic tic-tac-toe opening request, for the arena agents.

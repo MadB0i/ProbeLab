@@ -90,11 +90,28 @@
   --line-3: #3a465c; /* control border, table rule */
   --line-live: #2f4a6b; /* the border a live instrument carries */
 
-  /* -- INK -------------------------------------------------------------- */
+  /* -- INK --------------------------------------------------------------
+     These four are specified against every background they can land on, not against the panel they were
+     designed in, because that is where the previous values failed. `--ink-3` at #7c8a9e measured 4.46:1
+     on the blue tint and 4.36:1 on the green tint — a rounding error below the floor, on the two tinted
+     surfaces that carry the most meaning in the app. `--ink-4` at #5a6779 measured 3.06:1 on a panel and
+     2.72:1 on a tinted chip.
+
+     Each value below is now verified at 4.5:1 or better against all four panel surfaces, the two wells,
+     and all four tints:
+
+       --ink-3 #99a5b6   7.0:1 panel, 7.6:1 inset, 5.2:1 on the lightest surface, 6.3:1 blue tint
+       --ink-4 #8e9aad   6.0:1 panel, 6.8:1 inset, 4.6:1 on the lightest surface, 5.5:1 blue tint
+
+     The cost is that the gap between tertiary and placeholder text is a few steps of red per channel
+     instead of sixty. That is the real constraint, and the test above is where the trade was made: a
+     fourth gray dark enough to read as clearly "dimmer" cannot clear 4.5:1 on the hovered and pressed
+     surfaces this app actually uses -- 4.33:1 and 3.88:1 respectively, measured -- so the hierarchy
+     between "meta" and "placeholder" has to be carried by weight and size rather than by luminance. */
   --ink: #e8edf5; /* primary — ~14:1 on --surface-1 */
   --ink-2: #a9b6c8; /* secondary — ~7:1 */
-  --ink-3: #7c8a9e; /* tertiary / meta — never body copy */
-  --ink-4: #5a6779; /* placeholder, disabled label */
+  --ink-3: #99a5b6; /* tertiary / meta — never body copy */
+  --ink-4: #8e9aad; /* placeholder, disabled label — still 4.5:1, not a decorative gray */
   --on-accent: #04101f; /* text on a filled blue control */
 
   /* -- INTERACTIVE ------------------------------------------------------ */
@@ -362,7 +379,19 @@ code {
   grid-template-columns: var(--rail-w-collapsed) minmax(0, 1fr);
 }
 
-/* --- navigation rail ---------------------------------------------------- */
+/* --- navigation rail ----------------------------------------------------
+   `overflow` is visible, and that is load-bearing in the other direction.
+
+   The collapse toggle is a 22px circle positioned at `right: -11px`, so it straddles the rail's edge
+   with half of it over the content area — the usual way to put a handle on a divider. It was clipped
+   here: with `overflow: hidden` the rail amputated the outer eleven pixels, and what rendered was a
+   button with a sliced-off chevron that looked like a rendering fault and was one. `right: -11px` is
+   the deliberate half; the clip was the accident.
+
+   Nothing else needs this rail to clip. The navigation list is the part that scrolls, and it already
+   does its own clipping and scrolling (`.nav-items` sets `overflow-y: auto` and `overflow-x: hidden`).
+   Removing the rail's own clip lets the toggle finish drawing; it does not let the nav spill, because
+   the nav is inside a box that is 236px wide and clips itself. */
 .shell-rail {
   display: flex;
   flex-direction: column;
@@ -370,7 +399,6 @@ code {
   background: var(--rail-bg);
   border-right: 1px solid var(--line);
   box-shadow: var(--shadow-hairline);
-  overflow: hidden;
 }
 
 .nav-brand {
@@ -456,7 +484,7 @@ code {
   font-size: var(--fs-micro);
   letter-spacing: var(--tracking-wide);
   text-transform: uppercase;
-  color: var(--ink-4);
+  color: var(--ink-3);
   padding: 0 8px 6px;
   white-space: nowrap;
 }
@@ -596,7 +624,7 @@ code {
   border-top: 1px solid var(--line);
   font-size: var(--fs-micro);
   line-height: 1.45;
-  color: var(--ink-4);
+  color: var(--ink-3);
 }
 
 /* --- main column -------------------------------------------------------- */
@@ -732,7 +760,7 @@ code {
   font-size: var(--fs-micro);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
-  color: var(--ink-4);
+  color: var(--ink-3);
   white-space: nowrap;
   overflow: hidden;
 }
@@ -749,7 +777,7 @@ code {
 
 /* Scope claims, hidden before the live read and the route position are. */
 .statusbar-optional {
-  color: var(--ink-4);
+  color: var(--ink-3);
 }
 
 .statusbar-spacer {
@@ -777,6 +805,29 @@ code {
 /* ==========================================================================
    6. SURFACES — panels, headings, wells, notes
    ========================================================================== */
+
+/*
+   Text that exists for assistive technology and for nobody else.
+
+   This utility was missing entirely, and the markup that asked for it did not know: two table captions
+   — the stored-run history and the Arena archive — carry `className="visually-hidden"` with the clear
+   intent of describing a table without printing its description above it. With no rule they rendered as
+   ordinary visible captions, which is why `check-unstyled-classes.py` listed this name among the
+   unstyled ones. Clipped rather than `display: none`, because a hidden element is removed from the
+   accessibility tree as well as from the page.
+*/
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .panel {
   position: relative;
   background: var(--surface-1);
@@ -872,7 +923,9 @@ code {
 }
 
 .field-description-quiet {
-  color: var(--ink-4);
+  /* Explanatory prose under a control, which a reader is expected to read. `--ink-4` is the
+     placeholder floor and axe reported this as a serious `color-contrast` violation. */
+  color: var(--ink-3);
 }
 
 .card-footer {
@@ -1707,7 +1760,11 @@ input[type="radio"] {
   font-size: var(--fs-micro);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
-  color: var(--ink-4);
+  /* `--ink-3`, not `--ink-4`. These label a live value. axe reported them as serious
+     `color-contrast` violations on the lab route, and the same substitution was made for the Arena's
+     run-context labels in phase 2. `--ink-4` at 3.33:1 is the placeholder floor, and a label above a
+     measured number is not a placeholder. */
+  color: var(--ink-3);
 }
 
 .metric-value,
@@ -2042,7 +2099,11 @@ input[type="radio"] {
   font-size: var(--fs-micro);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
-  color: var(--ink-4);
+  /* `--ink-3`, not `--ink-4`. These label real values — the objective, the parameter set, the execution
+     boundary — and `--ink-4` is documented as placeholder, disabled label and bullet, at 3.33:1. axe
+     reported 35 serious `color-contrast` violations on the lab route for exactly this, every one of them
+     a meaningful label rather than a decoration. */
+  color: var(--ink-3);
 }
 
 .readout-value {
@@ -2079,6 +2140,86 @@ input[type="radio"] {
   line-height: 1.55;
   color: var(--ink-3);
   margin-bottom: 10px;
+}
+
+/*
+   The two launch paths, side by side.
+
+   Stacked, they were two 40px controls plus a 7px gap, and the deck measured 310px tall at 1600x900 —
+   which put the navigation trace's top edge at 748px, entirely below a 900px window's content area. In a
+   row the deck is 68px shorter and both actions stay equally prominent, which is what they are:
+   alternatives, not a sequence. The `.action-card .run-button` sizes below are kept; this only places them.
+*/
+.action-buttons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.action-buttons .run-button,
+.action-buttons .run-button-secondary {
+  min-width: 0;
+}
+
+.action-buttons .run-button + .run-button-secondary {
+  margin-top: 0;
+}
+
+/*
+   The stop control.
+
+   Amber rather than red: it is the one button on this card that stops work rather than starting it, and
+   it shares the card with two launch actions. A red primary here would read as "this is the main
+   action", and the main action on a run card is the one that starts a run.
+*/
+.run-button-stop {
+  border-color: var(--amber-line);
+  background: var(--amber-tint);
+  color: var(--amber-ink);
+}
+
+.run-button-stop:hover:not(:disabled) {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: var(--on-accent);
+}
+
+.run-button-stop:disabled {
+  background: var(--surface-2);
+  border-color: var(--line);
+  color: var(--ink-4);
+}
+
+/*
+   What a stopped run reports.
+
+   A `role="status"` region rather than an alert: nothing here demands action, and an alert would make a
+   screen reader announce a correct outcome as though it were a fault.
+*/
+.run-stopped {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--amber-line);
+  border-radius: var(--r-2);
+  background: var(--amber-tint);
+}
+
+.run-stopped-label {
+  font-family: var(--font-display);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--amber-ink);
+}
+
+.run-stopped-facts {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  line-height: 1.5;
+  color: var(--ink-2);
 }
 
 .action-card .run-button,
@@ -2126,6 +2267,13 @@ input[type="radio"] {
   background: var(--surface-inset);
 }
 
+/* No run has been requested: the resting state, which is the base rule above. */
+.run-state.is-idle {
+  background: var(--surface-inset);
+  border-color: var(--line-3);
+  color: var(--ink-3);
+}
+
 .run-state.is-running {
   background: var(--cyan-tint);
   border-color: var(--cyan-dim);
@@ -2138,23 +2286,115 @@ input[type="radio"] {
   color: var(--green);
 }
 
-.run-state.is-failed,
-.run-state.is-cancelled {
+.run-state.is-failed {
   background: var(--red-tint);
   border-color: var(--red-line);
   color: var(--red-ink);
 }
 
-/* --- live canvas -------------------------------------------------------- */
-.workspace-grid {
-  display: grid;
-  grid-template-columns: minmax(230px, 0.72fr) minmax(300px, 1.28fr);
-  gap: var(--space-m);
-  min-width: 0;
+/*
+   A run the operator stopped.
+
+   Amber, not red, and its own rule rather than a shared one with `is-failed`. It shares the shape of
+   a terminal state but not its meaning: nothing broke, the evaluator never ran, and there is no score.
+   Painting it the colour of a failure is how a correct outcome gets read as a fault.
+
+   The `-is-` prefix matters. These rules have always been written `is-running` / `is-completed` while
+   the chip rendered `run-state running` / `run-state complete`, so no state tint has ever been applied
+   to it — every state looked the same, which is exactly the sort of thing only a screenshot catches.
+*/
+.run-state.is-cancelled {
+  background: var(--amber-tint);
+  border-color: var(--amber-line);
+  color: var(--amber-ink);
 }
 
-.progress-card,
-.visualization-card {
+.run-state.is-starting,
+.run-state.is-finalizing {
+  background: var(--cyan-tint);
+  border-color: var(--cyan-dim);
+  color: var(--cyan);
+}
+
+/* --- protocol vs legality ---------------------------------------------------
+   Two rates in one block, each named for what it measures.
+
+   The point of the block is that they are visibly different quantities. A single "100%" beside eight
+   refused moves reads as one verdict, so the second rate sits directly under the first with its own
+   label, its own colour, and a sentence underneath that states both in words. */
+.legality-note {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+}
+
+.legality-row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) 56px;
+  align-items: center;
+  gap: 10px;
+}
+
+.legality-key {
+  font-family: var(--font-display);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.legality-bar {
+  display: block;
+  height: 6px;
+  border-radius: 99px;
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+
+.legality-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+  background: var(--cyan);
+  transition: width var(--t-slow) var(--ease);
+}
+
+/* A different colour, because it is a different question. Sharing the protocol colour is what made
+   one bar read as the answer to both. */
+.legality-bar--legality > span {
+  background: var(--blue-hi);
+}
+
+.legality-value {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--ink-2);
+  text-align: right;
+}
+
+.legality-copy {
+  margin: 0;
+  font-size: var(--fs-micro);
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.legality-callout {
+  margin: 0;
+  padding: 6px 9px;
+  border-left: 2px solid var(--amber);
+  background: var(--amber-tint);
+  font-size: var(--fs-micro);
+  line-height: 1.55;
+  color: var(--amber-ink);
+}
+
+/* --- live canvas -------------------------------------------------------- */
+.progress-card {
   background: var(--surface-sunken);
   border-color: var(--line-live);
   box-shadow: var(--shadow-card), inset 0 1px 0 rgba(255, 255, 255, 0.04);
@@ -2168,91 +2408,18 @@ input[type="radio"] {
   border-color: var(--cyan-dim);
 }
 
-.progress-card .panel-heading,
-.visualization-card .panel-heading {
+.progress-card .panel-heading {
   border-bottom-color: var(--line-2);
 }
 
-.world-grid {
-  display: grid;
-  gap: 4px;
-  padding: 10px;
-  /* The canvas is an instrument, not a board that fills the card: an `aspect-ratio` cell in a
-     full-width grid grows to the width of the column and the 5x5 view takes over the screen. */
-  max-width: 320px;
-  margin-inline: auto;
-  background: var(--surface-inset);
-  border: 1px solid var(--line);
-  border-radius: var(--r-2);
-}
+/*
+   The terrain key.
 
-.world-cell {
-  position: relative;
-  aspect-ratio: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 1px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-1);
-  background: var(--surface-2);
-  font-family: var(--font-mono);
-  font-size: var(--fs-micro);
-  color: var(--ink-4);
-  transition: background var(--t-base) var(--ease), border-color var(--t-base) var(--ease);
-}
-
-.world-cell small {
-  font-size: var(--fs-micro);
-  opacity: 0.75;
-}
-
-.world-cell.known {
-  background: var(--surface-3);
-  color: var(--ink-3);
-  border-color: var(--line-3);
-}
-
-.world-cell.unknown {
-  background: repeating-linear-gradient(
-    45deg,
-    var(--surface-2),
-    var(--surface-2) 5px,
-    var(--surface-inset) 5px,
-    var(--surface-inset) 10px
-  );
-}
-
-.world-cell.agent {
-  background: var(--blue-tint);
-  border-color: var(--blue);
-  color: var(--blue-hi);
-  box-shadow: inset 0 0 0 1px rgba(110, 160, 255, 0.4);
-}
-
-.world-cell.safe {
-  background: var(--surface-3);
-}
-
-.world-cell.reward {
-  background: var(--green-tint);
-  border-color: var(--green-line);
-  color: var(--green);
-}
-
-.world-cell.danger {
-  background: var(--red-tint);
-  border-color: var(--red-line);
-  color: var(--red-ink);
-}
-
-.world-cell.obstacle {
-  background: var(--surface-4);
-  border-color: var(--line-3);
-  color: var(--ink-3);
-}
-
+   It used to live in the command center's own section, next to a static tile map, and carried
+   `margin-top: auto` because it was pinned to the bottom of a fixed-height card. It is now used by the
+   grid-world stage, where the key sits directly under the board — so the auto margin is gone, and the
+   swatches are declared here rather than beside the rule that used to own them.
+*/
 .legend {
   display: flex;
   flex-wrap: wrap;
@@ -2276,6 +2443,10 @@ input[type="radio"] {
   height: 9px;
   border-radius: 2px;
   border: 1px solid var(--line-3);
+  background: var(--surface-3);
+}
+
+.legend-swatch.safe {
   background: var(--surface-3);
 }
 
@@ -2351,7 +2522,9 @@ input[type="radio"] {
 .catalog-count {
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
-  color: var(--ink-4);
+  /* A count of what is stored, not a placeholder. `--ink-4` at 3.33:1 is below the 4.5:1 floor and axe
+     reported it as a serious violation on the lab route. */
+  color: var(--ink-3);
 }
 
 /* --- model / provider card ---------------------------------------------- */
@@ -2395,7 +2568,9 @@ input[type="radio"] {
   font-size: var(--fs-micro);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
-  color: var(--ink-4);
+  /* Labels over recorded values, held to the reading floor. axe reported these as serious
+     `color-contrast` violations on the lab route. */
+  color: var(--ink-3);
 }
 
 .model-readout > div:not(.model-orbit) > strong,
@@ -2532,7 +2707,7 @@ input[type="radio"] {
 
 .inspector-note {
   font-size: var(--fs-micro);
-  color: var(--ink-4);
+  color: var(--ink-3);
   line-height: 1.5;
 }
 
@@ -2602,7 +2777,8 @@ input[type="radio"] {
 .event-count {
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
-  color: var(--ink-4);
+  /* A count of committed events, not a placeholder. */
+  color: var(--ink-3);
 }
 
 .telemetry-list,
@@ -2655,7 +2831,7 @@ input[type="radio"] {
 .event-code,
 .event-severity {
   font-family: var(--font-mono);
-  color: var(--ink-4);
+  color: var(--ink-3);
   white-space: nowrap;
 }
 
@@ -2715,7 +2891,7 @@ input[type="radio"] {
   font-size: var(--fs-micro);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
-  color: var(--ink-4);
+  color: var(--ink-3);
 }
 
 .reward-total {
@@ -3115,7 +3291,13 @@ input[type="radio"] {
   border-radius: var(--r-2);
 }
 
-.catalog-search:focus-within {
+/* The ring is drawn on the wrapper, because the wrapper is the thing with the visible border.
+   `:has(:focus-visible)` rather than `:focus-within`, so the ring appears for a keyboard user
+   arriving by Tab and not for a mouse click landing in the field — a ring that shows on click is a
+   ring users learn to ignore. The input keeps its own outline from the global rule: the wrapper ring
+   and the field ring together are the indicator, and removing the field's is how this control ended up
+   as the one input on the agents route with no measurable focus indicator. */
+.catalog-search:has(input:focus-visible) {
   border-color: var(--blue);
   box-shadow: 0 0 0 3px rgba(61, 125, 255, 0.2);
 }
@@ -3125,10 +3307,6 @@ input[type="radio"] {
   background: transparent;
   min-height: 34px;
   padding-left: 0;
-}
-
-.catalog-search input:focus-visible {
-  box-shadow: none;
 }
 
 .catalog-search-icon {
@@ -3692,802 +3870,1694 @@ input[type="radio"] {
 }
 
 /* ==========================================================================
-   18. ARENA — the board is the centrepiece
+/* ==========================================================================
+   18. ARENA — THE COMPETITION STAGE
+
+   WHAT THIS IS
+   The Arena is the one surface in ProbeLab that is a *place* rather than a
+   table. A benchmark run is read; a match is watched. So this section is built
+   around one large object on a stage, with everything else in service of it:
+   who is playing, what the last move cost, and how to step through what
+   happened.
+
+   WHY THE BOARD IS SIZED FROM THE WINDOW
+   A board sized in pixels is a board that fits the mockup and overflows the
+   application. At 1366x768 a fixed board pushed its last row under the status
+   bar and took the transport with it, which meant the replay controls — the
+   reason to watch a finished match — were the first thing to scroll away.
+
+   Every dimension below is therefore derived from the viewport height minus the
+   chrome the board does not get to use. `--arena-chrome` is that budget in one
+   number, so when the frame's own furniture changes the board is corrected in
+   one place rather than by tuning three separate rules against three
+   screenshots.
+
+   THE BOARD IS A RECORDING, NOT A STATE MACHINE
+   No rule lives in this file. A disc is where the engine put it, a highlight is
+   where the engine said a line was completed, and the two sides are told apart
+   by which mark the engine recorded. Nothing here decides anything, and the
+   animations only ever describe motion that already happened.
+
+   MOTION
+   Two animations, both functional. A connect-four disc falls, because a disc
+   that appears rather than falls does not read as gravity — and gravity is the
+   rule the whole game turns on. A newly active turn lifts, because "whose move
+   is it" is the question a spectator asks most often. Both are suppressed
+   entirely by section 26, which is a global `!important` reset rather than a
+   per-rule opt-out, so a new animation cannot forget to honour it.
    ========================================================================== */
+
+/* -- Geometry ------------------------------------------------------------- */
+
 .arena-panel {
+  /* The board's vertical budget: window height less everything the board does
+     not get to use — the topbar, the status bar, the panel header, the result
+     gloss, and the control bar below the stage.
+
+     This is a hand-fitted constant, and it is the weakest number in this
+     section. It is here rather than derived because the alternative — asking
+     flexbox to distribute leftover height — needs a definite height on every
+     ancestor between the panel and the window, and the workspace does not
+     provide one. It is kept in one place so that when the furniture above the
+     arena changes, this is the single number to revisit, and the arena can be
+     re-measured at 1366x768 to check it. */
+  --arena-chrome: calc(
+    var(--band-h) + var(--status-h) + var(--arena-controls-reserved) + var(--arena-furniture-reserved)
+  );
+  /* Height the control bar occupies. Measured, not guessed: playback plus match
+     setup plus the gaps between them. */
+  --arena-controls-reserved: 168px;
+  /* Panel padding, the heading row, the result gloss, the gaps, and the stage's
+     own padding and tray. */
+  --arena-furniture-reserved: 236px;
+  --arena-cell-gap: 6px;
+  /* The resting cap. Without it the board grows to fill a 4K display and the
+     discs become postage stamps on a wall. */
+  --arena-stage-max: 540px;
+  --arena-rows: 6;
+  --arena-cols: 7;
+
+  /*
+   * The board's height is definite, and its width follows from it via the column
+   * and row counts. Both are declared HERE, on the panel, rather than on the
+   * board, for a specific reason: the column tray above the board is a *sibling*
+   * of the board, not a descendant, and it needs the same width to line up. A
+   * custom property declared on the board does not reach a sibling.
+   *
+   * A custom property is substituted per element against that element's own
+   * values, so overriding `--arena-cols` / `--arena-rows` on a board modifier
+   * re-derives the width for that game without touching this rule.
+   */
+  --arena-board-height: min(
+    var(--arena-stage-max),
+    max(240px, calc(100vh - var(--arena-chrome)))
+  );
+  /* The board's width is the ceiling the height implies; the column may be
+     narrower, in which case `aspect-ratio` shortens the height to match. Declared
+     here rather than on the board so the sibling tray inherits the same value. */
+  --arena-board-width: min(
+    100%,
+    calc(var(--arena-board-height) * var(--arena-cols) / var(--arena-rows))
+  );
+
   display: flex;
   flex-direction: column;
   gap: var(--space-m);
 }
 
-.arena-layout {
+/* -- Header --------------------------------------------------------------- */
+
+.arena-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-m);
+  flex-wrap: wrap;
+}
+
+.arena-head h2 {
+  margin: 0;
+}
+
+.arena-head__verdict {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+/*
+ * The verdict is the most important thing on the panel, so it is the largest
+ * type here — but "figure" scale is reserved for measured values elsewhere in
+ * the product, and a win is not a measurement. It is a state, so it takes the
+ * heading scale and earns the emphasis from its weight and colour instead.
+ */
+.arena-verdict {
+  font-family: var(--font-display);
+  font-size: var(--fs-h3);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  padding: 4px 10px;
+  border-radius: var(--r-2);
+  border: 1px solid var(--line-3);
+  background: var(--surface-inset);
+  color: var(--ink-2);
+}
+
+/*
+ * Each outcome takes a semantic colour, and the semantics are the ones this
+ * product already uses everywhere else: green is a *verified* result, amber is
+ * attention rather than failure. A loss is deliberately not red. Losing a match
+ * is a measurement, not a danger, and painting it red would make an honest
+ * result look like an error.
+ */
+.arena-verdict--win {
+  color: var(--green);
+  border-color: var(--green-line);
+  background: var(--green-tint);
+}
+
+.arena-verdict--draw {
+  color: var(--ink);
+  border-color: var(--line-3);
+  background: var(--surface-2);
+}
+
+.arena-verdict--loss {
+  color: var(--amber-ink);
+  border-color: var(--amber-line);
+  background: var(--amber-tint);
+}
+
+.arena-verdict--no_result {
+  color: var(--ink-3);
+  border-color: var(--line-2);
+  background: var(--surface-inset);
+}
+
+/* -- Prose about the result ------------------------------------------------ */
+
+/*
+ * One sentence saying what the verdict means.
+ *
+ * A badge alone is not a report: "LOSS" does not say who lost to whom, and
+ * "NO RESULT" does not say whether anyone was at fault. The icon is decorative
+ * and the sentence carries the meaning, so the accessible name is the sentence.
+ */
+.arena-gloss {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin: 0;
+  padding: var(--space-xs) var(--space-s);
+  border-radius: var(--r-2);
+  border: 1px solid var(--line);
+  background: var(--surface-inset);
+  color: var(--ink-2);
+  font-size: var(--fs-body);
+}
+
+.arena-gloss svg {
+  flex: none;
+}
+
+.arena-gloss--win {
+  border-color: var(--green-line);
+}
+
+.arena-gloss--loss {
+  border-color: var(--amber-line);
+}
+
+.arena-gloss--no_result {
+  border-color: var(--amber-line);
+}
+
+/*
+ * The reason there is no result.
+ *
+ * This is the line that turns a dead end into a next step. A verdict of "NO
+ * RESULT" with no reason is an unactionable state; the reason names the actual
+ * fix — a provider that is not listening, a model that is not installed, a
+ * prompt that did not fit — and it is placed directly under the verdict so the
+ * two are read together.
+ */
+.arena-failure {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-xs);
+  margin: 0;
+  padding: var(--space-xs) var(--space-s);
+  border-radius: var(--r-2);
+  border: 1px solid var(--amber-line);
+  border-left-width: 3px;
+  background: var(--amber-tint);
+  color: var(--ink);
+  font-size: var(--fs-body);
+}
+
+.arena-failure svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--amber-ink);
+}
+
+.arena-failure strong {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  font-size: var(--fs-micro);
+  color: var(--amber-ink);
+}
+
+/* -- The stale banner ----------------------------------------------------- */
+
+.arena-stale {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin: 0;
+  padding: var(--space-xs) var(--space-s);
+  border-radius: var(--r-2);
+  border: 1px dashed var(--line-3);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-size: var(--fs-body);
+}
+
+.arena-stale svg {
+  flex: none;
+  color: var(--ink-3);
+}
+
+/* ==========================================================================
+   THE STAGE
+   Board on the left, competitors on the right, both on one surface that reads
+   as a lit table rather than as two cards on a page.
+   ========================================================================== */
+
+.arena-stage {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(250px, 300px);
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  gap: var(--space-m);
+  align-items: start;
+  padding: var(--space-m);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-3);
+  /* Lit from above, like the board frames elsewhere in the product. Depth comes
+     from the surface step and the hairline, not from a glow. */
+  background: radial-gradient(120% 90% at 50% 0%, #151d2b 0%, var(--surface-sunken) 72%);
+  box-shadow: var(--shadow-card), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.arena-board-column {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /*
+   * `width: 100%` is load-bearing, not tidiness. Without a definite width here,
+   * the chain below becomes circular: the board and the tray both size themselves
+   * as `min(100%, <derived width>)`, and `100%` resolves against this column,
+   * whose own auto width depends on its contents. The browser resolves that
+   * cycle to min-content, and a seven-column board collapsed to 125px — six
+   * pixels per disc. Giving the column a definite width breaks the cycle.
+   */
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ==========================================================================
+   THE BOARDS
+   ========================================================================== */
+
+.arena-board {
+  display: grid;
+  /*
+   * The board stacks its rows; each row lays out its own cells. The board owns
+   * the row gap and `.arena-row` owns the column gap, which is why there is no
+   * `grid-template-columns` here.
+   */
+  grid-template-rows: repeat(var(--arena-rows), minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--arena-cell-gap);
+  margin: 0 auto;
+  /*
+   * Square cells, by construction.
+   *
+   * The first version fixed the *height* from the viewport budget and then clamped the *width* with
+   * `min(100%, ...)`. That only holds if the column happens to be wider than the derived width. When
+   * it is not, the height stands and the width shrinks: measured at 1366x768 the board came out
+   * 250x452 -- seven columns 36px wide inside six rows 75px tall, and discs stretched into ovals.
+   *
+   * Deriving the height from the width with `aspect-ratio` inverts the dependency. The width takes
+   * whatever the column allows, capped by the budget, and the height follows. The budget still sets
+   * the ceiling, because it appears in the width expression, and the cells are always square.
+   */
+  width: var(--arena-board-width);
+  aspect-ratio: var(--arena-cols) / var(--arena-rows);
+  height: auto;
+  min-height: 0;
+}
+
+/*
+ * Tic-tac-toe: three by three, square cells, so the width equals the height.
+ *
+ * Only the shape is overridden here. The height and width *derivations* stay on
+ * `.arena-panel` on purpose: re-declaring them on the board would give the board
+ * a different value from its sibling tray, and the tray would stop lining up
+ * with the columns below it.
+ */
+.arena-board--tic_tac_toe {
+  --arena-cols: 3;
+  --arena-rows: 3;
+}
+
+/*
+ * Connect four: seven columns by six rows.
+ *
+ * Six rows of discs with a gap between them is markedly taller than it is wide,
+ * so the width is derived from the height. `--arena-cols: 7` and `--arena-rows: 6`
+ * are the panel defaults, so this rule only has to state the gap.
+ */
+.arena-board--connect_four {
+  --arena-cell-gap: 7px;
+}
+
+/*
+ * One grid row.
+ *
+ * `role="grid"` requires rows and `role="gridcell"` requires a row parent, so the
+ * board's children are row elements rather than cells. That makes the grid two
+ * levels deep, and each level owns a different axis of the gap: the board spaces
+ * the rows, the row spaces the cells within itself.
+ *
+ * `repeat(var(--arena-cols), ...)` rather than a literal count, so a game with a
+ * different shape needs only the two numbers on the board modifier.
+ */
+.arena-row {
+  display: grid;
+  grid-template-columns: repeat(var(--arena-cols), minmax(0, 1fr));
+  gap: var(--arena-cell-gap);
+  min-width: 0;
+  min-height: 0;
+}
+
+/*
+ * A connect-four cell is a *slot* with a disc inside it, not a square.
+ *
+ * The slot is what makes the board read as a board: without a visible well per
+ * cell, a seven-by-six field of discs is a grid of dots with no structure, and
+ * the thing a connect-four player reads — column height — is invisible.
+ */
+.arena-cell--disc {
+  position: relative;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 50% 32%,
+    #0d1219 0%,
+    #070a0f 68%,
+    #0b0f16 100%
+  );
+  /* The slot rim catches the light from above, which is what gives the well
+     depth without a shadow per cell. */
+  box-shadow:
+    inset 0 2px 3px rgba(0, 0, 0, 0.75),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.arena-cell__mark {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  font-family: var(--font-display);
+  font-size: clamp(15px, 2.4vh, 30px);
+  font-weight: 600;
+  line-height: 1;
+  user-select: none;
+}
+
+.arena-cell--tic_tac_toe .arena-cell__mark {
+  font-size: clamp(18px, 3.2vh, 40px);
+}
+
+/*
+ * An unplayed tic-tac-toe cell.
+ *
+ * A faint inset well, not a visible border: the nine cells need to read as a grid the mark lands in,
+ * but a hard 1px border on all nine draws nine boxes and competes with the marks for attention. For
+ * connect four the equivalent treatment is `.arena-cell--disc`, which is stronger because a disc well
+ * is a shape and a tic-tac-toe cell is not.
+ */
+.arena-cell--empty {
+  box-shadow: inset 0 0 0 1px var(--line);
+  background: var(--surface-inset);
+}
+
+.arena-board--connect_four .arena-cell--empty {
+  /* The slot well already carries it; the tic-tac-toe tint would flatten the recess. */
+  background: none;
+}
+
+/*
+ * The two sides.
+ *
+ * Cyan and violet. Deliberately not the action blue and not a danger colour:
+ * these two marks identify *entities*, they are not instructions and not
+ * failures, and violet is reserved in this design system for exactly that.
+ * They also differ in lightness as well as hue, so the board is still readable
+ * without colour vision.
+ */
+.arena-cell--first,
+.arena-seat--first .arena-seat__mark {
+  color: var(--cyan);
+  --arena-side-color: var(--cyan);
+  --arena-side-tint: var(--cyan-tint);
+  --arena-side-line: var(--cyan-dim);
+}
+
+.arena-cell--second,
+.arena-seat--second .arena-seat__mark {
+  color: var(--violet);
+  --arena-side-color: var(--violet);
+  --arena-side-tint: var(--violet-tint);
+  --arena-side-line: #5b4fc0;
+}
+
+/*
+ * A filled connect-four disc.
+ *
+ * The gradient is what stops it reading as a flat coloured circle: a real disc
+ * has a lit edge and a darker centre, and without that a board of seven-by-six
+ * discs looks like a spreadsheet of coloured squares.
+ */
+.arena-board--connect_four .arena-cell--first,
+.arena-board--connect_four .arena-cell--second {
+  background: radial-gradient(
+    circle at 50% 30%,
+    color-mix(in srgb, var(--arena-side-color) 92%, white 8%) 0%,
+    var(--arena-side-color) 46%,
+    color-mix(in srgb, var(--arena-side-color) 62%, black 38%) 100%
+  );
+  box-shadow:
+    inset 0 -2px 3px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+.arena-board--connect_four .arena-cell--first .arena-cell__mark,
+.arena-board--connect_four .arena-cell--second .arena-cell__mark {
+  /* The glyph is redundant with the colour on a disc, so it is hidden here. It
+     stays in the accessible name, which is where a screen-reader user reads it. */
+  color: transparent;
+}
+
+/*
+ * The falling disc.
+ *
+ * Applied to the disc placed by the last move, and only that one. The disc
+ * starts above the board and settles into its slot with a short compression at
+ * the bottom, which is what makes gravity legible rather than decorative.
+ *
+ * The distance is one board height up: the disc enters from beyond the top edge,
+ * which is where a dropped disc actually comes from, and reading as "dropped
+ * from off-screen" is the point. The cell height is derived from the board
+ * height rather than hard-coded, so the animation is still correct if the board
+ * is resized.
+ */
+@keyframes arena-disc-drop {
+  0% {
+    transform: translateY(calc(var(--arena-board-height) * -1));
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  74% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  86% {
+    transform: translateY(calc(var(--arena-board-height) * -0.045));
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+.arena-board--connect_four .arena-cell--last {
+  animation: arena-disc-drop var(--t-slow) var(--ease) both;
+  z-index: 1;
+}
+
+/* -- Cell state ----------------------------------------------------------- */
+
+/*
+ * The cell that changed on the last move, on either game.
+ *
+ * A ring rather than a fill, because a fill would obscure the mark and a mark
+ * is the fact. The corner brackets read as a registration mark on an instrument.
+ */
+.arena-cell--last {
+  outline: 2px solid var(--blue-hi);
+  outline-offset: 2px;
+}
+
+.arena-cell--winning {
+  /*
+   * The engine's own winning line.
+   *
+   * A ring and a glow, NOT a recolour. Painting the four cells a single highlight colour looked
+   * decisive and cost the one fact a spectator most wants from them: whose line it was. When the
+   * tested model was the side that lost, the winning four rendered in the tested side's cyan and the
+   * board appeared to say the model had won. The ring marks the line; the disc's own colour still
+   * says who played it.
+   */
+  box-shadow:
+    inset 0 0 0 2px #ffffff,
+    inset 0 0 0 4px var(--arena-side-color),
+    0 0 16px -1px var(--arena-side-color);
+  z-index: 2;
+}
+
+.arena-board--tic_tac_toe .arena-cell--winning .arena-cell__mark {
+  /* A ring around a glyph reads as a selection; the glyph itself must not also
+     change, or the mark stops being the mark. */
+  text-shadow: 0 0 10px var(--arena-side-color);
+}
+
+/*
+ * A disc belonging to the side that is about to move.
+ *
+ * This answers the question a spectator asks most often. It is a subtle lift
+ * rather than a colour change, because the colour already says *which side* and
+ * changing it would destroy that.
+ */
+.arena-cell--active {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--arena-side-color) 70%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--arena-side-color) 45%, transparent);
+}
+
+@keyframes arena-turn-arrive {
+  from {
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--arena-side-color) 90%, transparent),
+      0 0 0 4px color-mix(in srgb, var(--arena-side-color) 35%, transparent);
+  }
+  to {
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--arena-side-color) 70%, transparent),
+      0 0 0 1px color-mix(in srgb, var(--arena-side-color) 45%, transparent);
+  }
+}
+
+/*
+ * A newly active turn lifts.
+ *
+ * Scoped with `:not(.arena-cell--last)` on purpose. Without the exclusion this rule also matched the
+ * disc that was *just placed* — the last move is, by definition, the active side's disc — and because
+ * it is declared after the drop animation it replaced it. The result was that the one disc which
+ * should visibly fall did not fall at all.
+ */
+.arena-cell--active:not(.arena-cell--last) {
+  animation: arena-turn-arrive var(--t-slow) var(--ease) both;
+}
+
+/* -- Idle and undrawable -------------------------------------------------- */
+
+.arena-board--idle,
+.arena-board--empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  width: min(100%, 460px);
+  min-height: 220px;
+  padding: var(--space-l);
+  border: 1px dashed var(--line-3);
+  border-radius: var(--r-3);
+  background: var(--surface-inset);
+  text-align: center;
+}
+
+.arena-board__idle-text {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--fs-h3);
+  letter-spacing: var(--tracking-label);
+  color: var(--ink-3);
+}
+
+.arena-board.is-dimmed {
+  opacity: 0.72;
+}
+
+/*
+ * The connect-four column tray.
+ *
+ * Sits above the board as seven slot mouths. Purely decorative — every fact it
+ * would convey is already in the cell names a screen reader reads — but a
+ * connect-four board without visible column structure reads as a field of dots
+ * rather than as a game. `aria-hidden` on the wrapper in the markup says so.
+ */
+.arena-c4 {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  /* Definite width, for the same reason `.arena-board-column` has one: the tray's
+     own width is a percentage of it. */
+  width: 100%;
+  min-width: 0;
+}
+
+.arena-c4__tray {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: var(--arena-cell-gap);
+  /* The same derivation the board uses, so the slot mouths sit exactly over the
+     columns. This works because `--arena-board-width` is declared on
+     `.arena-panel`, an ancestor of both. Declared on the board instead, it would
+     be undefined here and the tray would fall back to min-content. */
+  width: min(100%, var(--arena-board-width));
+  margin-bottom: var(--space-2xs);
+}
+
+.arena-c4__slot {
+  height: 10px;
+  border-radius: var(--r-1);
+  background: linear-gradient(180deg, #1a2331 0%, #0a0e15 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* ==========================================================================
+   THE COMPETITOR RAIL
+   ========================================================================== */
+
+.arena-rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-s);
+  min-width: 0;
+}
+
+/*
+ * One competitor.
+ *
+ * The card's left edge is the identity: a 3px bar in that side's colour, always
+ * present, so the two seats are distinguishable at a glance before a word is
+ * read. The active seat additionally lifts and gains a live border, which is the
+ * only thing on this panel that moves between the two cards.
+ */
+.arena-seat {
+  position: relative;
+  padding: var(--space-s) var(--space-s) var(--space-s) calc(var(--space-s) + 3px);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-2);
+  background: var(--surface-1);
+  transition:
+    border-color var(--t-base) var(--ease),
+    box-shadow var(--t-base) var(--ease),
+    transform var(--t-base) var(--ease);
+}
+
+.arena-seat::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  border-radius: var(--r-2) 0 0 var(--r-2);
+  background: var(--arena-side-color, var(--line-3));
+}
+
+.arena-seat--first {
+  --arena-side-color: var(--cyan);
+}
+
+.arena-seat--second {
+  --arena-side-color: var(--violet);
+}
+
+.arena-seat.is-active {
+  border-color: var(--line-live);
+  background: var(--surface-2);
+  box-shadow:
+    var(--shadow-card),
+    0 0 0 1px color-mix(in srgb, var(--arena-side-color) 30%, transparent),
+    0 0 18px -8px var(--arena-side-color);
+}
+
+.arena-seat__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+/*
+ * The side's mark, drawn as a disc.
+ *
+ * A disc rather than a letter because the board draws discs for connect four
+ * and letters for tic-tac-toe; the identity chip works for both by carrying the
+ * same colour and the same word.
+ */
+.arena-seat__mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  font-family: var(--font-display);
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--arena-side-color);
+  background: var(--surface-inset);
+  box-shadow: inset 0 0 0 1px var(--arena-side-color);
+}
+
+.arena-seat__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.arena-seat__agent {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-body);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+/*
+ * Whether this seat is a shipped policy or a real model.
+ *
+ * This is the single most important label on the panel. A policy has no latency
+ * and no tokens, and a card that showed those as zero would read as a model that
+ * answered instantly for free.
+ */
+.arena-seat__kind {
+  display: inline-block;
+  margin: var(--space-xs) 0 0;
+  padding: 2px 7px;
+  border-radius: var(--r-1);
+  border: 1px solid var(--line-3);
+  background: var(--surface-inset);
+  font-family: var(--font-display);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-label);
+  color: var(--ink-2);
+}
+
+.arena-seat[data-seat="model"] .arena-seat__kind {
+  border-color: var(--blue-line);
+  color: var(--blue-hi);
+  background: var(--blue-tint);
+}
+
+.arena-seat__meta,
+.arena-telemetry__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2xs) var(--space-s);
+  margin: var(--space-s) 0 0;
+}
+
+.arena-seat__meta > div,
+.arena-telemetry__grid > div {
+  min-width: 0;
+}
+
+.arena-seat__meta dt,
+.arena-telemetry__grid dt {
+  font-family: var(--font-display);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.arena-seat__meta dd,
+.arena-telemetry__grid dd {
+  margin: 1px 0 0;
+  font-family: var(--font-mono);
+  /* Tabular figures: a column of measured values must not shift as digits
+     change, or the eye reads motion instead of a value. */
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-body);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+/* ==========================================================================
+   PER-TURN TELEMETRY
+   ========================================================================== */
+
+.arena-subhead {
+  margin: 0 0 var(--space-xs);
+  font-family: var(--font-display);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.arena-telemetry {
+  padding: var(--space-s);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-2);
+  background: var(--surface-1);
+}
+
+.arena-telemetry__grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* The model-versus-policy badge beside a seat name. */
+.arena-tag {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 1px 5px;
+  border-radius: var(--r-1);
+  border: 1px solid var(--line-3);
+  background: var(--surface-inset);
+  font-family: var(--font-display);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-label);
+  color: var(--ink-3);
+  vertical-align: 1px;
+}
+
+.arena-telemetry__failure {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2xs);
+  margin: var(--space-s) 0 0;
+  padding: var(--space-xs);
+  border-radius: var(--r-1);
+  border: 1px solid var(--amber-line);
+  background: var(--amber-tint);
+  color: var(--amber-ink);
+  font-size: var(--fs-body);
+}
+
+.arena-telemetry__failure svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+/*
+ * The model's own reply, collapsed.
+ *
+ * This is the only place raw model output appears, and it is bounded and
+ * sanitised by the backend before it gets here. It stays collapsed because it is
+ * evidence for an interested reader rather than something to read by default.
+ */
+.arena-telemetry__reply {
+  margin-top: var(--space-s);
+  font-size: var(--fs-body);
+}
+
+.arena-telemetry__reply summary {
+  cursor: pointer;
+  color: var(--ink-3);
+  font-family: var(--font-display);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.arena-telemetry__reply pre {
+  margin: var(--space-xs) 0 0;
+  padding: var(--space-xs);
+  max-height: 140px;
+  overflow: auto;
+  border-radius: var(--r-1);
+  border: 1px solid var(--line);
+  background: var(--surface-sunken);
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ==========================================================================
+   CONTROLS
+   ========================================================================== */
+
+.arena-controls {
+  display: grid;
+  /*
+   * One column, because this element holds three blocks: the transport, the
+   * match setup, and the secondary evidence.
+   *
+   * It was declared as two columns, `minmax(0, 1fr) minmax(300px, 380px)`. The third
+   * block did not fit and spilled into an implicit third track, and the first
+   * track was left with `0px` to share — so the transport was laid out at 26px
+   * wide. Its play, step and scrub controls were in the DOM, focusable, and
+   * completely invisible. Declaring the tracks the markup actually has is the
+   * whole fix.
+   */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-m);
   align-items: start;
 }
 
-.arena-main {
+.arena-playback,
+.arena-setup {
+  padding: var(--space-s);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-2);
+  background: var(--surface-1);
+}
+
+.arena-setup {
   display: flex;
   flex-direction: column;
   gap: var(--space-s);
-  min-width: 0;
-}
-
-/* The board frame: a physical object on the desk, lit from above. */
-.arena-board-frame {
-  padding: var(--space-m);
-  background: radial-gradient(120% 100% at 50% 0%, #131a26 0%, var(--surface-sunken) 70%);
-  border: 1px solid var(--line-2);
-  border-radius: var(--r-3);
-  box-shadow: var(--shadow-card), inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 /*
- * The board is the tallest fixed object on this panel, so it has to be measured against the window
- * rather than against the stylesheet.
+ * The transport.
  *
- * A flat pixel width made the board overflow short windows: at 1366x768 the third row fell 151px
- * below the fold, and the transport controls for watching the match scrolled away with it. Sizing
- * the board from the viewport height keeps the whole 3x3 grid and the transport on screen at once.
- *
- * The subtraction is the chrome the board does not get to use: the pinned topbar, the status bar,
- * and everything the panel stacks above the board -- match header, selectors, result summary and the
- * transport -- plus the frame's padding. Measuring against the window instead of against the content
- * box is how the frame ended up looking comfortable on paper while its last row sat under the status
- * bar. The cap stops the board growing past its resting size on a tall window. The floor keeps the
- * cells legible on a short one; below that the panel scrolls rather than shrinking into a toy.
+ * Drawn SVG icons with accessible names, in a single row that never wraps at
+ * these window sizes. The play control is wider because it is the one people
+ * press; the four step controls are square, because they are a set.
  */
-.arena-board {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-  width: min(100%, 330px, max(132px, calc(100vh - 640px)));
-  margin: 0 auto;
-}
-
-/* The transport section, when it sits above the board. */
-.arena-playback-section {
-  margin-bottom: var(--space-xs);
-}
-
-.arena-cell {
-  position: relative;
-  aspect-ratio: 1;
-  min-width: 0;
-  overflow: hidden;
-  display: grid;
-  place-items: center;
-  background: var(--surface-2);
-  border: 1px solid var(--line-3);
-  border-radius: var(--r-2);
-  transition: background var(--t-base) var(--ease), border-color var(--t-base) var(--ease),
-    transform var(--t-base) var(--ease);
-}
-
-.arena-cell--first {
-  background: var(--blue-tint);
-  border-color: var(--blue);
-}
-
-.arena-cell--second {
-  background: var(--amber-tint);
-  border-color: var(--amber);
-}
-
-.arena-cell-mark {
-  font-family: var(--font-mono);
-  font-size: var(--fs-h2);
-  font-weight: 700;
-  line-height: 1;
-}
-
-.arena-cell--first .arena-cell-mark {
-  color: var(--blue-hi);
-}
-
-.arena-cell--second .arena-cell-mark {
-  color: var(--amber-ink);
-}
-
-.arena-cell--empty {
-  background: var(--surface-inset);
-}
-
-.arena-outcome-gloss {
-  margin-top: 10px;
-  text-align: center;
-  font-family: var(--font-display);
-  font-size: var(--fs-h3);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-  color: var(--ink-2);
-}
-
-.arena-side {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-s);
-  min-width: 0;
-}
-
-.arena-seats {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.arena-seat {
+.arena-transport {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 11px;
-  background: var(--surface-2);
-  border: 1px solid var(--line-2);
-  border-radius: var(--r-2);
-}
-
-.arena-seat--tested {
-  border-color: var(--blue-line);
-  background: var(--blue-tint);
-}
-
-.seat-mark {
-  width: 26px;
-  height: 26px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: var(--r-1);
-  background: var(--surface-inset);
-  border: 1px solid var(--line-3);
-  font-family: var(--font-mono);
-  font-weight: 700;
-  color: var(--ink-2);
-}
-
-.seat-body {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.seat-name {
-  font-family: var(--font-display);
-  font-size: var(--fs-body);
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  color: var(--ink);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.seat-meta {
-  font-size: var(--fs-micro);
-  color: var(--ink-4);
-}
-
-.arena-telemetry {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.arena-controls {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: var(--space-s);
-  align-items: end;
-  padding: var(--space-s);
-  background: var(--surface-inset);
-  border: 1px solid var(--line);
-  border-radius: var(--r-2);
-}
-
-.arena-illegal {
-  padding: 9px 11px;
-  background: var(--red-tint);
-  border: 1px solid var(--red-line);
-  border-radius: var(--r-2);
-}
-
-.arena-illegal h4 {
-  font-size: var(--fs-micro);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-  color: var(--red-ink);
-  margin-bottom: 5px;
-}
-
-.illegal-ply {
-  display: flex;
-  gap: 8px;
-  font-size: var(--fs-micro);
-  color: var(--red-ink);
-}
-
-.illegal-reason {
-  color: var(--ink-3);
-}
-
-.arena-no-human-note {
-  font-size: var(--fs-micro);
-  line-height: 1.5;
-  color: var(--ink-4);
-}
-
-.arena-history {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.arena-ply {
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
-  gap: 10px;
-  align-items: baseline;
-  padding: 4px 8px;
-  background: var(--surface-inset);
-  border-radius: var(--r-1);
-  font-size: var(--fs-micro);
-}
-
-.ply-number {
-  font-family: var(--font-mono);
-  color: var(--ink-4);
-}
-
-.ply-side {
-  font-family: var(--font-display);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-  color: var(--ink-3);
-}
-
-.ply-move {
-  font-family: var(--font-mono);
-  color: var(--ink);
-}
-
-/* --- The outcome card -------------------------------------------------
-   The one thing a reader looks for after a match. It sits under the
-   seats, above the fold, and states the result for the *tested* policy
-   rather than only naming a winner. */
-.arena-result {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3xs);
-  padding: var(--space-s) var(--space-m);
-  border-radius: var(--r-3);
-  border: 1px solid var(--line-2);
-  background: var(--surface-2);
-}
-
-.arena-result-label {
-  font-family: var(--font-display);
-  font-size: var(--fs-h3);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-  color: var(--ink);
-}
-
-.arena-result-detail {
-  font-size: var(--fs-micro);
-  color: var(--ink-2);
-  line-height: 1.5;
-}
-
-.arena-result--win {
-  border-color: var(--green-line);
-  background: var(--green-tint);
-}
-
-.arena-result--win .arena-result-label {
-  color: var(--green);
-}
-
-.arena-result--loss {
-  border-color: var(--amber-line);
-  background: var(--amber-tint);
-}
-
-.arena-result--loss .arena-result-label {
-  color: var(--amber-ink);
-}
-
-.arena-result--draw {
-  border-color: var(--line-3);
-}
-
-.arena-result--failure {
-  border-color: var(--red-line);
-  background: var(--red-tint);
-}
-
-.arena-result--failure .arena-result-label {
-  color: var(--red-ink);
-}
-
-/* --- The stale banner -------------------------------------------------
-   A completed board whose configuration no longer matches the selectors.
-   The board stays; this says so rather than letting the mismatch pass
-   silently, which is what used to happen. */
-.arena-stale {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-  padding: var(--space-s) var(--space-m);
-  border: 1px solid var(--amber-line);
-  border-left-width: 3px;
-  border-radius: var(--r-3);
-  background: var(--amber-tint);
-}
-
-.arena-stale-badge {
-  align-self: flex-start;
-  padding: 2px 7px;
-  border-radius: var(--r-1);
-  background: var(--amber);
-  color: #1a1005;
-  font-family: var(--font-display);
-  font-size: var(--fs-micro);
-  font-weight: 700;
-  letter-spacing: var(--tracking-label);
-}
-
-.arena-stale p {
-  margin: 0;
-  font-size: var(--fs-micro);
-  line-height: 1.55;
-  color: var(--ink-2);
-}
-
-.arena-stale strong {
-  color: var(--ink);
-  font-weight: 600;
-}
-
-/* --- Playback ---------------------------------------------------------
-   A transport that looks like one: square-ish controls with real hit
-   targets, a primary play button, and a scrubber that spans the width. */
-.arena-playback {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-s);
-  padding: var(--space-m);
-  border: 1px solid var(--line-2);
-  border-radius: var(--r-3);
-  background: var(--surface-inset);
-}
-
-.arena-playback-transport {
-  display: flex;
-  gap: var(--space-xs);
-  align-items: center;
-}
-
-.arena-transport-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 40px;
-  min-height: 34px;
-  padding: 0 var(--space-s);
-  border: 1px solid var(--line-3);
-  border-radius: var(--r-2);
-  background: var(--surface-2);
-  color: var(--ink-2);
-  font-family: var(--font-display);
-  font-size: var(--fs-micro);
-  letter-spacing: var(--tracking-label);
-  cursor: pointer;
-  transition: background var(--t-base) var(--ease), border-color var(--t-base) var(--ease),
-    color var(--t-base) var(--ease);
-}
-
-.arena-transport-button:hover:not(:disabled) {
-  background: var(--surface-3);
-  border-color: var(--ink-4);
-  color: var(--ink);
-}
-
-.arena-transport-button:active:not(:disabled) {
-  background: var(--surface-4);
-}
-
-.arena-transport-button:disabled {
-  background: var(--surface-1);
-  border-color: var(--line-2);
-  color: var(--ink-4);
-  cursor: not-allowed;
-}
-
-.arena-transport-button--primary {
-  min-width: 96px;
-  background: var(--blue);
-  border-color: var(--blue);
-  color: #06101f;
-  font-weight: 700;
-}
-
-.arena-transport-button--primary:hover:not(:disabled) {
-  background: var(--blue-hi);
-  border-color: var(--blue-hi);
-  color: #06101f;
-}
-
-.arena-transport-button--primary:active:not(:disabled) {
-  background: #2f63cc;
-  border-color: #2f63cc;
-}
-
-.arena-scrubber {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: var(--space-s);
-  align-items: center;
-}
-
-.arena-scrubber-label,
-.arena-speed-label {
-  font-size: var(--fs-micro);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-  color: var(--ink-4);
-}
-
-.arena-scrubber input[type="range"] {
-  width: 100%;
-  accent-color: var(--blue);
-  cursor: pointer;
-}
-
-.arena-frame-counter {
-  font-size: var(--fs-micro);
-  color: var(--ink-2);
-  min-width: 52px;
-  text-align: right;
-}
-
-.arena-playback-meta {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--space-m);
-  flex-wrap: wrap;
-  padding-top: var(--space-xs);
-  border-top: 1px solid var(--line-2);
-}
-
-.arena-now-playing {
-  font-family: var(--font-mono);
-  font-size: var(--fs-micro);
-  color: var(--ink-2);
-}
-
-.arena-speed {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-xs);
-}
-
-.arena-speed select {
-  min-height: 26px;
-  padding: 2px 8px;
-  font-size: var(--fs-micro);
-}
-
-.arena-move-note {
-  margin: 0;
-  font-size: var(--fs-micro);
-  color: var(--ink-4);
-}
-
-/* --- The archive ------------------------------------------------------
-   One row per stored match. The outcome is the first thing read, so it
-   carries the colour; the pairing and the metadata carry the rest. */
-.arena-archive {
-  display: flex;
-  flex-direction: column;
   gap: var(--space-2xs);
 }
 
-.arena-archive-row {
+.arena-transport .btn-icon {
+  flex: none;
+  width: 34px;
+  height: 32px;
+  padding: 0;
   display: grid;
-  grid-template-columns: 84px minmax(0, 1fr) auto;
-  gap: var(--space-m);
+  place-items: center;
+}
+
+.arena-transport__play {
+  flex: 1 1 auto;
+  min-width: 104px;
+  display: inline-flex;
   align-items: center;
+  justify-content: center;
+  gap: var(--space-2xs);
+}
+
+/* The two "skip to an end" controls mirror their glyphs. */
+.arena-icon-flip {
+  transform: scaleX(-1);
+}
+
+/*
+ * The scrub position.
+ *
+ * Full width under the transport: the frame counter and the speed sit on the
+ * same row beneath it, which is where a media control of this kind is expected
+ * and which keeps the whole transport inside one block of vertical space.
+ */
+.arena-scrub {
+  display: block;
+  margin: var(--space-s) 0 0;
+}
+
+.arena-scrub input[type="range"] {
   width: 100%;
-  padding: var(--space-s) var(--space-m);
-  border: 1px solid var(--line-2);
-  border-radius: var(--r-2);
-  background: var(--surface-2);
-  color: var(--ink-2);
-  text-align: left;
-  cursor: pointer;
-  transition: background var(--t-base) var(--ease), border-color var(--t-base) var(--ease);
+  margin: 0;
+  accent-color: var(--blue);
 }
 
-.arena-archive-row:hover:not(:disabled) {
-  background: var(--surface-3);
-  border-color: var(--line-3);
+.arena-transport__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-s);
+  margin-top: var(--space-2xs);
 }
 
-.arena-archive-row:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
-}
-
-.arena-archive-row--open {
-  border-color: var(--blue);
-  background: var(--blue-tint);
-}
-
-.arena-archive-outcome {
-  font-family: var(--font-display);
+.arena-frame-counter {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--fs-micro);
-  font-weight: 700;
   letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
   color: var(--ink-3);
 }
 
-.arena-archive-outcome--win {
-  color: var(--green);
-}
-
-.arena-archive-outcome--loss {
-  color: var(--amber-ink);
-}
-
-.arena-archive-outcome--draw {
-  color: var(--blue-hi);
-}
-
-.arena-archive-outcome--no_result {
-  color: var(--red-ink);
-}
-
-.arena-archive-main {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.arena-archive-pairing {
-  font-family: var(--font-mono);
+.arena-speed select {
+  min-width: 82px;
+  height: 26px;
+  padding: 0 var(--space-2xs);
   font-size: var(--fs-micro);
+}
+
+/* -- Match setup ---------------------------------------------------------- */
+
+.arena-setup__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-s);
+}
+
+.arena-setup__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+}
+
+.arena-setup__actions .btn-lg {
+  flex: 1 1 auto;
+  justify-content: center;
+  min-height: 40px;
+}
+
+.arena-setup__note {
+  margin: 0;
+  font-size: var(--fs-body);
+  color: var(--ink-2);
+}
+
+/* ==========================================================================
+   SECONDARY EVIDENCE — the turn record and the archive, stacked
+   ========================================================================== */
+
+.arena-secondary {
+  /* Full width of whatever column it lands in, and one column of its own: the
+     turn record wants the full width to keep ply, side, move and cost on one
+     line, and at 119px the cost column could not hold even "4.1 s". */
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-m);
+  align-items: start;
+}
+
+.arena-secondary > section {
+  /* Grid children default to `min-width: auto`, which lets a long unbroken agent name widen the
+     column and push the whole panel past the viewport. `0` is what makes the inner `overflow-wrap`
+     rules actually take effect. */
+  min-width: 0;
+  padding: var(--space-s);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-2);
+  background: var(--surface-1);
+}
+
+/* -- Turn record ---------------------------------------------------------- */
+
+/*
+ * One row per recorded turn.
+ *
+ * A grid with named columns rather than a list of free-flowing spans, because
+ * the three numbers are meant to be compared down the column — plies, cost, and
+ * which side moved. Tabular figures keep the digits from shifting.
+ */
+.arena-history {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-inset);
+}
+
+.arena-history__row {
+  display: grid;
+  /*
+   * The cost column sizes to its content instead of being a fixed 64px.
+   *
+   * Fixed tracks overflowed: `34px 52px minmax(0,1fr) 64px` needs 174px of track before the move
+   * column gets anything, and the right-hand panel column is narrower than that at 1366x768. A token
+   * count like "1091/8" did not wrap inside its 64px box, so the span ran past the viewport and the
+   * whole page scrolled sideways. `minmax(52px, auto)` keeps the column readable without letting it
+   * push the layout, and `overflow: hidden` on the row makes containment explicit rather than
+   * incidental.
+   */
+  grid-template-columns: 30px 44px minmax(0, 1fr) minmax(52px, auto);
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: 4px var(--space-xs);
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-micro);
+  overflow: hidden;
+}
+
+.arena-history__row:last-child {
+  border-bottom: none;
+}
+
+/* The side's colour as a left edge, so scanning the column shows the alternation. */
+.arena-history__row--first {
+  box-shadow: inset 2px 0 0 var(--cyan);
+}
+
+.arena-history__row--second {
+  box-shadow: inset 2px 0 0 var(--violet);
+}
+
+.arena-history__ply {
+  color: var(--ink-3);
+}
+
+.arena-history__side {
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-label);
+  color: var(--ink-2);
+}
+
+.arena-history__move {
   color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.arena-archive-meta {
-  font-size: var(--fs-micro);
-  color: var(--ink-4);
-}
-
-.arena-archive-action {
-  font-size: var(--fs-micro);
-  letter-spacing: var(--tracking-label);
-  color: var(--ink-3);
-}
-
-/* The identifier is a button because it copies. It has to look like one, and it has to stay on one
-   line: a match id carries a timestamp, so a wrapping card turned a single fact into a three-line
-   block that pushed the rest of the telemetry down the page. */
-.telemetry-copy {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-xs);
-  width: 100%;
-  min-width: 0;
-  border: 1px solid var(--line-2);
-  border-radius: var(--r-1);
-  background: var(--surface-inset);
-  padding: 3px 6px;
-  cursor: pointer;
-  text-align: left;
-  transition: background var(--t-base) var(--ease), border-color var(--t-base) var(--ease);
-}
-
-.telemetry-copy > .mono {
+.arena-history__cost {
+  text-align: right;
+  color: var(--ink-2);
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
 }
 
-.telemetry-copy:hover:not(:disabled) {
-  background: var(--surface-3);
-  border-color: var(--line-3);
-}
+/* -- Archive -------------------------------------------------------------- */
 
-.telemetry-copy-hint {
-  flex: none;
-  font-family: var(--font-text);
-  /* At the legibility floor: this is an affordance hint, not prose, and it is the first thing to
-     become unreadable at 125% DPI on a laptop. */
-  font-size: var(--fs-micro);
-  color: var(--ink-4);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-}
-
-.telemetry-copy:hover .telemetry-copy-hint {
-  color: var(--ink-2);
-}
-
-/* The winning line and the cell just played are both facts about one
-   cell, so they are drawn on the cell rather than called out beside it. */
-.arena-cell--winning {
-  box-shadow: inset 0 0 0 2px currentColor;
-  border-color: var(--green);
-}
-
-.arena-cell--latest::after {
-  content: "";
-  position: absolute;
-  inset: 3px;
-  border: 1px dashed var(--blue-hi);
-  border-radius: var(--r-1);
-  pointer-events: none;
-}
-
-/* Available to a screen reader and to nobody else. Used where a table or a board needs a caption or
-   a heading that would be visual noise. */
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
+.arena-archive__list {
+  margin: 0;
   padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-  border: 0;
+  list-style: none;
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-inset);
 }
 
-/* The decision row a finished run ends on. Carries no measurements on purpose:
-   the facts above already report them, and a second copy is how two numbers come
-   to disagree. What it adds is the route onward. */
-.brain-next {
-  display: flex;
+.arena-archive__row {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: 2px var(--space-xs);
   align-items: center;
-  gap: var(--space-xs);
-  flex-wrap: wrap;
-  padding: var(--space-s) var(--space-m);
-  border: 1px solid var(--line-2);
-  border-left: 3px solid var(--blue);
-  border-radius: var(--r-3);
-  background: var(--surface-2);
+  width: 100%;
+  padding: var(--space-xs);
+  border: none;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
 }
 
-.brain-next-label {
+.arena-archive__list > li:last-child .arena-archive__row {
+  border-bottom: none;
+}
+
+.arena-archive__row:hover:not(:disabled) {
+  background: var(--surface-3);
+}
+
+.arena-archive__row[aria-current="true"] {
+  background: var(--surface-3);
+  box-shadow: inset 2px 0 0 var(--blue);
+}
+
+.arena-archive__row:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.arena-archive__outcome {
+  grid-row: 1 / span 2;
   font-family: var(--font-display);
   font-size: var(--fs-micro);
   letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-  color: var(--ink-4);
-  margin-right: var(--space-2xs);
+  padding: 3px 0;
+  text-align: center;
+  border-radius: var(--r-1);
+  border: 1px solid var(--line-3);
+  color: var(--ink-2);
 }
 
-/* --- The stored-run table ----------------------------------------------
-   A column of identifiers could not answer "which one was mine, and did it
-   finish", so every column is a recorded field and a missing one is an
-   explicit absence rather than a zero.
+.arena-archive__outcome--win {
+  color: var(--green);
+  border-color: var(--green-line);
+  background: var(--green-tint);
+}
 
-   The panel that holds it is a narrow column on the command center, so the
-   table scrolls sideways inside its own box rather than pushing the layout.
-   A wide table in a narrow column is what made the first version look broken:
-   the header row ran under the next column and the run id was clipped. */
-.history-table {
-  width: 100%;
-  border-collapse: collapse;
+.arena-archive__outcome--loss {
+  color: var(--amber-ink);
+  border-color: var(--amber-line);
+  background: var(--amber-tint);
+}
+
+.arena-archive__outcome--draw {
+  color: var(--ink);
+}
+
+.arena-archive__outcome--no_result {
+  color: var(--ink-3);
+}
+
+.arena-archive__meta,
+.arena-archive__seats {
+  font-family: var(--font-mono);
   font-size: var(--fs-micro);
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.history-table-scroll {
-  overflow-x: auto;
+.arena-archive__seats {
+  color: var(--ink-3);
+}
+
+/* ==========================================================================
+   BATCH STATISTICS
+
+   The rule these styles enforce visually is the same one the arithmetic enforces: the four outcome
+   buckets stay four. `.stats-distribution__row--loss` and `--noResult` are deliberately given different
+   treatment — a different tone and a dashed fill — because the one way a distribution chart lies
+   quietly is by making an infrastructure failure look like a defeat.
+   ========================================================================== */
+
+.arena-batch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-s);
+  /* Spans the panel's full width. It is a direct child of `.arena-panel`, and `1 / -1` keeps that true
+     whether the panel is laid out as two columns or as a single stacked flow. */
+  grid-column: 1 / -1;
+  padding: var(--space-s);
   border: 1px solid var(--line-2);
+  border-radius: var(--r-2);
+  background: var(--surface-1);
+}
+
+.arena-batch__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-m);
+  flex-wrap: wrap;
+}
+
+.arena-batch__head h3 {
+  margin: 0;
+}
+
+/*
+ * The scope statement is in the panel, not just in the stylesheet, because it is the one claim about
+ * this surface a reader cannot infer from its shape.
+ */
+.arena-batch__scope {
+  margin: var(--space-2xs) 0 0;
+  max-width: 72ch;
+  font-size: var(--fs-body);
+  color: var(--ink-2);
+}
+
+.arena-batch__scope-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2xs);
+  margin: 0;
+  padding: 3px var(--space-xs);
+  border-radius: var(--r-1);
+  border: 1px solid var(--amber-line);
+  background: var(--amber-tint);
+  color: var(--amber-ink);
+  font-size: var(--fs-body);
+}
+
+.arena-batch__scope-note svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.arena-batch__controls {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-s);
+  flex-wrap: wrap;
+}
+
+.arena-batch__controls .field {
+  min-width: 92px;
+}
+
+.arena-batch__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  /* The label sits beside the box rather than above it, because this is one control on a row of
+     controls and a stacked label would make it taller than its neighbours. */
+  height: 32px;
+  padding: 0 var(--space-xs);
+  border-radius: var(--r-1);
+  border: 1px solid var(--line-2);
+  background: var(--surface-2);
+  font-size: var(--fs-body);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.arena-batch__toggle:hover {
+  border-color: var(--line-3);
+}
+
+.arena-batch__toggle input {
+  accent-color: var(--blue);
+  margin: 0;
+}
+
+.arena-batch__progress,
+.arena-batch__hint,
+.arena-batch__empty {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  margin: 0;
+  font-size: var(--fs-body);
+  color: var(--ink-2);
+}
+
+.arena-batch__progress svg,
+.arena-batch__hint svg,
+.arena-batch__empty svg {
+  flex: none;
+}
+
+.arena-batch__hint {
+  color: var(--ink-3);
+}
+
+.stats-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: var(--space-s);
+}
+
+.stats-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-s);
+  padding: var(--space-s);
+  border: 1px solid var(--line);
   border-radius: var(--r-2);
   background: var(--surface-inset);
 }
 
-.history-table-scroll .history-table {
-  min-width: 520px;
+.stats-group__head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.history-table th {
-  text-align: left;
-  padding: 6px 8px;
+.stats-group__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--fs-h3);
+  letter-spacing: var(--tracking-label);
+  color: var(--ink);
+}
+
+.stats-group__title svg {
+  color: var(--ink-3);
+}
+
+.stats-group__pairing {
+  margin: 0;
+  font-size: var(--fs-body);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+/*
+ * The small-sample caution.
+ *
+ * Amber rather than red: it is a statement about how much is known, not about something being wrong.
+ * A left border in the same amber makes it read as a note on the group rather than as a warning about
+ * the application.
+ */
+.stats-group__caution,
+.stats-group__note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2xs);
+  margin: 0;
+  padding: var(--space-xs);
+  border-radius: var(--r-1);
+  font-size: var(--fs-body);
+  line-height: 1.45;
+}
+
+.stats-group__caution {
+  border: 1px solid var(--amber-line);
+  border-left-width: 3px;
+  background: var(--amber-tint);
+  color: var(--ink);
+}
+
+.stats-group__caution svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--amber-ink);
+}
+
+.stats-group__caution strong {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  font-size: var(--fs-micro);
+  color: var(--amber-ink);
+}
+
+.stats-group__note {
+  border: 1px solid var(--line-2);
+  background: var(--surface-2);
+  color: var(--ink-2);
+}
+
+.stats-group__note svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--ink-3);
+}
+
+/* -- The distribution ---------------------------------------------------- */
+
+.stats-distribution {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stats-distribution__row {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.stats-distribution__label {
+  font-size: var(--fs-body);
+  color: var(--ink-2);
+}
+
+.stats-distribution__bar {
+  display: block;
+  height: 8px;
+  border-radius: 99px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.stats-distribution__fill {
+  display: block;
+  height: 100%;
+  /* Zero is drawn as a hairline rather than as nothing at all, so an empty bucket still reads as a
+     bucket that exists and happens to be zero. A row that vanishes entirely cannot be counted by eye. */
+  min-width: 2px;
+  border-radius: 99px;
+  background: var(--ink-3);
+}
+
+.stats-distribution__row--win .stats-distribution__fill {
+  background: var(--green);
+}
+
+.stats-distribution__row--draw .stats-distribution__fill {
+  background: var(--ink-2);
+}
+
+.stats-distribution__row--loss .stats-distribution__fill {
+  background: var(--amber-ink);
+}
+
+/*
+ * "No result" is dashed, and that is the whole reason this rule exists.
+ *
+ * A cancelled match, a refused provider and a defeat are three different events. Drawn as three solid
+ * bars in three similar tones, a reader scanning the chart collapses them into "the model lost twice".
+ * The dashed fill is the visual counterpart of the separate bucket in the arithmetic.
+ */
+.stats-distribution__row--noResult .stats-distribution__bar {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--surface-3) 0 3px,
+      transparent 3px 6px
+    );
+}
+
+.stats-distribution__row--noResult .stats-distribution__fill {
+  background: repeating-linear-gradient(
+    90deg,
+    var(--ink-4) 0 3px,
+    transparent 3px 6px
+  );
+}
+
+.stats-distribution__count {
+  text-align: right;
+  font-size: var(--fs-body);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+/* -- The two rates -------------------------------------------------------- */
+
+.stats-rates {
+  display: grid;
+  gap: var(--space-s);
+}
+
+.stats-rate {
+  padding: var(--space-xs) var(--space-s);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+}
+
+.stats-rate__label {
+  margin: 0 0 4px;
   font-family: var(--font-display);
   font-size: var(--fs-micro);
   font-weight: 600;
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
-  color: var(--ink-4);
-  border-bottom: 1px solid var(--line-2);
-  white-space: nowrap;
+  color: var(--ink-3);
 }
 
-.history-table td {
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--line-2);
-  color: var(--ink-2);
-  vertical-align: middle;
+.stats-rate__value {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  margin: 0;
 }
 
-.history-table tbody tr:hover {
-  background: var(--surface-2);
-}
-
-.history-row--open {
-  background: var(--blue-tint);
-}
-
-.history-row--open:hover {
-  background: var(--blue-tint);
-}
-
-.history-open {
-  border: 1px solid transparent;
-  border-radius: var(--r-1);
-  background: transparent;
-  padding: 2px 5px;
-  cursor: pointer;
-  transition: background var(--t-base) var(--ease), border-color var(--t-base) var(--ease);
-}
-
-.history-open:hover:not(:disabled) {
-  background: var(--surface-3);
-  border-color: var(--line-3);
-}
-
-.history-open:disabled {
-  cursor: not-allowed;
-  color: var(--ink-4);
-}
-
-.history-benchmark,
-.history-target {
+/*
+ * The rate itself is not a metric tile.
+ *
+ * `--fs-figure` is reserved for measured values that own a panel; a win rate is a proportion inside a
+ * card that already holds nine other readings, and giving it the product's largest number scale would
+ * claim it is the headline when it is one of several facts about the group.
+ */
+.stats-rate__figure {
   font-family: var(--font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 150px;
+  font-size: var(--fs-h2);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
 }
 
-.history-when {
-  color: var(--ink-4);
-  white-space: nowrap;
+.stats-rate__count {
+  font-size: var(--fs-body);
+  color: var(--ink-3);
 }
 
-.history-failed {
-  color: var(--red-ink);
+.stats-rate__absent {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  margin: 0;
+  font-size: var(--fs-body);
+  color: var(--ink-3);
 }
 
-.history-reason {
+.stats-rate__absent svg {
+  flex: none;
+}
+
+/* -- The interval bar ---------------------------------------------------- */
+
+.stats-interval {
+  margin: 6px 0 4px;
+}
+
+.stats-interval__track {
+  position: relative;
   display: block;
-  color: var(--ink-4);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 130px;
+  height: 6px;
+  border-radius: 99px;
+  background: var(--surface-inset);
 }
 
-/* Lifecycle pills. `interrupted` is deliberately its own colour: it means a run was cut
-   short, which is a different thing from a run that refused, and the user can act on
-   them differently. */
-.lifecycle-pill {
-  display: inline-block;
-  padding: 1px 7px;
-  border-radius: var(--r-1);
-  border: 1px solid var(--line-3);
-  background: var(--surface-2);
+/*
+ * The interval is the *bar* and the point estimate is a mark inside it.
+ *
+ * The opposite convention — a full bar with two whiskers — reads as "this is the answer, and here is
+ * some uncertainty". Here the span is the answer's room to move, which is what it actually is: on a
+ * four-match sample it covers most of the track, and that is visible without reading a number.
+ */
+.stats-interval__span {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: 99px;
+  background: var(--blue-line, var(--line-3));
+  box-shadow: inset 0 0 0 1px var(--blue-dim, var(--line-3));
+}
+
+.stats-interval__point {
+  position: absolute;
+  top: -3px;
+  width: 3px;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--blue-hi);
+  /* Centred on its own value: `translateX(-50%)` with a percentage that could reach 100% would push the
+     mark half outside the track at the extremes, where the bounds are clamped. */
+  transform: translateX(-50%);
+}
+
+.stats-rate__note {
+  margin: 0;
+  font-size: var(--fs-micro);
+  line-height: 1.45;
+  color: var(--ink-3);
+}
+
+/* -- Facts ---------------------------------------------------------------- */
+
+.stats-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: var(--space-xs) var(--space-s);
+  margin: 0;
+  padding: var(--space-xs) 0 0;
+  border-top: 1px solid var(--line);
+}
+
+.stats-stat {
+  min-width: 0;
+}
+
+.stats-stat__label {
   font-family: var(--font-display);
   font-size: var(--fs-micro);
   letter-spacing: var(--tracking-label);
@@ -4495,32 +5565,1194 @@ input[type="radio"] {
   color: var(--ink-3);
 }
 
-.lifecycle-pill--completed {
-  border-color: var(--green-line);
+.stats-stat__value {
+  margin: 1px 0 0;
+  font-size: var(--fs-body);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+/* -- Provenance ----------------------------------------------------------- */
+
+.stats-group__foot {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: var(--space-xs);
+  border-top: 1px solid var(--line);
+}
+
+.stats-group__provenance {
+  margin: 0;
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
+}
+
+.stats-group__matches summary {
+  cursor: pointer;
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
+}
+
+.stats-match-ids {
+  margin: var(--space-2xs) 0 0;
+  padding-left: 20px;
+  max-height: 160px;
+  overflow: auto;
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
+}
+
+.stats-match-ids li {
+  overflow-wrap: anywhere;
+}
+
+/* -- Responsive ----------------------------------------------------------- */
+
+@media (max-width: 1100px) {
+  .stats-distribution__row {
+    grid-template-columns: 74px minmax(0, 1fr) 30px;
+  }
+}
+
+/* ==========================================================================
+   ERROR BOUNDARY
+   ========================================================================== */
+
+.panel-boundary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-s);
+  align-items: flex-start;
+  border-color: var(--red-line);
+}
+
+.panel-boundary__message {
+  margin: 0;
+  color: var(--ink);
+  font-size: var(--fs-lead);
+  max-width: 62ch;
+}
+
+.panel-boundary__actions {
+  display: flex;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+}
+
+.panel-boundary__detail {
+  width: 100%;
+  font-size: var(--fs-body);
+}
+
+.panel-boundary__detail summary {
+  cursor: pointer;
+  color: var(--ink-3);
+  font-family: var(--font-display);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.panel-boundary__message-text {
+  margin: var(--space-xs) 0 0;
+  color: var(--red-ink);
+  font-size: var(--fs-body);
+  overflow-wrap: anywhere;
+}
+
+.panel-boundary__stack {
+  margin: var(--space-xs) 0 0;
+  padding: var(--space-xs);
+  max-height: 200px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-sunken);
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  white-space: pre-wrap;
+}
+
+/* ==========================================================================
+   RESPONSIVE
+
+   THE ONE LAYOUT DECISION THAT MATTERS HERE
+   Match setup and the primary action have to be on screen without scrolling at
+   1366x768 and 1600x900. The first version of this section stacked them: board
+   on top, then the control bar, then the evidence. Measured, that put RUN AGAIN
+   799px down a 768px window -- the control that starts a match was the first
+   thing below the fold, on the shortest window the product claims to support.
+
+   Above 1360px the panel becomes two columns instead. The stage occupies the
+   left column across both rows; the control bar and the evidence stack in a
+   narrow right column. The board gets the full height of the left column rather
+   than sharing vertical space with the controls, and the controls sit at the top
+   of the window where they belong.
+
+   The evidence (turn record, archive) is deliberately allowed below the fold.
+   It is reference material: nobody starts a match by reading it.
+
+   Below 1360px there is not enough width for a right-hand column without
+   squeezing the board, so the flow returns to stacked -- and there the panel
+   scrolls, because a board small enough to avoid scrolling would be too small to
+   read a mark in.
+   ========================================================================== */
+
+@media (min-width: 1361px) {
+  .arena-panel {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(330px, 400px);
+    /*
+     * The controls column spans both rows.
+     *
+     * `.arena-secondary` is nested *inside* `.arena-controls`, not a sibling of
+     * it, so the panel has only two children to place: the stage and the control
+     * stack. Naming a third area for the evidence auto-placed it into an
+     * implicit third track, which is what squeezed the transport to 26px and
+     * left the turn record 119px wide.
+     */
+    /*
+     * The controls column spans both rows; the batch gets a full-width row of its own.
+     *
+     * The third row is not decoration. The panel grid stretches a cell to match its tallest sibling, so
+     * the statistics block — which is legitimately tall, because it holds a distribution, two rates and
+     * a facts grid per game — would otherwise stretch the stage to the same height and push the board
+     * off the bottom of the window. Measured before this rule: stage 3062px, board at y=1157 in a
+     * 900px window. The board is the panel's subject, so nothing below it is allowed to move it.
+     */
+    grid-template-areas:
+      "stage controls"
+      "stage controls"
+      "batch  batch";
+    grid-template-rows: auto 1fr auto;
+    /*
+     * `stretch`, not `start`.
+     *
+     * The control column is the taller of the two, so pinning the stage to the top left a band of
+     * empty panel below it — 300px of nothing at 1920x1080. Letting the stage fill the row it spans
+     * turns that into table surface, and `.arena-board-column` already centres the board within it,
+     * so the board ends up optically centred instead of stranded at the top.
+     */
+    align-items: stretch;
+    column-gap: var(--space-m);
+    row-gap: var(--space-m);
+    /* The controls no longer sit beneath the board, so they no longer subtract
+       from its height. Only the panel's own furniture does. */
+    --arena-controls-reserved: 0px;
+    --arena-furniture-reserved: 150px;
+  }
+
+  .arena-stage {
+    grid-area: stage;
+  }
+
+  .arena-controls {
+    grid-area: controls;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .arena-batch {
+    grid-area: batch;
+  }
+}
+
+/*
+ * WHERE THE RAIL SITS BESIDE THE BOARD, AND WHERE IT SITS BELOW IT
+ *
+ * This is a width calculation, not a preference, so it is worth stating. With the rail beside the
+ * board, the board's column is roughly:
+ *
+ *     panel width - control column (400) - gap (12) - rail (360) - stage padding (32)
+ *
+ * and the board cannot exceed the width its own height budget allows:
+ *
+ *     540 (the resting cap) * 7 / 6 = 630
+ *
+ * So the split only wins once the left column is about 1034px wide, which at these control-column
+ * sizes means a viewport of roughly 1700px. Below that the board is width-starved while the column
+ * still has height to spare, and stacking is strictly better:
+ *
+ *   viewport | rail beside            | rail below
+ *   ---------+------------------------+------------------------
+ *     1366   | 310 x 266 (36px discs) | 527 x 452 (68px discs)
+ *     1600   | 464 x 398 (61px discs) | 630 x 540 (82px discs)
+ *     1920   | 630 x 540 (82px discs) | 630 x 540 -- equal, and the width is spent
+ *
+ * The first two rows are the reason this is not a 1500px breakpoint. A breakpoint at 1500 made the
+ * 1600 case *worse* than the 1366 case, which is the opposite of what a monotonic layout should do.
+ * At 1920 the two are equal, so the split is kept there to spend the width on the rail instead of
+ * leaving it empty.
+ */
+@media (min-width: 1361px) and (max-width: 1700px) {
+  .arena-stage {
+    grid-template-columns: minmax(0, 1fr);
+    align-content: center;
+  }
+
+  .arena-rail {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+
+  .arena-rail > .arena-telemetry {
+    grid-column: 1 / -1;
+  }
+}
+
+/*
+ * The short-window cap. 1366x768 is the shortest window the product supports, and there the control
+ * column is taller than the board would like to be. Without this cap the left column grows to the
+ * full height budget and the panel scrolls on exactly the window that must not.
+ */
+@media (min-width: 1361px) and (max-width: 1500px) {
+  .arena-panel {
+    --arena-stage-max: 452px;
+  }
+}
+
+/* Wide enough for the rail to sit beside a full-size board. */
+@media (min-width: 1701px) {
+  .arena-stage {
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
+  }
+}
+
+@media (max-width: 1360px) {
+  .arena-stage {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .arena-rail {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+
+  /* Telemetry spans both competitor cards so the two-column rhythm stays on the
+     identity cards rather than being broken by a half-width readout. */
+  .arena-rail > .arena-telemetry {
+    grid-column: 1 / -1;
+  }
+
+  /* Stacked, the controls are back beneath the board, so they take their height
+     out of the board's budget again. */
+  .arena-panel {
+    --arena-controls-reserved: 168px;
+    --arena-furniture-reserved: 236px;
+    --arena-stage-max: 620px;
+  }
+}
+
+@media (max-width: 1100px) {
+  .arena-setup__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 860px) {
+  .arena-rail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/*
+ * A short window. The board gives way rather than the controls: below this height
+ * the panel scrolls, because a board squeezed to fit would be too small to read
+ * marks in, and the panel would look finished while being unusable.
+ */
+@media (max-height: 700px) {
+  .arena-panel {
+    --arena-furniture-reserved: 132px;
+  }
+}
+
+/* ==========================================================================
+   19. GRID-WORLD STAGE — a navigation trace, animated from recorded turns
+   ==========================================================================
+
+   Everything here draws a state the engine already committed. Nothing in this
+   section decides what the world looks like: the cells, the route, the marker
+   and the numbers all come from `gridFrames`, which only takes terrain from an
+   observation the run committed.
+
+   Geometry, and why it is written out rather than handed to a transform
+   --------------------------------------------------------------------------
+   The agent marker and the perception window are positioned by arithmetic on the
+   cell pitch, not by a grid-column assignment. Two reasons:
+
+   * `grid-column-start` is not smoothly interpolable, so a marker placed that
+     way jumps between turns. Animating `left`/`top`/`width`/`height` in
+     `calc()` is, and at twenty-five cells the cost is not worth optimising away.
+   * The perception window is a *union* of recorded neighbour coordinates clipped
+     to the board, which is a span of columns rather than a single cell. A
+     grid placement cannot express "three wide, starting at column 1" as a
+     position to animate; a rectangle can.
+
+   `--gw-cell-x` and `--gw-cell-y` are the column and row pitches: the cell size
+   plus one gap. Every position is that pitch times a recorded coordinate. */
+
+.gw-stage {
+  --gw-gap: 6px;
+  --gw-move: 420ms;
+  /*
+     A size container, not a media query.
+
+     The stage's usable width is decided by how much room the three-column command center leaves it, not
+     by the window: measured at 1366x768 the console gives this panel 436px, and at 1920x1080 it gives it
+     990px — for the same 1366..1920 window band a media query would get wrong at both ends. A breakpoint
+     on the viewport here would collapse the board at 1920 and leave it cramped at 1366.
+  */
+  container-type: inline-size;
+  container-name: gw;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-m);
+  min-width: 0;
+  padding: var(--space-m);
+  background: var(--surface-sunken);
+  border: 1px solid var(--line-live);
+  border-radius: var(--r-2);
+  box-shadow: var(--shadow-card), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.gw-stage .panel-heading {
+  border-bottom: 1px solid var(--line-2);
+}
+
+/* --- source chip ---------------------------------------------------------- */
+.gw-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 9px;
+  border-radius: 99px;
+  border: 1px solid var(--line-3);
+  font-family: var(--font-display);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.gw-source-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-4);
+}
+
+/*
+   Live and recorded are told apart by colour *and* by whether the dot moves. The
+   word is the primary signal and the colour only reinforces it, so the distinction
+   survives both a monochrome display and a colour-vision difference.
+*/
+.gw-source--live {
+  border-color: var(--cyan-dim);
+  color: var(--cyan);
+}
+
+.gw-source--live .gw-source-dot {
+  background: var(--cyan);
+  animation: gw-pulse 1.5s var(--ease) infinite;
+}
+
+.gw-source--recorded {
+  border-color: var(--violet);
+  color: var(--violet);
+}
+
+.gw-source--recorded .gw-source-dot {
+  background: var(--violet);
+}
+
+.gw-source-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-s);
+  flex-wrap: wrap;
+}
+
+/*
+   Heading row: the source chip and the recording control sit together on the right.
+
+   They were a second row and are not any more. Measured at 1600x900 with them stacked, the board began
+   at 748px — below a 900px window's content area — so the panel's subject was the one element a user
+   could not see. The control belongs beside the chip anyway: both act on *which* recording is shown,
+   not on the position within it, so neither belongs in the transport.
+*/
+.gw-heading {
+  align-items: center;
+}
+
+.gw-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.gw-source-note {
+  margin: -6px 0 0;
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
+  line-height: 1.5;
+}
+
+/* --- layout --------------------------------------------------------------- */
+.gw-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(170px, 300px);
+  gap: var(--space-m);
+  align-items: start;
+}
+
+.gw-board-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-s);
+  min-width: 0;
+}
+
+.gw-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-s);
+  min-width: 0;
+}
+
+/* --- the board ------------------------------------------------------------ */
+.gw-board {
+  --gw-cell-w: calc((100% - (var(--gw-cols) - 1) * var(--gw-gap)) / var(--gw-cols));
+  --gw-cell-h: calc((100% - (var(--gw-rows) - 1) * var(--gw-gap)) / var(--gw-rows));
+  position: relative;
+  /*
+     The board is sized from three bounds at once, and all three are needed.
+
+   `max-height` on its own was the first attempt and it is wrong: with `width: 100%` already resolved, a
+   clamped height produces a 402x323 rectangle and the cells come out 72x56 — a stretched map. The
+   measurement that caught it is in `scripts/grid-trace.mjs`, which fails a board whose width and height
+   differ by more than a pixel.
+
+   So the width itself is the minimum of the room available, an absolute ceiling, and a fraction of the
+   window's height. `aspect-ratio: 1` then makes the height follow, and the board is square by
+   construction rather than by a rule that has to be re-checked at every size.
+
+   The height fraction is what puts the board above the fold: the command center's furniture leaves the
+   board's top edge near 420px, so at 768px tall there are only ~315px left. 38vh is 292 there, 342 at
+   900 and 389 at 1080 — under the ceiling at every target, and the absolute 440px ceiling takes over
+   from 1160px of height upward.
+*/
+  width: min(100%, 440px, 36vh);
+  aspect-ratio: 1;
+  aspect-ratio: 1;
+  margin-inline: auto;
+  padding: var(--space-xs);
+  background: var(--surface-inset);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-3);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.gw-field {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(var(--gw-cols), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--gw-rows), minmax(0, 1fr));
+  gap: var(--gw-gap);
+  height: 100%;
+}
+
+/* --- cells ---------------------------------------------------------------- */
+.gw-cell {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  transition:
+    background var(--t-base) var(--ease),
+    border-color var(--t-base) var(--ease),
+    box-shadow var(--t-base) var(--ease);
+}
+
+/*
+   Never observed. A hatched void rather than an empty square: the difference
+   matters, because "nothing was sensed here" and "this is flat ground" look
+   identical otherwise, and only one of them is a thing the agent knows.
+*/
+.gw-cell[data-tile="unseen"] {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      transparent 0 4px,
+      rgba(255, 255, 255, 0.022) 4px 8px
+    ),
+    var(--surface-inset);
+  border-style: dashed;
+  border-color: var(--line);
+}
+
+.gw-cell[data-tile="safe"] {
+  background: var(--surface-3);
+  border-color: var(--line-3);
+}
+
+/*
+   A mark inside the observed-ground tile.
+
+   Without it, flat ground and an empty cell are the same square at a glance, and the only difference a
+   reader could find was a border shade. A small centred dot costs nothing and is what makes "the agent
+   saw this and it was safe" legible at a 23px cell.
+*/
+.gw-cell[data-tile="safe"]::after {
+  content: "";
+  position: absolute;
+  inset: 44%;
+  border-radius: 50%;
+  background: var(--ink-4);
+  opacity: 0.65;
+}
+
+.gw-cell[data-tile="obstacle"] {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 62%),
+    var(--surface-4);
+  border-color: var(--line-3);
+  box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.45);
+}
+
+.gw-cell[data-tile="danger"] {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      rgba(255, 95, 87, 0.30) 0 5px,
+      transparent 5px 10px
+    ),
+    var(--red-tint);
+  border-color: var(--red-line);
+}
+
+/* The goal. A breathing halo rather than a static fill, because it is the one
+   tile the whole episode is about and it should read as an objective. */
+.gw-cell[data-tile="reward"] {
   background: var(--green-tint);
+  border-color: var(--green-line);
+}
+
+.gw-cell[data-tile="reward"]::after {
+  content: "";
+  position: absolute;
+  inset: 24%;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 10px 2px rgba(52, 201, 138, 0.55);
+  animation: gw-breathe 2.8s ease-in-out infinite;
+}
+
+/* Within this turn's sensing. The frame's own observation, not a radius
+   assumption — `gridFrames` hands over exactly the coordinates the run recorded. */
+.gw-cell--perceived {
+  border-color: var(--cyan-dim);
+  box-shadow: 0 0 0 1px rgba(52, 214, 224, 0.22), inset 0 0 10px rgba(52, 214, 224, 0.07);
+}
+
+.gw-cell[data-tile="reward"].gw-cell--perceived {
+  border-color: var(--green);
+}
+
+/* The cell the marker is standing on. The marker itself is an overlay, so this
+   only deepens the tile it covers — enough that the marker reads as sitting *on*
+   the board rather than floating in front of it. */
+.gw-cell--agent {
+  box-shadow:
+    0 0 0 1px rgba(110, 160, 255, 0.45),
+    inset 0 0 18px rgba(61, 125, 255, 0.28);
+}
+
+/* First seen on this turn. The class arrives with the terrain, so the animation
+   is triggered by real data rather than by a timer. */
+.gw-cell--fresh {
+  animation: gw-reveal 520ms var(--ease);
+}
+
+/* --- route ---------------------------------------------------------------- */
+.gw-route {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.gw-route-line {
+  fill: none;
+  stroke: var(--blue-hi);
+  /*
+     A dash far longer than any route this board can hold. With the offset at the
+     dash length the whole path sits in the gap and is invisible; at zero it is
+     entirely dash. So the animation draws the route in from one end rather than
+     fading it, and the length never has to be measured in script.
+  */
+  stroke-dasharray: 4000;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* The viewBox is unscaled, so without this the stroke would be scaled with the
+     board and end up a different width on every column count. */
+  vector-effect: non-scaling-stroke;
+  opacity: 0.75;
+  filter: drop-shadow(0 0 4px rgba(110, 160, 255, 0.45));
+  animation: gw-draw 460ms var(--ease);
+}
+
+/* --- perception window ---------------------------------------------------- */
+.gw-perception {
+  position: absolute;
+  left: calc(var(--gw-px) * (var(--gw-cell-w) + var(--gw-gap)));
+  top: calc(var(--gw-py) * (var(--gw-cell-h) + var(--gw-gap)));
+  width: calc(var(--gw-pcols) * var(--gw-cell-w) + (var(--gw-pcols) - 1) * var(--gw-gap));
+  height: calc(var(--gw-prows) * var(--gw-cell-h) + (var(--gw-prows) - 1) * var(--gw-gap));
+  border: 1px solid rgba(52, 214, 224, 0.34);
+  border-radius: var(--r-2);
+  background: radial-gradient(
+    ellipse at center,
+    rgba(52, 214, 224, 0.10),
+    rgba(52, 214, 224, 0.015) 70%
+  );
+  pointer-events: none;
+  transition:
+    left var(--gw-move) var(--ease),
+    top var(--gw-move) var(--ease),
+    width var(--gw-move) var(--ease),
+    height var(--gw-move) var(--ease);
+  animation: gw-flicker 3.4s ease-in-out infinite;
+}
+
+/* --- the agent ------------------------------------------------------------ */
+.gw-agent {
+  position: absolute;
+  left: calc(var(--gw-x) * (var(--gw-cell-w) + var(--gw-gap)));
+  top: calc(var(--gw-y) * (var(--gw-cell-h) + var(--gw-gap)));
+  width: var(--gw-cell-w);
+  height: var(--gw-cell-h);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  transition:
+    left var(--gw-move) var(--ease),
+    top var(--gw-move) var(--ease);
+}
+
+.gw-agent-core {
+  width: 58%;
+  height: 58%;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 32%, #ffffff 0%, var(--blue-hi) 38%, var(--blue) 72%);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.35),
+    0 0 14px 3px rgba(61, 125, 255, 0.55);
+  animation: gw-breathe 2.2s ease-in-out infinite;
+}
+
+/* --- the live sweep ------------------------------------------------------- */
+.gw-sweep {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.gw-sweep::after {
+  content: "";
+  position: absolute;
+  left: -20%;
+  right: -20%;
+  height: 34%;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(52, 214, 224, 0.11) 45%,
+    rgba(52, 214, 224, 0.02),
+    transparent
+  );
+  animation: gw-scan 3.2s linear infinite;
+}
+
+/* --- axis ----------------------------------------------------------------- */
+.gw-axis {
+  display: grid;
+  grid-template-columns: repeat(var(--gw-cols), minmax(0, 1fr));
+  gap: var(--gw-gap);
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  /* Column coordinates, which name a tile rather than decorate it. */
+  color: var(--ink-3);
+  text-align: center;
+}
+
+/* --- readout -------------------------------------------------------------- */
+.gw-readout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  overflow: hidden;
+}
+
+.gw-readout > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  background: var(--surface-1);
+  min-width: 0;
+}
+
+.gw-readout dt {
+  font-family: var(--font-display);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.gw-readout dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  /* Two columns of figures in a narrow side column: anything larger wraps a turn count onto a second
+     line and the readout becomes the tallest thing on screen. */
+  font-size: var(--fs-body);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.gw-readout-of {
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
+}
+
+/* Distance trend. Three distinct claims, and "unchanged" is styled differently
+   from "no previous frame" so a stalled policy is visible rather than blank. */
+.gw-trend {
+  color: var(--ink);
+}
+
+.gw-trend--closer {
   color: var(--green);
 }
 
-.lifecycle-pill--running {
-  border-color: var(--line-live);
+.gw-trend--further {
+  color: var(--amber-ink);
+}
+
+.gw-trend--flat {
+  color: var(--ink-2);
+}
+
+/* --- side column ---------------------------------------------------------- */
+.gw-side-title {
+  margin: 0 0 6px;
+  font-family: var(--font-display);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.gw-side-empty {
+  margin: 0;
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
+  line-height: 1.5;
+}
+
+.gw-sensed-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gw-sensed {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border-radius: var(--r-1);
+  border: 1px solid var(--line-3);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+}
+
+.gw-sensed-at {
+  color: var(--ink-3);
+}
+
+.gw-sensed-tile {
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.gw-sensed--reward {
+  border-color: var(--green-line);
+  background: var(--green-tint);
+}
+
+.gw-sensed--reward .gw-sensed-tile {
+  color: var(--green);
+}
+
+.gw-sensed--danger {
+  border-color: var(--red-line);
+  background: var(--red-tint);
+}
+
+.gw-sensed--danger .gw-sensed-tile {
+  color: var(--red-ink);
+}
+
+.gw-log-block,
+.gw-sensed-block {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.gw-log {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.gw-log-outcome {
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.gw-log-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto auto;
+  gap: 7px;
+  align-items: baseline;
+  padding: 3px 7px;
+  border-radius: var(--r-1);
+  border: 1px solid transparent;
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
+}
+
+.gw-log-row--current {
+  border-color: var(--cyan-dim);
+  background: var(--cyan-tint);
+  color: var(--ink-2);
+}
+
+/*
+   The row on screen, inside a tinted row.
+
+   `--ink-3` on `--cyan-tint` measures 4.16:1, which is under the 4.5:1 floor for this text size — axe
+   reported it, and it only appears while a recording is stepped, which is why it was invisible until a
+   recording was loaded. `--ink-2` clears it at 7.6:1.
+*/
+.gw-log-row--current .gw-log-outcome,
+.gw-log-row--current .gw-log-reward {
+  color: var(--ink-2);
+}
+
+.gw-log-turn {
+  /* A turn number is a measurement. `--ink-4` is 3.33:1 and axe reported all three of these log rules
+     as serious `color-contrast` violations. */
+  color: var(--ink-3);
+}
+
+.gw-log-row--current .gw-log-turn {
+  color: var(--cyan);
+}
+
+.gw-log-action {
+  text-transform: lowercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gw-log-reward {
+  color: var(--ink-3);
+}
+
+/* --- verdict -------------------------------------------------------------- */
+.gw-verdict {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-s);
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: var(--r-2);
+  border: 1px solid var(--line-3);
+  background: var(--surface-2);
+}
+
+.gw-verdict--pass {
+  border-color: var(--green-line);
+  background: var(--green-tint);
+}
+
+.gw-verdict--fail {
+  border-color: var(--amber-line);
+  background: var(--amber-tint);
+}
+
+.gw-verdict-label {
+  font-family: var(--font-display);
+  font-size: var(--fs-h3);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+.gw-verdict--pass .gw-verdict-label {
+  color: var(--green);
+}
+
+.gw-verdict--fail .gw-verdict-label {
+  color: var(--amber-ink);
+}
+
+.gw-verdict-facts {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--ink-2);
+}
+
+/* --- transport ------------------------------------------------------------ */
+.gw-transport {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+  padding-top: var(--space-s);
+  border-top: 1px solid var(--line);
+}
+
+.gw-transport--passive {
+  justify-content: space-between;
+}
+
+.gw-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 30px;
+  padding: 4px 10px;
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-family: var(--font-display);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    background var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+
+.gw-button:hover:not(:disabled) {
+  background: var(--surface-4);
+  color: var(--ink);
+}
+
+.gw-button:disabled {
+  color: var(--ink-4);
+  border-color: var(--line);
+  cursor: not-allowed;
+}
+
+.gw-button--primary {
+  border-color: var(--blue-line);
   background: var(--blue-tint);
   color: var(--blue-hi);
 }
 
-.lifecycle-pill--failed {
-  border-color: var(--red-line);
-  background: var(--red-tint);
-  color: var(--red-ink);
+.gw-scrub {
+  flex: 1 1 120px;
+  min-width: 100px;
+  accent-color: var(--cyan);
 }
 
-.lifecycle-pill--interrupted {
-  border-color: var(--amber-line);
-  background: var(--amber-tint);
-  color: var(--amber-ink);
+.gw-position {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.gw-live-note {
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
+}
+
+.gw-speed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.gw-speed-label {
+  font-family: var(--font-display);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-label);
+  color: var(--ink-3);
+}
+
+.gw-speed-select {
+  min-height: 28px;
+  padding: 2px 6px;
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+}
+
+.gw-empty {
+  margin: 0;
+  padding: var(--space-m);
+  border: 1px dashed var(--line-3);
+  border-radius: var(--r-2);
+  font-size: var(--fs-lead);
+  color: var(--ink-3);
+  line-height: 1.6;
+}
+
+/* --- keyframes ------------------------------------------------------------
+   Four animations, each tied to something the recording changed rather than to a
+   timer that fires regardless: a tile arriving, the route lengthening, the
+   marker breathing, and the live scan. */
+
+@keyframes gw-reveal {
+  0% {
+    transform: scale(0.72);
+    filter: brightness(2.1);
+  }
+  60% {
+    filter: brightness(1.35);
+  }
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+}
+
+@keyframes gw-draw {
+  from {
+    stroke-dashoffset: 4000;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes gw-breathe {
+  0%,
+  100% {
+    opacity: 0.86;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.09);
+  }
+}
+
+@keyframes gw-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(52, 214, 224, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 5px rgba(52, 214, 224, 0);
+  }
+}
+
+@keyframes gw-flicker {
+  0%,
+  100% {
+    opacity: 0.75;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes gw-scan {
+  0% {
+    top: -34%;
+  }
+  100% {
+    top: 100%;
+  }
+}
+
+/* --- a narrow stage -------------------------------------------------------
+   Driven by the stage's own width (see `container-type` above), because the board's room is set by the
+   command center around it rather than by the window.
+
+   Side by side, a 436px stage left the board 154px — five tiles of 23px, which is not a map anybody can
+   read a route from. Stacked, the board takes the full width of the panel at every target resolution, and
+   the figures go to three columns so the readout costs two rows instead of three. */
+@container gw (max-width: 600px) {
+  .gw-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gw-heading {
+    flex-wrap: wrap;
+  }
+
+  .gw-heading-actions {
+    justify-content: flex-start;
+  }
+
+  .gw-readout {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .gw-log {
+    max-height: 156px;
+  }
 }
 
 /* ==========================================================================
-   19. SECURITY LAB
+   20. SECURITY LAB
    ========================================================================== */
 .security-panel {
   display: flex;
@@ -4796,7 +7028,7 @@ input[type="radio"] {
 }
 
 /* ==========================================================================
-   20. REPLAY
+   21. REPLAY
    ========================================================================== */
 .replay-panel {
   display: flex;
@@ -4935,7 +7167,7 @@ input[type="radio"] {
 }
 
 /* ==========================================================================
-   21. SETTINGS
+   22. SETTINGS
    ========================================================================== */
 .settings-stack {
   display: grid;
@@ -5013,7 +7245,7 @@ input[type="radio"] {
 }
 
 /* ==========================================================================
-   22. THE LAB BRAIN — status, actions, findings, diagram
+   23. THE LAB BRAIN — status, actions, findings, diagram
    ========================================================================== */
 .brain-panel {
   display: flex;
@@ -5404,7 +7636,7 @@ li.tone-info .counter-bar {
 }
 
 /* ==========================================================================
-   23. GENERIC LISTS
+   24. GENERIC LISTS
    ========================================================================== */
 .panel-note-list li,
 .replay-limitations li,
@@ -5424,11 +7656,11 @@ li.tone-info .counter-bar {
 }
 
 .event-count {
-  color: var(--ink-4);
+  color: var(--ink-3);
 }
 
 /* ==========================================================================
-   24. PANEL VARIANTS AND NAMESPACED BYTES
+   25. PANEL VARIANTS AND NAMESPACED BYTES
    ========================================================================== */
 
 /* --- brand lockup (rail head / about) ------------------------------------ */
@@ -5468,7 +7700,7 @@ li.tone-info .counter-bar {
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
   letter-spacing: 0.04em;
-  color: var(--ink-4);
+  color: var(--ink-3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5503,12 +7735,267 @@ li.tone-info .counter-bar {
   display: flex;
   flex-direction: column;
   gap: var(--space-xs);
+  /* A size container, for the same reason the grid stage is one: the table's room is set by this panel's
+     own column, which is 292px in the command center and full width in a wider layout. */
+  container-type: inline-size;
+  container-name: history;
+}
+
+/*
+   A narrow history well stops being a table.
+
+   Measured: seven columns of a run's identity need 381px and the well is 246px, so the table either
+   scrolled sideways inside a 216px box or clipped the benchmark and target columns mid-word. Neither is
+   a table anyone reads.
+
+   So below 420px of panel width the header row is dropped and each row lays its remaining facts out as a
+   wrapped line: the outcome and its reason, the run id, the episodes, the score, and when. The two
+   columns that go are the two the panel beside it already states — the run context above says "Grid
+   World", and the target agent is on the run itself.
+*/
+@container history (max-width: 420px) {
+  .history-table thead {
+    display: none;
+  }
+
+  .history-table,
+  .history-table tbody,
+  .history-table tr,
+  .history-table td {
+    display: block;
+    width: auto;
+  }
+
+  .history-table tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 8px;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .history-table td {
+    padding: 0;
+    border: 0;
+    white-space: nowrap;
+  }
+
+  /* Outcome first and widest; it carries the reason under the pill. */
+  .history-table td:nth-child(1) {
+    flex: 1 1 100%;
+  }
+
+  .history-table td:nth-child(3),
+  .history-table td:nth-child(4) {
+    display: none;
+  }
+
+  .history-when {
+    margin-left: auto;
+  }
+}
+
+.history-table-scroll {
+  max-height: 216px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--surface-inset);
+}
+
+/* The verdict shown when no match is loaded. `--none` is a separate class from the `--no_result`
+   outcome because it means "there is nothing here", not "the match had no result". */
+.arena-verdict--none {
+  /* "NO MATCH" is a statement about the panel, not a disabled control, so it is held to the reading
+     floor rather than the placeholder one. axe reported it as a serious `color-contrast` violation. */
+  color: var(--ink-3);
+  border-color: var(--line-3);
+  background: var(--surface-2);
+}
+
+.arena-archive {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.brain-next {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+}
+
+.brain-next-label {
+  font-family: var(--font-display);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink-4);
 }
 
 .suite-card {
   display: flex;
   flex-direction: column;
   gap: var(--space-s);
+}
+
+/*
+   The stored-run history table.
+
+   This markup existed with no rules at all: every class it uses was absent from the stylesheet, so the
+   table rendered as an unstyled grid of text and the lifecycle pill ran straight into the terminal reason
+   — "Completedreached the goal". Found by looking at a capture of the lab route, which is the only way
+   to see it: the component tests query by role and never notice that a table has no borders.
+
+   The columns are sized by content rather than evenly, because two of them hold opaque run identifiers
+   and holding them to a fixed width truncates the only field that identifies the row.
+*/
+.history-table-scroll {
+  max-height: 216px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--surface-inset);
+}
+
+.history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
+}
+
+.history-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 8px;
+  text-align: left;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line-3);
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink-4);
+  white-space: nowrap;
+}
+
+.history-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+.history-row--open {
+  background: var(--blue-tint);
+}
+
+.history-open {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 7px;
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  cursor: pointer;
+  max-width: 128px;
+  overflow: hidden;
+}
+
+.history-open:hover:not(:disabled) {
+  background: var(--surface-4);
+  color: var(--ink);
+}
+
+.history-open:disabled {
+  color: var(--ink-4);
+  cursor: not-allowed;
+}
+
+.history-open .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-benchmark,
+.history-target,
+.history-when {
+  white-space: nowrap;
+}
+
+.history-when {
+  /* "3 min ago" is a recorded fact about the row, not a placeholder. `--ink-4` is 3.33:1 and axe
+     reported it as a serious `color-contrast` violation. */
+  color: var(--ink-3);
+}
+
+.history-failed {
+  color: var(--amber-ink);
+}
+
+/*
+   The terminal reason, beside the lifecycle pill rather than after it.
+
+   It was rendering as "Completedreached the goal" because the class that separates them had no rule, so
+   the two inline spans had no whitespace between them at all.
+*/
+.history-reason {
+  display: inline;
+  margin-left: 6px;
+  /* The terminal reason is the outcome in words, so it is held to the same floor as the pill beside it. */
+  color: var(--ink-3);
+  line-height: 1.4;
+}
+
+@container history (max-width: 420px) {
+  .history-reason {
+    /* Inline beside the pill, not under it: the stacked layout already uses two lines per row, and a
+       third left two rows visible in a 216px well. */
+    display: inline;
+    margin-left: 6px;
+  }
+}
+
+.lifecycle-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 99px;
+  border: 1px solid var(--line-3);
+  background: var(--surface-2);
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.lifecycle-pill--completed {
+  border-color: var(--green-line);
+  background: var(--green-tint);
+  color: var(--green);
+}
+
+.lifecycle-pill--failed,
+.lifecycle-pill--interrupted {
+  border-color: var(--amber-line);
+  background: var(--amber-tint);
+  color: var(--amber-ink);
+}
+
+.lifecycle-pill--running,
+.lifecycle-pill--planned {
+  border-color: var(--cyan-dim);
+  background: var(--cyan-tint);
+  color: var(--cyan);
 }
 
 .inspector-card {
@@ -5654,7 +8141,7 @@ li.tone-info .counter-bar {
 }
 
 /* ==========================================================================
-   25. RESPONSIVE
+   26. RESPONSIVE
    ========================================================================== */
 @media (max-width: 1360px) {
   .lab-console {
@@ -5761,7 +8248,7 @@ li.tone-info .counter-bar {
 }
 
 /* ==========================================================================
-   26. MOTION PREFERENCES
+   27. MOTION PREFERENCES
    ========================================================================== */
 @media (prefers-reduced-motion: reduce) {
   *,

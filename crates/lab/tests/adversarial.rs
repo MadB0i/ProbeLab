@@ -996,6 +996,8 @@ fn drawn_match() -> probelab_lab::ArenaMatchView {
         game: "tic_tac_toe".to_owned(),
         game_name: "Tic-Tac-Toe".to_owned(),
         outcome: probelab_lab::ArenaOutcome::Draw,
+        tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
+        opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
         tested_agent: "perfect_tictactoe".to_owned(),
         opponent_agent: "first_legal_tictactoe".to_owned(),
         tested_side: probelab_core::GameSide::First,
@@ -1013,7 +1015,9 @@ fn drawn_match() -> probelab_lab::ArenaMatchView {
             board: probelab_core::GameBoard::TicTacToe { cells },
             played: Some(GameMove::TicTacToe(0)),
         }],
+        turns: Vec::new(),
         timeline: Vec::new(),
         failure: None,
+        cancelled: false,
     }
 }

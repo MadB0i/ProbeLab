@@ -127,6 +127,105 @@ pub fn is_loopback_url(url: &Url) -> bool {
     }
 }
 
+/// Whether an endpoint must be sent a credential, may be called without one, or must never be.
+///
+/// This is the whole credential story in one three-valued decision, and it exists because the
+/// alternative was worse in both directions at once.
+///
+/// **The problem.** A local Ollama server on `127.0.0.1:11434` speaks the OpenAI-compatible API and
+/// authenticates nothing. Before this enum, every provider call read `api_key_env` and failed closed
+/// when it was unset, so running a local model required the operator to invent a placeholder value and
+/// store it in an environment variable forever. That placeholder was then transmitted on every single
+/// request as a bearer token. It granted nothing, it protected nothing, and it created a durable
+/// secret-shaped value in the user's environment that looked like a real credential to every audit
+/// tool that later read that environment.
+///
+/// **The requirement being honoured.** A credential-free local endpoint must work without the operator
+/// fabricating a secret, and a *dummy* credential must never be transmitted when one is not needed.
+/// **The constraint being preserved.** Remote endpoints keep strict credential handling: no
+/// credential, no request. Weakening that to "try without and see" would turn a misconfigured remote
+/// provider into a silent authentication failure reported as a model problem.
+///
+/// **Why loopback is the only exemption.** `is_loopback_url` is checked against the *parsed, validated*
+/// URL, never against operator intent. A remote host cannot claim to be local by naming itself
+/// `localhost`, because a URL with an authority of `localhost` genuinely resolves to this machine, and
+/// a URL naming any other host genuinely does not. There is no name that maps to both.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialPosture {
+    /// The endpoint is remote: a credential must be present and is sent.
+    Required,
+    /// The endpoint is a validated loopback address: no credential is read and none is sent.
+    ///
+    /// Deliberately not "optional". Optional would mean *use the credential if one happens to be
+    /// exported*, which is precisely the dummy-secret behaviour this replaces. A loopback call
+    /// carries no `Authorization` header at all.
+    NotSentToLoopback,
+}
+
+impl CredentialPosture {
+    /// Whether a credential must be resolved before the request can be made.
+    pub fn requires_credential(self) -> bool {
+        self == CredentialPosture::Required
+    }
+}
+
+/// The credential posture for an endpoint that has already passed [`validate_base_url`].
+///
+/// Takes the validated `Url` rather than a string so it cannot be called on an endpoint that skipped
+/// validation — the exemption is a property of a checked URL, not of a claim about one.
+pub fn credential_posture(url: &Url) -> CredentialPosture {
+    if is_loopback_url(url) {
+        CredentialPosture::NotSentToLoopback
+    } else {
+        CredentialPosture::Required
+    }
+}
+
+/// A resolved credential, or a definite decision to send none.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedCredential {
+    /// The secret to send, or `None` when the endpoint takes no credential.
+    secret: Option<String>,
+}
+
+impl ResolvedCredential {
+    /// A decision to send no `Authorization` header, because the endpoint is loopback.
+    pub fn none() -> Self {
+        Self { secret: None }
+    }
+
+    /// The secret, when one is to be sent.
+    pub fn secret(&self) -> Option<&str> {
+        self.secret.as_deref()
+    }
+
+    /// Whether this endpoint will be sent a credential.
+    pub fn is_present(&self) -> bool {
+        self.secret.is_some()
+    }
+}
+
+/// Resolves the credential for a validated endpoint.
+///
+/// Returns `Ok(ResolvedCredential::none())` for loopback *without reading the environment at all*.
+/// That is the point: a local model run must not require an environment variable to exist, and must
+/// not read one even when it does, so an unrelated real credential exported for another tool can
+/// never be forwarded to a local endpoint by accident.
+pub fn resolve_credential(
+    url: &Url,
+    api_key_env: &str,
+) -> Result<ResolvedCredential, CredentialError> {
+    match credential_posture(url) {
+        CredentialPosture::NotSentToLoopback => Ok(ResolvedCredential::none()),
+        CredentialPosture::Required => {
+            read_credential(api_key_env).map(|secret| ResolvedCredential {
+                secret: Some(secret),
+            })
+        }
+    }
+}
+
 /// Validates a credential environment variable *name*.
 ///
 /// The name is validated because it is interpolated into the environment; the value never is. This is
@@ -337,5 +436,76 @@ mod tests {
     fn an_empty_secret_does_not_break_redaction() {
         let redacted = sanitize_response_text("ordinary output", "");
         assert_eq!(redacted, "ordinary output");
+    }
+
+    #[test]
+    fn a_loopback_endpoint_resolves_no_credential_without_reading_the_environment() {
+        let url = validate_base_url("http://127.0.0.1:11434/v1").expect("loopback is valid");
+        assert_eq!(
+            credential_posture(&url),
+            CredentialPosture::NotSentToLoopback
+        );
+        // The variable deliberately does not exist. A call must succeed anyway, which is what makes a
+        // local model usable with no fabricated placeholder secret.
+        let resolved = resolve_credential(&url, "PROBELAB_TRANSPORT_TEST_NEVER_SET")
+            .expect("a loopback endpoint never fails for want of a credential");
+        assert!(!resolved.is_present());
+        assert!(resolved.secret().is_none());
+    }
+
+    #[test]
+    fn a_loopback_endpoint_does_not_forward_a_credential_that_happens_to_be_exported() {
+        // The stronger half, and the one a security review actually cares about. An operator with a
+        // real `OPENAI_API_KEY` exported for some other tool must not have it sent to a local server.
+        let name = "PROBELAB_TRANSPORT_TEST_EXPORTED_KEY";
+        std::env::set_var(name, "test-only-exported-secret");
+        let url = validate_base_url("http://localhost:11434/v1").expect("localhost is loopback");
+        let resolved = resolve_credential(&url, name).expect("loopback resolves");
+        std::env::remove_var(name);
+        assert!(
+            !resolved.is_present(),
+            "an exported credential must never be forwarded to a loopback endpoint"
+        );
+    }
+
+    #[test]
+    fn a_remote_endpoint_still_requires_a_credential_and_fails_closed_without_one() {
+        let url = validate_base_url("https://api.example/v1").expect("https is valid");
+        assert_eq!(credential_posture(&url), CredentialPosture::Required);
+        assert!(credential_posture(&url).requires_credential());
+        assert_eq!(
+            resolve_credential(&url, "PROBELAB_TRANSPORT_TEST_REMOTE_ABSENT"),
+            Err(CredentialError::Missing)
+        );
+    }
+
+    #[test]
+    fn a_remote_endpoint_resolves_an_exported_credential() {
+        let name = "PROBELAB_TRANSPORT_TEST_REMOTE_PRESENT";
+        std::env::set_var(name, "test-only-remote-secret");
+        let url = validate_base_url("https://api.example/v1").expect("https is valid");
+        let resolved = resolve_credential(&url, name).expect("remote resolves");
+        std::env::remove_var(name);
+        assert_eq!(resolved.secret(), Some("test-only-remote-secret"));
+    }
+
+    #[test]
+    fn a_host_cannot_claim_loopback_by_naming_itself_something_else() {
+        // Every one of these is a real remote host that an operator could plausibly type, and none of
+        // them may receive the loopback exemption.
+        for url in [
+            "https://localhost.evil.example/v1",
+            "https://127.0.0.1.evil.example/v1",
+            "http://notlocalhost/v1",
+        ] {
+            let Ok(parsed) = validate_base_url(url) else {
+                continue;
+            };
+            assert_eq!(
+                credential_posture(&parsed),
+                CredentialPosture::Required,
+                "{url} is not loopback and must not be exempted from credentials"
+            );
+        }
     }
 }

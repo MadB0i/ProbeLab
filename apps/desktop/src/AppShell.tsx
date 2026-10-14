@@ -305,7 +305,24 @@ export function AppShell({
         into the same list as the eleven real ones.
       */}
       <div className="shell-rail">
-        <div className="nav-brand">
+        {/*
+          The brand lockup is decorative chrome here, and is hidden from assistive technology.
+
+          It sits outside `<nav>` on purpose -- it is not a destination, and a non-interactive logo in a
+          navigation landmark announces as a thing you can choose. But that left it outside *every*
+          landmark, which axe reports as `region`: "all page content should be contained by landmarks".
+          Text that is not in a landmark cannot be reached by landmark navigation at all.
+
+          Hiding it resolves that without moving it into `<nav>` and without restructuring the rail's
+          landmarks, which is what the alternative would have cost. Nothing is lost: the application
+          name is the document title, and the shell's landmarks -- navigation, main, banner, status --
+          describe the app far better than a repeated wordmark does. The lockup is still rendered, so
+          the sighted rail looks identical.
+
+          This is scoped to this call site rather than to `BrandLockup` itself, so a future use in a
+          content position -- an about panel, say -- stays readable.
+        */}
+        <div className="nav-brand" aria-hidden="true">
           <BrandLockup />
         </div>
         <button
@@ -401,7 +418,27 @@ export function AppShell({
             <span className="muted">LOCAL RUNTIME</span>
           </div>
         </header>
-        <div className="shell-content">{routes[definition.id]}</div>
+        {/*
+          The scrolling content region.
+
+          `tabIndex` is not decoration here. Once a route's content outgrew the viewport, the region
+          became a scroll container, and a scroll container that holds focusable content has to be
+          focusable itself: a keyboard user who cannot put focus in it has no way to scroll it with the
+          arrow keys once the tab sequence has moved past the last control inside. axe caught this on
+          every route the new audit reached, reported against the element that owns the scroll.
+
+          The label is deliberately not a copy of the heading. It sits inside a `<main>` that already
+          carries the route's title, and a landmark whose name duplicates its own heading adds a second
+          stop to a screen reader's landmark list saying the same thing twice.
+        */}
+        <div
+          className="shell-content"
+          role="region"
+          aria-label={`${definition.title} content`}
+          tabIndex={0}
+        >
+          {routes[definition.id]}
+        </div>
         {/*
           The status bar: where the application says where you are without asking you to look up.
 

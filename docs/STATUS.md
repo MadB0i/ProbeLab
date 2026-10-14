@@ -6,7 +6,11 @@ The single source of truth for what ProbeLab does, what is verified, and what is
 and `PROGRESS.md` describe the design and the reasoning. This file describes the state. Where they
 disagree, this file is correct and the other is stale.
 
-- **Workspace version:** 0.4.1 (`Cargo.toml` is the authority; nothing else declares it)
+- **Workspace version:** 0.5.0, declared in three places and checked to agree by
+  `python3 scripts/check-version-provenance.py`: `Cargo.toml` (`[workspace.package].version`, which the
+  binary reports), `apps/desktop/src-tauri/tauri.conf.json` (which the installer reports), and
+  `apps/desktop/package.json`. It used to be declared only in `Cargo.toml`; the other two were added so
+  the installer and the frontend can no longer drift away from the binary without a gate noticing.
 - **Toolchain:** 1.97.0, pinned by `rust-toolchain.toml`
 - **Licence:** MIT
 - **Verified on:** Windows 11, `x86_64-pc-windows-msvc`, on the tree described by the change record
@@ -508,18 +512,23 @@ Accepted. None is a release blocker.
     model identifiers are enumerable per runtime (`list_local_models`) for selection in the
     provider card; an empty list means nothing to select, never a guess.
 28. **Windows installer bundle is produced; clean-install test is not done.** `pnpm tauri build`
-    succeeds end to end on this host, emitting `target/release/bundle/nsis/ProbeLab_0.4.1_x64-setup.exe`
-    (4.3 MB) alongside the release binary (16 MB) — the earlier "NSIS absent" reading was wrong: the
-    Tauri bundler drives its own NSIS step with no separate install. The bundled release binary was
-    launched from the desktop and renders the real UI (verified by screenshot: command center idle
-    state, history empty state — both of which prove the previously-dead `brain_panel` and
-    `list_experiments` commands now resolve natively). Running the setup exe (install/uninstall
-    behavior) modifies the host and was not authorized, so installer execution remains unverified.
-    Packaging configuration itself is complete and audited: `tauri.conf.json` version matches the
-    workspace (0.4.1), all five icon sizes regenerate from `app-icon.svg` (gated), the CSP allows
-    only self/ipc/dev-server origins (the frontend makes no direct model calls — all traffic goes
-    through `invoke`), and the frontend license surface is `private: true` (unpublished) under the
-    root MIT license with a clean `cargo deny`.
+     succeeds end to end on this host, emitting `target/release/bundle/nsis/ProbeLab_0.5.0_x64-setup.exe`
+     (4.3 MB) alongside the release binary (16 MB) — the earlier "NSIS absent" reading was wrong: the
+     Tauri bundler drives its own NSIS step with no separate install. The bundled release binary was
+     launched from the desktop and renders the real UI (verified by screenshot: command center idle
+     state, history empty state — both of which prove the previously-dead `brain_panel` and
+     `list_experiments` commands now resolve natively). Running the setup exe (install/uninstall
+     behavior) modifies the host and was not authorized, so installer execution remains unverified.
+     Packaging configuration is now gated rather than merely written down: `node
+     apps/desktop/scripts/check-tauri-config.mjs` validates `tauri.conf.json` against the Tauri schema
+     that ships in this repository — which nothing else reads, since the only step that does read it is
+     the bundler, and the bundler is not on CI — and separately asserts that the production CSP carries
+     no development-server origin, that neither policy allows `unsafe-eval`, that `freezePrototype` is
+     on, and that the bundle declares a publisher, description and category. The dev server's websocket
+     moved to `devCsp`, where it belongs: the shipped policy previously admitted an origin the shipped
+     build can never connect to. All five icon sizes regenerate from `app-icon.svg` (gated), the
+     frontend makes no direct model calls (all traffic goes through `invoke`), and the frontend license
+     surface is `private: true` (unpublished) under the root MIT license with a clean `cargo deny`.
 29. **Native mock-runtime IPC tests cannot execute on this host.** Any test binary linking the
     Tauri mock runtime exits with `0xC0000139` before `main` (empty stdout/stderr); identical-closure
     binaries without it run normally, no shadowing DLL was found, and loader investigation was

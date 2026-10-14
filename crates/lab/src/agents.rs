@@ -158,7 +158,12 @@ impl AgentRegistry {
         let mut registry = Self {
             entries: BTreeMap::new(),
         };
-        for entry in baseline_entries().into_iter().chain(reference_entries()) {
+        for entry in baseline_entries()
+            .into_iter()
+            .chain(reference_entries())
+            .chain(tictactoe_entries())
+            .chain(connect_four_entries())
+        {
             registry.entries.insert(entry.spec.id.clone(), entry);
         }
         registry
@@ -204,6 +209,35 @@ impl AgentRegistry {
             .reference_factory
             .ok_or_else(|| AgentBuildError::NotAReferencePolicy { id: id.to_owned() })?;
         Ok(factory(seed))
+    }
+
+    /// Builds this entry as an arena seat, whatever kind of thing it is.
+    ///
+    /// The single construction path for an arena seat, and the reason the arena does not need to know
+    /// whether a given identifier is a policy or a model. A policy is wrapped as a
+    /// `ReferenceSeat`; anything that is also buildable as a plain agent is wrapped as a `ModelSeat`.
+    /// Every registered game policy supplies both forms, so the same identifier is usable in either
+    /// seat — which is what makes model-against-model and policy-against-policy possible rather than
+    /// merely theoretical.
+    pub fn build_seat(
+        &self,
+        id: &str,
+        seed: u64,
+    ) -> Result<probelab_engine::arena::BoxedSeat, AgentBuildError> {
+        let entry = self
+            .entries
+            .get(id)
+            .ok_or_else(|| AgentBuildError::UnknownAgent { id: id.to_owned() })?;
+        if let Some(factory) = entry.reference_factory {
+            return Ok(Box::new(probelab_engine::arena::ReferenceSeat::new(
+                factory(seed),
+            )));
+        }
+        let spec = &entry.spec;
+        Ok(Box::new(probelab_engine::arena::ModelSeat::new(
+            (entry.factory)(seed),
+            format!("{} [{}]", spec.name, spec.id),
+        )))
     }
 
     /// Registers an additional agent, for a benchmark or probe that needs one.
@@ -584,6 +618,68 @@ fn tictactoe_entries() -> Vec<AgentEntry> {
                 Box::new(ReferenceAsAgent::new(Box::new(FirstLegalTicTacToe))) as Box<dyn Agent>
             }),
             |_seed| Box::new(FirstLegalTicTacToe) as Box<dyn ReferenceStrategy>,
+        ),
+    ]
+}
+
+/// The Connect Four seats.
+///
+/// Two policies at deliberately different strengths. The pair is the arena's self-check for this
+/// game, the same way the tic-tac-toe pair is: the depth-bounded search should beat the first-legal
+/// baseline from both seats, and a change that inverted that would mean the search, the evaluation,
+/// or the legality check had broken in a way a unit test on any one of them would not catch.
+fn connect_four_entries() -> Vec<AgentEntry> {
+    vec![
+        reference_entry(
+            AgentSpec {
+                id: "depth_bounded_connect_four".to_owned(),
+                name: "Depth-Bounded Connect Four".to_owned(),
+                description:
+                    "Negamax with immediate-win detection, threat counting and centre control, at a \
+                     fixed depth and node budget. It finds forced wins and blocks forced losses, and \
+                     it is NOT proved optimal or unbeatable — its strength is a property of those two \
+                     published limits, so a deeper budget is a stronger opponent."
+                        .to_owned(),
+                category: AgentCategory::PolicyAgent,
+                execution: AgentExecution::InProcessDeterministic,
+                applicable_benchmarks: Vec::new(),
+                supported_games: vec![GameKind::ConnectFour],
+                seed: 0,
+            },
+            Box::new(|_seed| {
+                Box::new(ReferenceAsAgent::new(Box::new(
+                    probelab_engine::arena::connect_four::DepthBoundedSearch::new(),
+                ))) as Box<dyn Agent>
+            }),
+            |_seed| {
+                Box::new(probelab_engine::arena::connect_four::DepthBoundedSearch::new())
+                    as Box<dyn ReferenceStrategy>
+            },
+        ),
+        reference_entry(
+            AgentSpec {
+                id: "first_legal_connect_four".to_owned(),
+                name: "First Legal Connect Four".to_owned(),
+                description:
+                    "Drops into the leftmost column that is not full. The floor of the game: a legal, \
+                     deterministic player that never forfeits, and that a real model should beat \
+                     easily. Reported as a baseline, never as a ceiling."
+                        .to_owned(),
+                category: AgentCategory::DeterministicBaseline,
+                execution: AgentExecution::InProcessDeterministic,
+                applicable_benchmarks: Vec::new(),
+                supported_games: vec![GameKind::ConnectFour],
+                seed: 0,
+            },
+            Box::new(|_seed| {
+                Box::new(ReferenceAsAgent::new(Box::new(
+                    probelab_engine::arena::connect_four::FirstLegalConnectFour,
+                ))) as Box<dyn Agent>
+            }),
+            |_seed| {
+                Box::new(probelab_engine::arena::connect_four::FirstLegalConnectFour)
+                    as Box<dyn ReferenceStrategy>
+            },
         ),
     ]
 }

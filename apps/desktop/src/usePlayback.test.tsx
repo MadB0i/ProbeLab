@@ -9,7 +9,8 @@
 import { act, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { ArenaMatchView } from "./api";
+import { boardCell, boardCellsRowMajor } from "./boards";
+import type { ArenaMatchView, GameBoardView, GameCell } from "./api";
 import { playbackFrames, PLAYBACK_SPEEDS, usePlayback } from "./usePlayback";
 
 function board(...marks: ("first" | "second" | "empty")[]) {
@@ -25,6 +26,8 @@ function aMatch(overrides: Partial<ArenaMatchView> = {}): ArenaMatchView {
     game: "tic_tac_toe",
     gameName: "Tic-Tac-Toe",
     outcome: "win",
+    testedSeat: "reference_policy",
+    opponentSeat: "reference_policy",
     testedAgent: "first_legal_tictactoe",
     opponentAgent: "perfect_tictactoe",
     testedSide: "first",
@@ -32,7 +35,7 @@ function aMatch(overrides: Partial<ArenaMatchView> = {}): ArenaMatchView {
     plies: 3,
     finalBoard: board("first", "second", "first", "empty", "empty", "empty", "empty", "empty", "empty"),
     winner: "first",
-    winningLine: [0, 1, 2],
+    winningLine: [[0, 1], [1, 1], [2, 1]],
     illegalMoves: [],
     history: [
       {
@@ -54,10 +57,21 @@ function aMatch(overrides: Partial<ArenaMatchView> = {}): ArenaMatchView {
         played: { game: "tic_tac_toe", move: 2 },
       },
     ],
+    turns: [],
     timeline: [],
     failure: null,
+    cancelled: false,
     ...overrides,
   };
+}
+
+/** Every cell of a frame's board, row-major. Reads through the board accessor, not the raw array. */
+function allCells(board: GameBoardView): GameCell[] {
+  const cells = boardCellsRowMajor(board);
+  if (!cells) {
+    throw new Error("the fixture board is not one this build can draw");
+  }
+  return cells;
 }
 
 describe("playbackFrames", () => {
@@ -65,15 +79,15 @@ describe("playbackFrames", () => {
     const frames = playbackFrames(aMatch());
     expect(frames).toHaveLength(4);
     // The opening frame is the empty board, derived by clearing the cell the first ply filled.
-    expect(frames[0].cells.every((cell) => cell === "empty")).toBe(true);
+    expect(allCells(frames[0].board).every((cell) => cell === "empty")).toBe(true);
     expect(frames[0].ply).toBeNull();
   });
 
   it("carries each recorded board, in the order the engine recorded them", () => {
     const frames = playbackFrames(aMatch());
-    expect(frames[1].cells[0]).toBe("first");
-    expect(frames[2].cells[1]).toBe("second");
-    expect(frames[3].cells[2]).toBe("first");
+    expect(boardCell(frames[1].board, 0, 0)).toBe("first");
+    expect(boardCell(frames[2].board, 1, 0)).toBe("second");
+    expect(boardCell(frames[3].board, 2, 0)).toBe("first");
     expect(frames[1].ply?.ply).toBe(1);
     expect(frames[3].ply?.ply).toBe(3);
   });
@@ -100,7 +114,7 @@ describe("playbackFrames", () => {
     });
     const frames = playbackFrames(match);
     const last = frames[frames.length - 1];
-    expect(last.cells[2]).toBe("first");
+    expect(boardCell(last.board, 2, 0)).toBe("first");
   });
 
   it("does not duplicate a frame when the last ply is already the final board", () => {
@@ -119,14 +133,14 @@ describe("playbackFrames", () => {
       }),
     );
     expect(frames).toHaveLength(1);
-    expect(frames[0].cells.every((cell) => cell === "empty")).toBe(true);
+    expect(allCells(frames[0].board).every((cell) => cell === "empty")).toBe(true);
   });
 
   it("shows the recorded final board when a match recorded no plies but has one", () => {
     // A match that failed on its first ply still has a board, and that board is the whole recording.
     const frames = playbackFrames(aMatch({ history: [], plies: 0 }));
     expect(frames).toHaveLength(1);
-    expect(frames[0].cells[0]).toBe("first");
+    expect(allCells(frames[0].board)[0]).toBe("first");
   });
 
   it("skips a frame it cannot draw rather than rendering a blank board", () => {
@@ -143,7 +157,7 @@ describe("playbackFrames", () => {
     const frames = playbackFrames(match);
     // One opening frame plus the terminal board. The malformed ply is not drawn as nine blanks.
     for (const frame of frames) {
-      expect(frame.cells).toHaveLength(9);
+      expect(allCells(frame.board)).toHaveLength(9);
     }
   });
 

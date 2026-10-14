@@ -107,6 +107,7 @@ fn failure(kind: ModelCallFailureKind, usage: Option<TokenUsage>) -> ModelCallFa
         response_text: None,
         usage,
         elapsed_ms: Some(1),
+        http_status: None,
     }
 }
 
@@ -468,7 +469,27 @@ fn completed_metadata_path_id() -> u64 {
 }
 
 #[test]
-fn openai_metadata_and_telemetry_redact_provider_credentials() {
+fn openai_metadata_and_telemetry_never_persist_a_held_credential_or_its_variable_name() {
+    // # What this asserts, and what changed
+    //
+    // The invariant is: **no credential the run actually held, and no environment-variable name,
+    // appears in any persisted output.** The mock server below deliberately echoes the secret back in
+    // its response body, which is how a provider could leak one, and the whole point is that nothing
+    // the run possessed reaches the result bundle.
+    //
+    // This test used to assert the stronger-looking and, under the current credential model,
+    // *impossible* claim: that a server-invented string matching the credential's value is redacted
+    // from a loopback run. It passed only because a loopback endpoint used to be handed a credential
+    // it did not need, so the sanitizer had something to match. Now that a validated loopback
+    // endpoint sends no credential at all, the run holds nothing, and the sanitizer has correctly
+    // nothing to redact — which leaves the mock's own invention free to appear in telemetry. That is
+    // not a leak, because no secret leaked: there was none in flight.
+    //
+    // So the assertions below are the ones that are true *and* meaningful, and the complementary half
+    // — that a credential the run really did hold is scrubbed — is pinned where a credential can be
+    // held: `probelab_model_adapters::transport`'s redaction tests, and
+    // `a_loopback_provider_needs_no_credential_and_sends_no_authorization_header`, which asserts at
+    // the wire that none is sent.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -494,7 +515,6 @@ fn openai_metadata_and_telemetry_redact_provider_credentials() {
             .mount(&server)
             .await;
     });
-    drop(runtime);
 
     let env_name = "PROBELAB_ENGINE_SECRET_KEY";
     std::env::set_var(env_name, secret);
@@ -530,9 +550,27 @@ fn openai_metadata_and_telemetry_redact_provider_credentials() {
         .map(|event| serde_json::to_string(event).expect("serialize telemetry event"))
         .collect::<Vec<_>>()
         .join("");
+    // The persisted model reply *does* contain the mock server's echoed string, because the run held
+    // no credential to redact it with and the reply text is required output the arena renders. What
+    // must never happen is the run having sent one — so the assertion with teeth here is at the wire.
+    let received = runtime
+        .block_on(async { server.received_requests().await })
+        .expect("the mock server recorded the run's requests");
+    assert!(
+        !received.is_empty(),
+        "the run must actually have called the provider"
+    );
+    for (index, request) in received.iter().enumerate() {
+        assert!(
+            !request.headers.contains_key("authorization"),
+            "request {index} to a loopback endpoint must carry no credential: {:?}",
+            request.headers
+        );
+    }
+    // The engine never persists the name of the variable it was pointed at, whether or not it read
+    // it. This stops a future change from recording `api_key_env` in the reproducibility block "just
+    // for debugging", which would be a real disclosure of local configuration.
     assert!(!result_json.contains(secret));
-    assert!(!metadata_json.contains(secret));
-    assert!(!event_json.contains(secret));
     assert!(!result_json.contains(env_name));
     assert!(!metadata_json.contains(env_name));
     assert!(!event_json.contains(env_name));

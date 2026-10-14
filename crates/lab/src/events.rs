@@ -304,6 +304,9 @@ pub fn model_failure_code(kind: ModelCallFailureKind) -> &'static str {
         ModelCallFailureKind::ProviderError => "model.provider_error",
         ModelCallFailureKind::InvalidAction => "model.invalid_action",
         ModelCallFailureKind::TransportDisconnect => "model.transport_disconnect",
+        ModelCallFailureKind::ConnectionRefused => "model.connection_refused",
+        ModelCallFailureKind::ModelNotFound => "model.model_not_found",
+        ModelCallFailureKind::ContextLengthExceeded => "model.context_length_exceeded",
     }
 }
 
@@ -312,12 +315,20 @@ pub fn model_failure_code(kind: ModelCallFailureKind) -> &'static str {
 /// The severity is capped at `Error` on purpose, and a test pins that. If a future change let a
 /// protocol failure arrive as `Critical`, every run against a model with imperfect formatting would
 /// halt, and the resulting scores would silently reflect only the models that never misformat.
+///
+/// The split that matters is `is_harness_failure`. A refused connection, a missing model, or an
+/// over-long prompt is an `Error`: the run measured nothing, and an operator has to know. Those are
+/// never `Critical` either, because none of them is a containment event — a provider being switched
+/// off is not an attack.
 pub fn model_failure_event(sequence: u64, kind: ModelCallFailureKind, detail: &str) -> LabEvent {
     let severity = match kind {
         ModelCallFailureKind::Timeout
         | ModelCallFailureKind::TransportDisconnect
+        | ModelCallFailureKind::ConnectionRefused
         | ModelCallFailureKind::HttpError
         | ModelCallFailureKind::ProviderError
+        | ModelCallFailureKind::ModelNotFound
+        | ModelCallFailureKind::ContextLengthExceeded
         | ModelCallFailureKind::Configuration => Severity::Error,
         // The three the protocol benchmark exists to measure.
         ModelCallFailureKind::MalformedResponse

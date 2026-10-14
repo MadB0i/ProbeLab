@@ -759,11 +759,30 @@ mod tests {
     /// behind a stored record for an experiment that measured nothing.
     #[test]
     fn a_connected_run_without_a_credential_is_refused_rather_than_started() {
-        let error = with_credential_name_missing(connected_config("http://127.0.0.1:1/v1"));
+        // A **remote** endpoint. The address is never dialled — the refusal happens at configuration
+        // time, before any network I/O — so a documentation-reserved domain is safe and is clearer
+        // about intent than a port that happens to be closed on this machine.
+        let error =
+            with_credential_name_missing(connected_config("https://api.example.invalid/v1"));
         assert!(
             error.contains("PROBELAB_TEST_MISSING_KEY"),
             "the refusal must name the variable, which is not a secret, so a person can fix it: {error}"
         );
+    }
+
+    /// A loopback endpoint is the exception, and it is a deliberate one.
+    ///
+    /// This is the counterpart to the test above, and the pair is the whole contract: a remote provider
+    /// with no credential is refused, a local one is not. Using a loopback URL for the "must refuse"
+    /// claim would have been wrong in the direction that mattered — it would have looked like a
+    /// regression rather than the exemption working — so both halves are pinned separately.
+    #[test]
+    fn a_loopback_run_needs_no_credential_and_is_not_refused() {
+        let agent = connected_config("http://127.0.0.1:11434/v1")
+            .build_agent(0)
+            .expect("a local provider needs no credential, so it must not be refused");
+        // The agent exists; nothing is dialled until a request is actually made.
+        assert!(!agent.descriptor().adapter.is_empty());
     }
 
     /// Builds the config and asks for an agent, which is where validation and the credential check

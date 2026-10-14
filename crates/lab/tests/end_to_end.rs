@@ -416,7 +416,7 @@ fn every_security_probe_resolves_to_a_registered_agent_that_reports_its_own_cate
 #[test]
 fn the_arena_path_plays_inspects_and_replays() {
     let played = probelab_lab::ArenaRunner::new()
-        .play(
+        .play_simple(
             &probelab_lab::ArenaMatchSpec::new(
                 GameKind::TicTacToe,
                 "perfect_tictactoe",
@@ -502,9 +502,24 @@ fn the_arena_path_plays_inspects_and_replays() {
 /// An unimplemented game is refused by name, at plan time, with a typed error.
 #[test]
 fn an_unimplemented_game_is_refused_rather_than_half_offered() {
-    for game in [GameKind::ConnectFour, GameKind::Rps, GameKind::Battleship] {
+    // Connect four used to be in this list; it is implemented now, and the list is derived from the
+    // catalog rather than written out so a game shipping later removes itself from the assertion
+    // instead of leaving a test that quietly contradicts the product.
+    let offered: Vec<String> = probelab_lab::available_games()
+        .into_iter()
+        .map(|game| game.id)
+        .collect();
+    for game in [
+        GameKind::TicTacToe,
+        GameKind::ConnectFour,
+        GameKind::Rps,
+        GameKind::Battleship,
+    ] {
+        if offered.contains(&game.as_str().to_owned()) {
+            continue;
+        }
         let error = probelab_lab::ArenaRunner::new()
-            .play(
+            .play_simple(
                 &probelab_lab::ArenaMatchSpec::new(
                     game,
                     "perfect_tictactoe",
@@ -522,11 +537,10 @@ fn an_unimplemented_game_is_refused_rather_than_half_offered() {
         );
     }
     // And the listing offers exactly what can be played, so a picker cannot offer a refusal.
-    let offered: Vec<String> = probelab_lab::available_games()
-        .into_iter()
-        .map(|game| game.id)
-        .collect();
-    assert_eq!(offered, vec!["tic_tac_toe".to_owned()]);
+    assert_eq!(
+        offered,
+        vec!["tic_tac_toe".to_owned(), "connect_four".to_owned()]
+    );
 }
 
 /// # Settings

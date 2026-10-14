@@ -281,7 +281,7 @@ describe("accessibility affordances", () => {
     expect(document.getElementById("main-content")).not.toBeNull();
   });
 
-  it("states on the nav what is not here, instead of offering dead entries", () => {
+it("states on the nav what is not here, instead of offering dead entries", () => {
     renderShell();
     // No disabled or "coming soon" buttons: a reader can tell what is missing from this note, and
     // every button in the nav is a destination that works.
@@ -290,6 +290,29 @@ describe("accessibility affordances", () => {
       expect(button).toBeEnabled();
     }
     expect(within(nav()).getByText(/documented in the readme/i)).toBeInTheDocument();
+  });
+
+  /*
+   * The scrolling region has to be focusable in its own right.
+   *
+   * Nine of eleven routes outgrew the viewport, which turned `.shell-content` into a scroll container
+   * with focusable content inside it. A keyboard user who tabs past the last control inside has no way
+   * to scroll: the arrow keys go to the document, and the document does not scroll. axe reports this as
+   * `scrollable-region-focusable`, and the audit now runs on every route rather than the two it used to.
+   */
+  it("makes the scrolling content region focusable, so it can be scrolled from the keyboard", () => {
+    renderShell();
+    const region = screen.getByRole("region", { name: /content/i });
+    expect(region).toHaveAttribute("tabindex", "0");
+  });
+
+  it("names the content region without duplicating the page heading", () => {
+    renderShell();
+    const region = screen.getByRole("region", { name: /content/i });
+    expect(region).toHaveAccessibleName();
+    // The heading and the landmark should not announce as the same name.
+    const heading = screen.getByRole("heading", { level: 1 });
+    expect(region.getAttribute("aria-label")).not.toBe(heading.textContent);
   });
 });
 

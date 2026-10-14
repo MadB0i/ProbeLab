@@ -15,6 +15,8 @@ fn a_match(match_id: &str, outcome: ArenaOutcome) -> ArenaMatchView {
         game: "tic_tac_toe".to_owned(),
         game_name: "Tic-Tac-Toe".to_owned(),
         outcome,
+        tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
+        opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
         tested_agent: "first_legal_tictactoe".to_owned(),
         opponent_agent: "perfect_tictactoe".to_owned(),
         tested_side: GameSide::First,
@@ -24,7 +26,7 @@ fn a_match(match_id: &str, outcome: ArenaOutcome) -> ArenaMatchView {
             cells: vec![TicTacToeCell::First; 9],
         },
         winner: Some(GameSide::First),
-        winning_line: Some([0, 1, 2]),
+        winning_line: Some(vec![[0, 1], [1, 1], [2, 1]]),
         illegal_moves: Vec::new(),
         history: vec![PlyView {
             ply: 0,
@@ -34,8 +36,10 @@ fn a_match(match_id: &str, outcome: ArenaOutcome) -> ArenaMatchView {
             },
             played: Some(probelab_core::GameMove::TicTacToe(0)),
         }],
+        turns: Vec::new(),
         timeline: Vec::new(),
         failure: None,
+        cancelled: false,
     }
 }
 
@@ -45,6 +49,8 @@ fn a_failed_match(match_id: &str) -> ArenaMatchView {
         game: "tic_tac_toe".to_owned(),
         game_name: "Tic-Tac-Toe".to_owned(),
         outcome: ArenaOutcome::NoResult,
+        tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
+        opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
         tested_agent: "first_legal_tictactoe".to_owned(),
         opponent_agent: "perfect_tictactoe".to_owned(),
         tested_side: GameSide::Second,
@@ -61,6 +67,7 @@ fn a_failed_match(match_id: &str) -> ArenaMatchView {
             reason: "cell already taken".to_owned(),
         }],
         history: Vec::new(),
+        turns: Vec::new(),
         timeline: vec![LabEvent::new(
             1,
             "arena.match_failed",
@@ -69,6 +76,7 @@ fn a_failed_match(match_id: &str) -> ArenaMatchView {
             "the engine refused the move",
         )],
         failure: Some("illegal move".to_owned()),
+        cancelled: false,
     }
 }
 
@@ -291,7 +299,7 @@ fn a_full_recording_round_trips_through_the_store_with_its_digest() {
         original.replay_digest(),
         "a stored recording must be digest-identical, or it is not the recording"
     );
-    assert_eq!(loaded.winning_line, Some([0, 1, 2]));
+    assert_eq!(loaded.winning_line, Some(vec![[0, 1], [1, 1], [2, 1]]));
     assert_eq!(loaded.history.len(), 1);
     assert!(loaded.history[0].played.is_some());
 }

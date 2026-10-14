@@ -72,6 +72,11 @@ pub struct ModelCallInfo {
 }
 
 /// A typed category for a failed model call.
+///
+/// The categories are chosen to separate *the model went wrong* from *the harness could not reach the
+/// model at all*, because those two are reported to the operator as different problems and collapsing
+/// them produces a result bundle that blames a model for a network fault. Every variant below is one
+/// an operator can act on differently.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelCallFailureKind {
@@ -91,6 +96,54 @@ pub enum ModelCallFailureKind {
     InvalidAction,
     /// The transport disconnected or otherwise failed before a response.
     TransportDisconnect,
+    /// The endpoint actively refused the connection.
+    ///
+    /// Split from [`ModelCallFailureKind::TransportDisconnect`] because the two have opposite
+    /// meanings and opposite fixes. A refused connection means nothing is listening on that port —
+    /// the provider is not running, or the port is wrong, and the fix is on the operator's machine.
+    /// A disconnect means something answered and then the connection broke mid-flight. Reporting
+    /// both as one generic transport failure tells the operator nothing actionable.
+    ConnectionRefused,
+    /// The provider reported that the named model does not exist.
+    ///
+    /// Split out because it is by far the most common local-model mistake and it is invisible
+    /// otherwise: a server that has never heard of `qwen2.5:3b` answers `404` with a small JSON body,
+    /// which arrives as an anonymous `HttpError` and reads like a broken endpoint. This names the
+    /// actual problem, which is that the model name is wrong or has not been pulled.
+    ModelNotFound,
+    /// The provider rejected the request because the prompt exceeded its context window.
+    ///
+    /// Distinct from a generic HTTP failure because it is a *budget* problem, not a *transport*
+    /// problem, and because the remedy differs: a shorter history window or a smaller board, never a
+    /// retry of the same request.
+    ContextLengthExceeded,
+}
+
+impl ModelCallFailureKind {
+    /// Whether this failure means the harness could not reach or could not use the provider at all.
+    ///
+    /// The distinction the whole enum exists to protect. A harness failure is not evidence about the
+    /// model: the model never got to answer. Any statistic that counts these as model errors
+    /// understates a model that was merely unreachable, and the arena's batch reporting has to keep
+    /// them apart for that reason.
+    pub fn is_harness_failure(self) -> bool {
+        matches!(
+            self,
+            ModelCallFailureKind::Configuration
+                | ModelCallFailureKind::Timeout
+                | ModelCallFailureKind::TransportDisconnect
+                | ModelCallFailureKind::ConnectionRefused
+        )
+    }
+
+    /// Whether this failure is the model failing to answer in the required shape.
+    ///
+    /// The complement of [`is_harness_failure`](Self::is_harness_failure) for the cases where the
+    /// provider did answer: a malformed body, an empty body, a hallucinated action, a model that is
+    /// not installed, or a prompt that did not fit.
+    pub fn is_model_failure(self) -> bool {
+        !self.is_harness_failure()
+    }
 }
 
 /// A sanitized failure from one model call.
@@ -107,6 +160,13 @@ pub struct ModelCallFailure {
     pub usage: Option<TokenUsage>,
     /// Elapsed request time in milliseconds, when available.
     pub elapsed_ms: Option<u64>,
+    /// The HTTP status the provider returned, when it returned one.
+    ///
+    /// Absent for a failure that never produced a response — a refused connection or a timeout have
+    /// no status, and reporting `0` would be a fabricated datum. Kept separate from `message` so a
+    /// caller can branch on it without parsing prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
 }
 
 impl ModelCallFailure {
@@ -118,7 +178,20 @@ impl ModelCallFailure {
             response_text: None,
             usage: None,
             elapsed_ms: None,
+            http_status: None,
         }
+    }
+
+    /// Attaches the HTTP status a provider returned.
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.http_status = Some(status);
+        self
+    }
+
+    /// Attaches the elapsed time for a call that reached the transport.
+    pub fn with_elapsed(mut self, elapsed: u64) -> Self {
+        self.elapsed_ms = Some(elapsed);
+        self
     }
 }
 

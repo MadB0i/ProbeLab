@@ -1,858 +1,1152 @@
 /**
- * The Arena panel: a controlled game laboratory.
+ * The Arena: a competitive board for two seats, live telemetry, and a replayable recording.
  *
- * # The board is a recording, not a state machine
+ * # What this panel is and is not
  *
- * `play_match` in the engine is atomic — it runs a whole match and returns a result. So the board here
- * is a *frame* from the engine's own per-ply telemetry, not state the frontend is stepping. There is no
- * optimistic update, no local legality check, and no client-side game loop; React holds the current
- * frame and the backend holds the truth.
+ * It renders a recording and drives playback. It does **not** implement a game, decide a winner, or
+ * hold board state. Every board it draws came from the engine's `Game::view`, every move from the
+ * telemetry the engine recorded, and every result from the engine's own match result. There is no
+ * second opinion anywhere in this file: if the panel says someone won, the engine said so first.
  *
- * That has a visible consequence worth being explicit about: **there is no "your turn" here.** A match
- * runs to completion, so a cell is never clickable. The panel says so rather than rendering an
- * inviting-looking board that does nothing, because a grid of apparently-interactive squares that
- * silently ignore clicks is worse than a static one.
+ * That is why the board is a *recording* rather than a state machine. `play_arena_match` runs the
+ * whole match and returns it; there is no "your turn", because the match is over by the time anything
+ * is drawn. A click that looks like a move would need a human-turn execution path with its own state
+ * transitions and its own validation, and that is exactly the ambiguity this panel's credibility
+ * depends on not having.
  *
- * # A match survives a configuration change
+ * # Two games, one component
  *
- * Changing a seat does not discard the match on screen. An earlier build cleared it, which meant that
- * adjusting a selector after a match silently destroyed the recording and orphaned its replay: the
- * backend still held it and the panel had thrown away the only key to it. The configuration and the
- * displayed match are now separate facts, and a mismatch is *stated* — a stale board is dimmed and
- * labelled with the configuration it came from, so the user decides when to replace it rather than
- * discovering later that it is gone.
+ * Tic-tac-toe and connect four are drawn by the same component through `boards.ts`. The board geometry
+ * comes from the recording and from the catalog, and the two must agree or the panel says so rather
+ * than stretching a three-by-three grid over a seven-by-six board.
  *
- * # Playback replays; it does not re-run
+ * # Nothing here is invented
  *
- * `usePlayback` steps through the recorded positions. It contacts no backend and holds no engine, so
- * it cannot produce a match the recording does not already contain.
- *
- * # No winning line is synthesised
- *
- * `ArenaMatchView.winningLine` comes from the engine's own winning-line rule. If it is absent, no line
- * is drawn: a board nobody completed a line on has no line, and inferring one in the renderer would be
- * a second opinion about the result.
- *
- * # No score
- *
- * Tic-tac-toe has no meaningful performance metric, so none is shown. The panel reports the outcome,
- * the plies, and the illegal moves, which are the facts the engine actually produced.
+ * No score, no rating, no percentage, no progress bar for work that is not happening, no
+ * "thinking…" bubble. Every number on screen is either a recorded fact or is absent. A model that
+ * failed to answer shows that failure; it does not show a spinner and then a zero.
  */
 
-import { useMemo, useState } from "react";
+import { useMemo, type ReactNode } from "react";
 
+import {
+  boardCell,
+  cellGlyph,
+  cellSide,
+  columnHeight,
+  columnIsPlayable,
+  geometryFor,
+  geometryOf,
+  sideMark,
+  winningCoordinates,
+  type BoardGeometry,
+} from "./boards";
+import {
+  IconPlay,
+  IconStop,
+  IconArrowRight,
+  IconRefresh,
+  IconBoard,
+  IconInfo,
+  IconAlert,
+  IconCheck,
+  IconMark,
+} from "./Icons";
+import {
+  lastMoveCell,
+  usePlayback,
+  PLAYBACK_SPEEDS,
+  type PlaybackSpeedLabel,
+  type PlaybackState,
+} from "./usePlayback";
+import { BatchStatistics, type BatchStatisticsProps } from "./BatchStatistics";
 import type {
   ArenaAgentSummary,
   ArenaGameSummary,
   ArenaMatchSummary,
   ArenaMatchView,
-  GameCell,
-  PlyView,
+  ArenaSeatRequest,
+  GameBoardView,
+  TurnTelemetry,
 } from "./api";
-import { PLAYBACK_SPEEDS, playbackFrames, usePlayback, type PlaybackSpeedLabel } from "./usePlayback";
 
-/** The glyph a cell shows. Derived from the backend's own enum names. */
-export function cellGlyph(cell: GameCell): string {
-  switch (cell) {
-    case "first":
-      return "X";
-    case "second":
-      return "O";
-    default:
-      return "";
-  }
-}
-
-/** Which mark a side plays, for the turn indicator. */
-export function sideMark(side: "first" | "second"): string {
-  return side === "first" ? "X" : "O";
-}
+/* -------------------------------------------------------------------------------------------- */
+/* Labels                                                                                          */
+/* -------------------------------------------------------------------------------------------- */
 
 /**
- * Reads the cells out of a board, or `null` when the board is not a tic-tac-toe board.
+ * The IPC contract version shared with the Rust `ModelRunConfig`.
  *
- * Switching on the tag rather than casting is what keeps an unimplemented game from rendering as a
- * three-by-three grid of `undefined`.
+ * Duplicated here rather than imported because the arena's model seat is built from a *literal* in the
+ * picker, and a literal needs a version. The Rust side refuses any other value, so a drift here
+ * surfaces as a typed `unsupported_model_run_config_schema_version` refusal rather than as a run
+ * against the wrong contract.
  */
-export function ticTacToeCells(board: PlyView["board"] | null): GameCell[] | null {
-  if (!board || board.game !== "tic_tac_toe") {
-    return null;
-  }
-  const cells = (board as { state?: { cells?: unknown } }).state?.cells;
-  if (!Array.isArray(cells) || cells.length !== 9) {
-    return null;
-  }
-  return cells as GameCell[];
-}
+export const MODEL_RUN_CONFIG_SCHEMA_VERSION = 1;
 
-/** Wording for the outcome, kept distinct from "loss". */
+/** What a match produced, in words that do not blame a policy for a harness problem. */
 export function outcomeLabel(outcome: ArenaMatchView["outcome"]): string {
   switch (outcome) {
     case "win":
       return "WIN";
-    case "loss":
-      return "LOSS";
     case "draw":
       return "DRAW";
-    default:
+    case "loss":
+      return "LOSS";
+    case "no_result":
       return "NO RESULT";
   }
 }
 
-/** A short explanation of what the outcome means, shown under the headline. */
-export function outcomeGloss(match: ArenaMatchView): string {
-  if (match.failure) {
-    return "The match produced no result. This is a harness outcome, not a loss — nothing was won or lost.";
+/** One sentence saying what the outcome means, so a badge is never the only statement. */
+export function outcomeGloss(view: ArenaMatchView): string {
+  if (view.cancelled) {
+    return `Stopped after ${view.plies} ${view.plies === 1 ? "turn" : "turns"}. The board is the one that was actually reached.`;
   }
-  switch (match.outcome) {
-    case "draw":
-      return "Neither side could force a win within the game's limit. Tic-tac-toe is fully solvable, so a draw means both sides played perfectly or the board filled.";
+  switch (view.outcome) {
     case "win":
-      return `${match.testedAgent} won playing ${match.testedSide}.`;
+      return `${view.testedAgent} took the ${view.testedSide} seat and completed a line.`;
     case "loss":
-      return `${match.opponentAgent} won. The tested policy played ${match.testedSide}.`;
-    default:
-      return "No result was recorded.";
+      return `${view.testedAgent} played the ${view.testedSide} seat and lost to ${view.opponentAgent}.`;
+    case "draw":
+      return `Neither seat completed a line across ${view.plies} ${
+        view.plies === 1 ? "turn" : "turns"
+      }.`;
+    case "no_result":
+      return view.failure
+        ? "The match did not reach a result. Nothing was won or lost."
+        : "The match did not reach a result.";
   }
 }
 
-/** How the tested policy did, in words a reader can act on. */
-export function testedResultLabel(match: ArenaMatchView): string {
-  switch (match.outcome) {
-    case "win":
-      return "Under test WON";
-    case "loss":
-      return "Under test LOST";
-    case "draw":
-      return "Under test DREW";
-    default:
-      return "Under test: no result";
+/** The result as the tested seat's own record states it. */
+export function testedResultLabel(view: ArenaMatchView): string {
+  if (view.cancelled) {
+    return "CANCELLED";
   }
+  return outcomeLabel(view.outcome);
 }
 
-/** Describes a move in the game's own vocabulary, or reports the absence honestly. */
-export function moveLabel(ply: PlyView): string {
-  if (!ply.played) {
-    return "no move on this ply";
-  }
-  const move = (ply.played as { move?: unknown }).move;
+/** A move, as a person would say it. */
+export function moveLabel(played: unknown): string {
+  const move = (played as { move?: unknown } | null)?.move;
   if (typeof move !== "number") {
-    return "move not identified";
+    return "—";
+  }
+  const game = (played as { game?: string } | null)?.game;
+  if (game === "connect_four") {
+    return `column ${move + 1}`;
   }
   return `cell ${move + 1}`;
 }
 
-/** The cell index a ply played in, when the engine named one. */
-function playedCell(ply: PlyView | null): number | null {
-  if (!ply?.played) {
-    return null;
-  }
-  const move = (ply.played as { move?: unknown }).move;
-  return typeof move === "number" && move >= 0 && move <= 8 ? move : null;
+/** A run identifier, abbreviated for display but never truncated in the accessible name. */
+export function shortId(id: string): string {
+  return id.length <= 18 ? id : `${id.slice(0, 10)}…${id.slice(-6)}`;
 }
 
-/**
- * An identifier short enough to read on a panel, with the rest still reachable.
- *
- * A match id now carries a timestamp and a counter, so the full string runs past twenty characters
- * and used to wrap across four lines inside a narrow telemetry card. The tail is kept because it is
- * the part that distinguishes two matches of the same seed.
- */
-export function shortId(id: string, keep = 14): string {
-  if (id.length <= keep + 1) {
-    return id;
-  }
-  return `${id.slice(0, keep)}…`;
-}
-
-/** When a match was played, or an honest "unknown" rather than a fabricated relative time. */
-export function recordedLabel(unixMs: number, now = Date.now()): string {
+/** A wall-clock label for a recorded match, or a refusal when the timestamp is absurd. */
+export function recordedLabel(unixMs: number): string {
   if (!Number.isFinite(unixMs) || unixMs <= 0) {
     return "time not recorded";
   }
-  const elapsed = now - unixMs;
-  if (elapsed < 0) {
-    return new Date(unixMs).toLocaleString();
+  const date = new Date(unixMs);
+  if (Number.isNaN(date.getTime())) {
+    return "time not recorded";
   }
-  const minutes = Math.floor(elapsed / 60_000);
-  if (minutes < 1) {
-    return "just now";
-  }
-  if (minutes < 60) {
-    return `${minutes} min ago`;
-  }
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) {
-    return `${hours} h ago`;
-  }
-  const days = Math.floor(hours / 24);
-  if (days < 30) {
-    return `${days} d ago`;
-  }
-  return new Date(unixMs).toLocaleDateString();
+  return date.toLocaleString();
 }
 
+/** Token usage, or an explicit absence. Zero is never used to mean "unknown". */
+function usageLabel(turn: TurnTelemetry): string {
+  if (turn.usage === null) {
+    return turn.seat === "model" ? "tokens not reported" : "policy — no tokens";
+  }
+  const total = turn.usage.totalTokens;
+  if (total === null) {
+    return "tokens not reported";
+  }
+  const prompt = turn.usage.promptTokens;
+  const completion = turn.usage.completionTokens;
+  if (prompt !== null && completion !== null) {
+    return `${total} tokens (${prompt} in, ${completion} out)`;
+  }
+  return `${total} tokens`;
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* The board                                                                                       */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * The board, drawn from recorded data.
+ *
+ * Every cell is a button-shaped element with an accessible name, because a board is information a
+ * screen reader has to be able to read. The `role="img"` wrapper carries a summary for the layout and
+ * the individual cells carry the detail; a board with no names at all is a picture of a board.
+ */
 function Board({
-  cells,
+  board,
+  geometry,
   winningLine,
   lastMove,
+  activeSide,
+  dimmed,
 }: {
-  cells: GameCell[];
-  winningLine: readonly number[] | null;
-  lastMove: number | null;
+  board: GameBoardView | null;
+  geometry: BoardGeometry | null;
+  winningLine: [number, number][];
+  lastMove: { column: number; row: number } | null;
+  activeSide: "first" | "second" | null;
+  dimmed: boolean;
 }) {
-  const winning = useMemo(() => new Set(winningLine ?? []), [winningLine]);
-  return (
-    <div className="arena-board" role="img" aria-label="Tic-tac-toe board">
-      {cells.map((cell, index) => {
-        const classes = ["arena-cell", `arena-cell--${cell}`];
-        if (winning.has(index)) {
-          classes.push("arena-cell--winning");
-        }
-        if (lastMove === index) {
-          classes.push("arena-cell--latest");
-        }
-        return (
-          <div
-            key={index}
-            className={classes.join(" ")}
-            // The cell index is the backend's own coordinate, so the accessible name matches the rules
-            // the engine applied rather than a UI-invented numbering.
-            aria-label={`Cell ${index + 1}: ${cell === "empty" ? "empty" : cellGlyph(cell)}${
-              winning.has(index) ? ", winning line" : ""
-            }${lastMove === index ? ", last move played" : ""}`}
-          >
-            <span className="arena-cell-mark">{cellGlyph(cell)}</span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function Seat({
-  label,
-  agent,
-  side,
-  isTested,
-}: {
-  label: string;
-  agent: ArenaAgentSummary | undefined;
-  side: "first" | "second";
-  isTested: boolean;
-}) {
-  return (
-    <div className={`arena-seat${isTested ? " arena-seat--tested" : ""}`}>
-      <span className="seat-mark">{sideMark(side)}</span>
-      <div className="seat-body">
-        <span className="seat-name">{agent?.name ?? "Not selected"}</span>
-        <span className="seat-meta">
-          {label}
-          {agent ? ` · ${agent.categoryLabel}` : ""}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-function Telemetry({ match }: { match: ArenaMatchView }) {
-  const [copied, setCopied] = useState(false);
-
-  /*
-   * Copying the full identifier is the only way to get it out of the panel, and it is worth having:
-   * the id is what ties a match to its recording and to a support question.
-   */
-  const copyId = async () => {
-    try {
-      await navigator.clipboard.writeText(match.matchId);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
-    } catch {
-      setCopied(false);
-    }
-  };
-
-  return (
-    <div className="arena-telemetry">
-      <div className="arena-telemetry-card arena-telemetry-card--wide">
-        <span className="telemetry-label">Match</span>
-        <button
-          type="button"
-          className="telemetry-value telemetry-copy"
-          onClick={() => void copyId()}
-          title={match.matchId}
-          aria-label={`Match identifier ${match.matchId}. Activate to copy.`}
-        >
-          <span className="mono">{shortId(match.matchId)}</span>
-          <span className="telemetry-copy-hint">{copied ? "copied" : "copy"}</span>
-        </button>
-      </div>
-      <div className="arena-telemetry-card">
-        <span className="telemetry-label">Seed</span>
-        <span className="telemetry-value mono">{match.seed}</span>
-      </div>
-      <div className="arena-telemetry-card">
-        <span className="telemetry-label">Plies</span>
-        <span className="telemetry-value mono">{match.plies}</span>
-      </div>
-      <div className="arena-telemetry-card">
-        <span className="telemetry-label">Winner</span>
-        <span className="telemetry-value">
-          {match.winner ? sideMark(match.winner) : "None"}
-        </span>
-      </div>
-      <div className="arena-telemetry-card">
-        <span className="telemetry-label">Illegal moves</span>
-        <span className="telemetry-value mono">{match.illegalMoves.length}</span>
-      </div>
-      <div className="arena-telemetry-card">
-        <span className="telemetry-label">Tested seat</span>
-        <span className="telemetry-value">{match.testedSide}</span>
-      </div>
-    </div>
-  );
-}
-
-/** The transport: first, previous, play/pause, next, last, a scrubber, and a speed. */
-function Playback({ playback }: { playback: ReturnType<typeof usePlayback> }) {
-  const { frames, position, current, playing, speed, atStart, atEnd } = playback;
-  if (frames.length < 2) {
+  if (!geometry || !board) {
     return (
-      <p className="panel-note">
-        This match recorded {frames.length === 1 ? "one position" : "no positions"}, so there is
-        nothing to step through. The final board above is the whole recording.
-      </p>
+      <div className="arena-board arena-board--empty">
+        <p className="muted">This recording has no board this build can draw.</p>
+      </div>
     );
   }
-
-  const ply = current?.ply;
-  const moveCell = playedCell(ply ?? null);
-
+  /*
+   * Grouped into rows, because `role="grid"` requires it.
+   *
+   * `grid` has required owned children of role `row`, and `gridcell` has a required parent of role
+   * `row`. The cells were rendered flat -- 42 `gridcell` spans directly inside the grid -- so the
+   * structure was invalid by the spec's own definition. It read as nothing at all: axe reported
+   * `aria-required-children` on the board and `aria-required-parent` on all 42 cells. A screen reader
+   * cannot announce "row 3, column 4" from a structure that has no row 3.
+   *
+   * The names on each cell were already correct, which is why the defect was invisible to the unit
+   * tests: they queried by role and found the cells, and role queries do not validate the tree.
+   */
+  const rows: ReactNode[] = [];
+  for (let row = 0; row < geometry.rows; row += 1) {
+    const rowCells: ReactNode[] = [];
+    for (let column = 0; column < geometry.columns; column += 1) {
+      const cell = boardCell(board, column, row);
+      const side = cellSide(cell);
+      const onWinningLine = winningLine.some(([c, r]) => c === column && r === row);
+      const isLastMove = lastMove?.column === column && lastMove.row === row;
+      const classes = [
+        "arena-cell",
+        side ? `arena-cell--${side}` : "arena-cell--empty",
+        geometry.game === "connect_four" ? "arena-cell--disc" : "",
+        onWinningLine ? "arena-cell--winning" : "",
+        isLastMove ? "arena-cell--last" : "",
+        activeSide && side === activeSide ? "arena-cell--active" : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      // The name is spelled out rather than left to a glyph: "row 2, column 4, second side's disc"
+      // reads correctly to a screen reader and still matches what is painted.
+      const name = `${geometry.game === "connect_four" ? "Row" : "Cell"} ${row + 1}, column ${
+        column + 1
+      }${side ? `, ${side} side${onWinningLine ? ", winning line" : ""}${
+        isLastMove ? ", last move played" : ""
+      }` : ", empty"}`;
+      rowCells.push(
+        <span
+          key={`${column}-${row}`}
+          className={classes}
+          role="gridcell"
+          aria-label={name}
+          aria-current={isLastMove ? "true" : undefined}
+        >
+          <span className="arena-cell__mark" aria-hidden="true">
+            {cellGlyph(cell)}
+          </span>
+        </span>,
+      );
+    }
+    rows.push(
+      <div key={`row-${row}`} role="row" className="arena-row">
+        {rowCells}
+      </div>,
+    );
+  }
   return (
-    <div className="arena-playback">
-      <div className="arena-playback-transport">
+    <div
+      className={`arena-board arena-board--${geometry.game}${dimmed ? " is-dimmed" : ""}`}
+      role="grid"
+      aria-label={`${geometry.game === "connect_four" ? "Connect four" : "Tic-tac-toe"} board, ${geometry.columns} by ${geometry.rows}`}
+      aria-rowcount={geometry.rows}
+      aria-colcount={geometry.columns}
+    >
+      {rows}
+    </div>
+  );
+}
+
+/**
+ * A connect-four board drawn with visible column structure.
+ *
+ * The column bars are `aria-hidden` decoration. They exist because a 7x6 grid of discs is much harder
+ * to read as a *game* than the same grid with the columns outlined — and because the thing a connect
+ * four player reads is column height, which an outlined column makes immediate. They carry no
+ * information the cells do not already carry in their own names.
+ */
+function ConnectFourFrame({
+  geometry,
+  children,
+}: {
+  geometry: BoardGeometry;
+  children: ReactNode;
+}) {
+  // Only the tray is hidden. `aria-hidden` on this wrapper would also hide the board it contains, and
+  // the board is the one thing on the panel a screen reader most needs: each of its 42 cells carries a
+  // spoken name like "Row 6, column 4, second side's disc". Hiding it left connect four entirely
+  // unreadable while tic-tac-toe, which has no wrapper, read correctly.
+  return (
+    <div className="arena-c4">
+      <div className="arena-c4__tray" aria-hidden="true">
+        {Array.from({ length: geometry.columns }, (_, column) => (
+          <span key={column} className="arena-c4__slot" />
+        ))}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Seats                                                                                           */
+/* -------------------------------------------------------------------------------------------- */
+
+function Seat({
+  title,
+  agent,
+  side,
+  seatKind,
+  active,
+  lines,
+}: {
+  title: string;
+  agent: string;
+  side: "first" | "second";
+  seatKind: "reference_policy" | "model";
+  active: boolean;
+  lines: [string, string][];
+}) {
+  return (
+    <div
+      className={`arena-seat arena-seat--${side}${active ? " is-active" : ""}`}
+      data-seat={seatKind}
+    >
+      <header className="arena-seat__head">
+        <span className="arena-seat__mark" aria-hidden="true">
+          {sideMark(side)}
+        </span>
+        <div>
+          <p className="arena-seat__title">{title}</p>
+          <p className="arena-seat__agent">{agent}</p>
+        </div>
+      </header>
+      <p className="arena-seat__kind">
+        {seatKind === "model" ? "REAL MODEL" : "REFERENCE POLICY"}
+      </p>
+      <dl className="arena-seat__meta">
+        {lines.map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <span className="visually-hidden">
+        {active ? `${title} is the active seat.` : `${title} is not the active seat.`}
+      </span>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Telemetry                                                                                       */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * What one turn cost.
+ *
+ * Shown from the engine's own per-turn record. `null` is rendered as an explicit "not reported"
+ * rather than as a zero, because a provider that does not report tokens and a policy that has none
+ * are different facts and a zero would read as either.
+ */
+function TurnTelemetryPanel({ turn }: { turn: TurnTelemetry | null }) {
+  if (!turn) {
+    return (
+      <section className="arena-telemetry" aria-labelledby="arena-telemetry-heading">
+        <h3 id="arena-telemetry-heading" className="arena-subhead">
+          LAST TURN
+        </h3>
+        <p className="muted">Move the timeline to a recorded turn to see what it cost.</p>
+      </section>
+    );
+  }
+  return (
+    <section className="arena-telemetry" aria-labelledby="arena-telemetry-heading">
+      <h3 id="arena-telemetry-heading" className="arena-subhead">
+        TURN {turn.ply} TELEMETRY
+      </h3>
+      <dl className="arena-telemetry__grid">
+        <div>
+          <dt>Seat</dt>
+          <dd>
+            {turn.seatLabel}
+            <span className="arena-tag">{turn.seat === "model" ? "MODEL" : "POLICY"}</span>
+          </dd>
+        </div>
+        <div>
+          <dt>Side to move</dt>
+          <dd>{turn.side === "first" ? "First" : "Second"}</dd>
+        </div>
+        <div>
+          <dt>Decision time</dt>
+          <dd>{formatMillis(turn.elapsedMs)}</dd>
+        </div>
+        <div>
+          <dt>Token usage</dt>
+          <dd>{usageLabel(turn)}</dd>
+        </div>
+        <div>
+          <dt>Prompt template</dt>
+          <dd>{turn.promptTemplateVersion ?? "not applicable"}</dd>
+        </div>
+      </dl>
+      {turn.failure ? (
+        <p className="arena-telemetry__failure" role="status">
+          <IconAlert size={14} /> {turn.failure.message}
+        </p>
+      ) : null}
+      {turn.responseText ? (
+        <details className="arena-telemetry__reply">
+          <summary>Model reply</summary>
+          <pre>{turn.responseText}</pre>
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
+/** A duration in the largest two units that stay readable. */
+export function formatMillis(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return "—";
+  }
+  if (ms < 1000) {
+    return `${Math.round(ms)} ms`;
+  }
+  if (ms < 60_000) {
+    return `${(ms / 1000).toFixed(1)} s`;
+  }
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1000);
+  return `${minutes} m ${seconds.toString().padStart(2, "0")} s`;
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Playback                                                                                        */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * The transport.
+ *
+ * Every control is an SVG icon with an accessible name and a tooltip. The previous transport used
+ * Unicode transport glyphs (`⏮ ◀ ▶ ⏭ ❚❚`), which read as decoration to a screen reader, rendered
+ * differently by every font, and looked like a media player bolted onto scientific software. These
+ * are drawn, labelled, and sized with the rest of the interface.
+ */
+function Playback({
+  match,
+  playback,
+}: {
+  match: ArenaMatchView | null;
+  /**
+   * The panel's single playback state.
+   *
+   * Passed in rather than created here, and that is the whole point: a transport that owned its own
+   * position would move to the final frame while the board sat on the opening one, and both would
+   * render confidently. One hook, one position, one frame counter.
+   */
+  playback: PlaybackState;
+}) {
+  if (!match || playback.frames.length < 2) {
+    /*
+     * Fewer than two positions is not a replay, it is a single board.
+     *
+     * The alternative is a transport with every step button disabled, a scrubber pinned at both ends,
+     * and a play control that does nothing — three dead controls and a lie about what the panel can
+     * do. A match that recorded no plies, or exactly one, says so plainly instead.
+     */
+    return (
+      <section className="arena-playback" aria-labelledby="arena-replay-heading">
+        <h3 id="arena-replay-heading" className="arena-subhead">
+          REPLAY
+        </h3>
+        <p className="muted">
+          {match
+            ? "This match recorded one position, so there is nothing to step through."
+            : "Nothing to step through yet."}
+        </p>
+      </section>
+    );
+  }
+  const frameCount = playback.frames.length;
+  return (
+    <section className="arena-playback" aria-labelledby="arena-replay-heading">
+      <h3 id="arena-replay-heading" className="arena-subhead">
+        REPLAY
+      </h3>
+      <div className="arena-transport">
         <button
           type="button"
-          className="arena-transport-button"
+          className="btn btn-icon"
           onClick={playback.toStart}
-          disabled={atStart}
-          aria-label="Go to the first frame"
-          title="First frame"
+          disabled={playback.atStart}
+          aria-label="Go to the opening position"
+          title="Go to the opening position"
         >
-          ⏮
+          <IconArrowRight className="arena-icon-flip" />
         </button>
         <button
           type="button"
-          className="arena-transport-button"
+          className="btn btn-icon"
           onClick={() => playback.step(-1)}
-          disabled={atStart}
-          aria-label="Previous frame"
-          title="Previous frame"
+          disabled={playback.atStart}
+          aria-label="Step back one turn"
+          title="Step back one turn"
         >
-          ◀
+          <IconArrowRight className="arena-icon-flip" />
         </button>
         <button
           type="button"
-          className="arena-transport-button arena-transport-button--primary"
+          className="btn btn-primary arena-transport__play"
           onClick={playback.toggle}
-          aria-label={playing ? "Pause playback" : "Play the recorded match"}
-          title={playing ? "Pause" : "Play"}
+          aria-label={playback.playing ? "Pause playback" : "Play the recorded match"}
         >
-          {playing ? "❚❚ PAUSE" : "▶ PLAY"}
+          {playback.playing ? <IconStop size={14} /> : <IconPlay size={14} />}
+          <span>{playback.playing ? "PAUSE" : "PLAY"}</span>
         </button>
         <button
           type="button"
-          className="arena-transport-button"
+          className="btn btn-icon"
           onClick={() => playback.step(1)}
-          disabled={atEnd}
-          aria-label="Next frame"
-          title="Next frame"
+          disabled={playback.atEnd}
+          aria-label="Step forward one turn"
+          title="Step forward one turn"
         >
-          ▶
+          <IconArrowRight />
         </button>
         <button
           type="button"
-          className="arena-transport-button"
+          className="btn btn-icon"
           onClick={playback.toEnd}
-          disabled={atEnd}
-          aria-label="Go to the last frame"
-          title="Last frame"
+          disabled={playback.atEnd}
+          aria-label="Go to the final position"
+          title="Go to the final position"
         >
-          ⏭
+          <IconArrowRight />
         </button>
       </div>
-
-      <label className="arena-scrubber">
-        <span className="arena-scrubber-label">Frame</span>
+      <label className="arena-scrub">
+        <span className="visually-hidden">
+          Frame position, {playback.position + 1} of {frameCount}
+        </span>
         <input
           type="range"
           min={0}
-          max={frames.length - 1}
-          step={1}
-          value={position}
+          max={Math.max(frameCount - 1, 0)}
+          value={playback.position}
           onChange={(event) => playback.setPosition(Number(event.target.value))}
-          aria-label={`Frame position, ${position + 1} of ${frames.length}`}
+          aria-valuetext={`Frame ${playback.position + 1} of ${frameCount}${
+            playback.current?.ply ? `, after turn ${playback.current.ply.ply}` : ", the opening position"
+          }`}
         />
-        <span className="arena-frame-counter mono" aria-live="polite">
-          {position + 1} / {frames.length}
-        </span>
       </label>
-
-      <div className="arena-playback-meta">
-        <span className="arena-now-playing">
-          {ply
-            ? `Ply ${ply.ply} · ${sideMark(ply.side)} (${ply.side}) · ${moveLabel(ply)}`
-            : "Opening position — before any move"}
-        </span>
+      <div className="arena-transport__meta">
+        <p className="arena-frame-counter" aria-live="polite">
+          FRAME {playback.position + 1} / {frameCount}
+          {playback.current?.ply ? ` · after turn ${playback.current.ply.ply}` : " · opening position"}
+        </p>
         <label className="arena-speed">
-          <span className="arena-speed-label">Speed</span>
+          <span className="visually-hidden">Playback speed</span>
           <select
-            value={speed}
+            value={playback.speed}
             onChange={(event) => playback.setSpeed(event.target.value as PlaybackSpeedLabel)}
             aria-label="Playback speed"
           >
-            {PLAYBACK_SPEEDS.map((option) => (
-              <option key={option.label} value={option.label}>
-                {option.label}
+            {PLAYBACK_SPEEDS.map((speed) => (
+              <option key={speed.label} value={speed.label}>
+                {speed.label}
               </option>
             ))}
           </select>
         </label>
       </div>
-
-      {moveCell !== null ? (
-        <p className="arena-move-note">The highlighted cell is the move the engine recorded on this ply.</p>
-      ) : null}
-    </div>
+    </section>
   );
 }
 
-function History({ match }: { match: ArenaMatchView }) {
-  if (match.history.length === 0) {
-    return <p className="panel-note">This match recorded no plies.</p>;
+/* -------------------------------------------------------------------------------------------- */
+/* History and archive                                                                             */
+/* -------------------------------------------------------------------------------------------- */
+
+function History({ match }: { match: ArenaMatchView | null }) {
+  if (!match || match.history.length === 0) {
+    return (
+      <section aria-labelledby="arena-history-heading">
+        <h3 id="arena-history-heading" className="arena-subhead">
+          TURN RECORD
+        </h3>
+        <p className="muted">This match recorded no turns.</p>
+      </section>
+    );
   }
   return (
-    <ol className="arena-history">
-      {match.history.map((ply) => (
-        <li key={ply.ply} className="arena-ply">
-          <span className="ply-number">{ply.ply}</span>
-          <span className="ply-side">{sideMark(ply.side)}</span>
-          <span className="ply-move">{moveLabel(ply)}</span>
-        </li>
-      ))}
-    </ol>
+    <section aria-labelledby="arena-history-heading">
+      <h3 id="arena-history-heading" className="arena-subhead">
+        TURN RECORD
+      </h3>
+      <ol className="arena-history">
+        {match.history.map((ply) => (
+          <li key={`${ply.ply}-${ply.side}`} className={`arena-history__row arena-history__row--${ply.side}`}>
+            <span className="arena-history__ply">{ply.ply}</span>
+            <span className="arena-history__side">{ply.side === "first" ? "FIRST" : "SECOND"}</span>
+            <span className="arena-history__move">{moveLabel(ply.played)}</span>
+            <span className="arena-history__cost">
+              {ply.ply - 1 < match.turns.length
+                ? formatMillis(match.turns[ply.ply - 1].elapsedMs)
+                : "—"}
+            </span>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }
 
 function MatchArchive({
   summaries,
-  openId,
-  loadingId,
+  openingId,
   onOpen,
 }: {
   summaries: ArenaMatchSummary[];
-  openId: string | null;
-  loadingId: string | null;
+  openingId: string | null;
   onOpen: (matchId: string) => void;
 }) {
-  if (summaries.length === 0) {
-    return (
-      <p className="panel-note">
-        No matches recorded yet. A match is written here the moment it finishes, and stays readable
-        after the application is closed.
-      </p>
-    );
-  }
   return (
-    <ul className="arena-archive">
-      {summaries.map((summary) => (
-        <li key={summary.matchId}>
-          <button
-            type="button"
-            className={`arena-archive-row${summary.matchId === openId ? " arena-archive-row--open" : ""}`}
-            onClick={() => onOpen(summary.matchId)}
-            disabled={loadingId !== null}
-            aria-current={summary.matchId === openId ? "true" : undefined}
-          >
-            <span className={`arena-archive-outcome arena-archive-outcome--${summary.outcome}`}>
-              {outcomeLabel(summary.outcome)}
-            </span>
-            <span className="arena-archive-main">
-              <span className="arena-archive-pairing">
-                {summary.testedAgent} vs {summary.opponentAgent}
-              </span>
-              <span className="arena-archive-meta">
-                {summary.testedSide} · {summary.plies} {summary.plies === 1 ? "ply" : "plies"} ·{" "}
-                {recordedLabel(summary.recordedUnixMs)}
-              </span>
-            </span>
-            <span className="arena-archive-action">
-              {loadingId === summary.matchId ? "OPENING…" : "OPEN"}
-            </span>
-          </button>
-        </li>
-      ))}
-    </ul>
+    <section className="arena-archive" aria-labelledby="arena-archive-heading">
+      <h3 id="arena-archive-heading" className="arena-subhead">
+        MATCH ARCHIVE
+      </h3>
+      {summaries.length === 0 ? (
+        <p className="muted">No matches recorded yet.</p>
+      ) : (
+        <ul className="arena-archive__list">
+          {summaries.map((summary) => (
+            <li key={summary.matchId}>
+              <button
+                type="button"
+                className="arena-archive__row"
+                aria-current={summary.matchId === openingId ? "true" : undefined}
+                disabled={openingId !== null}
+                onClick={() => onOpen(summary.matchId)}
+              >
+                <span className={`arena-archive__outcome arena-archive__outcome--${summary.outcome}`}>
+                  {outcomeLabel(summary.outcome)}
+                </span>
+                <span className="arena-archive__meta">
+                  {summary.game} · {summary.plies} plies · seed {summary.seed}
+                </span>
+                <span className="arena-archive__seats">
+                  {summary.testedAgent} vs {summary.opponentAgent}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
-export function ArenaPanel({
-  games,
-  agents,
-  match,
-  matchSummaries,
-  openingId,
-  error,
-  playing,
-  stale,
-  selectedGame,
-  selectedTested,
-  selectedOpponent,
-  selectedSide,
-  onPlay,
-  onReset,
-  onOpenMatch,
-  onGameChange,
-  onTestedChange,
-  onOpponentChange,
-  onSideChange,
-  canPlay,
-}: {
+/* -------------------------------------------------------------------------------------------- */
+/* The panel                                                                                       */
+/* -------------------------------------------------------------------------------------------- */
+
+export type ArenaPanelProps = {
   games: ArenaGameSummary[];
   agents: ArenaAgentSummary[];
   match: ArenaMatchView | null;
-  matchSummaries: ArenaMatchSummary[];
-  /** The identifier currently being fetched from the archive, if any. */
+  summaries: ArenaMatchSummary[];
+  game: string;
+  testedSeat: ArenaSeatRequest;
+  opponentSeat: ArenaSeatRequest;
+  testedSide: "first" | "second";
+  seed: number;
+  /** Locally installed models, for the model-seat picker. */
+  localModels: string[];
+  /** The provider configuration the model seats are built from. */
+  modelConfig: { baseUrl: string; apiKeyEnv: string; timeoutSeconds: number };
+  onGameChange: (game: string) => void;
+  onTestedSeatChange: (seat: ArenaSeatRequest) => void;
+  onOpponentSeatChange: (seat: ArenaSeatRequest) => void;
+  onSideChange: (side: "first" | "second") => void;
+  onSeedChange: (seed: number) => void;
+  onPlay: () => void;
+  onCancel: () => void;
+  onOpen: (matchId: string) => void;
+  playing: boolean;
   openingId: string | null;
   error: string | null;
-  playing: boolean;
-  /** Whether the shown match came from a different configuration than the selectors describe. */
-  stale: boolean;
-  selectedGame: string;
-  selectedTested: string;
-  selectedOpponent: string;
-  selectedSide: "first" | "second";
-  onPlay: () => void;
-  onReset: () => void;
-  onOpenMatch: (matchId: string) => void;
-  onGameChange: (game: string) => void;
-  onTestedChange: (agent: string) => void;
-  onOpponentChange: (agent: string) => void;
-  onSideChange: (side: "first" | "second") => void;
   canPlay: boolean;
-}) {
-  const game = games.find((candidate) => candidate.id === selectedGame) ?? games[0];
-  const tested = agents.find((agent) => agent.id === selectedTested);
-  const opponent = agents.find((agent) => agent.id === selectedOpponent);
-  const playback = usePlayback(match, { stale, autoPlay: true });
-  const { frames, current } = playback;
-  const shownCells = current?.cells ?? ticTacToeCells(match?.finalBoard ?? null);
+  /** Everything the batch statistics panel needs, passed through so this panel stays one component. */
+  batch: BatchStatisticsProps;
+};
 
-  /*
-   * The winning line is shown only on the final frame, where it is the line that decided the match.
-   * Drawing it on an intermediate frame would be true of that board too, but it would read as "this
-   * is how the match ended" on a board that has not ended, which is a different claim.
-   */
-  const atFinalFrame = frames.length > 0 && playback.position === frames.length - 1;
-  const shownWinningLine =
-    match && stale === false && atFinalFrame && match.outcome !== "draw" ? match.winningLine : null;
+export function ArenaPanel(props: ArenaPanelProps) {
+  const {
+    games,
+    agents,
+    match,
+    summaries,
+    game,
+    testedSeat,
+    opponentSeat,
+    testedSide,
+    seed,
+    localModels,
+    modelConfig,
+    onGameChange,
+    onTestedSeatChange,
+    onOpponentSeatChange,
+    onSideChange,
+    onSeedChange,
+    onPlay,
+    onCancel,
+    onOpen,
+    playing,
+    openingId,
+    error,
+    canPlay,
+    batch,
+  } = props;
+
+  const playback = usePlayback(match, {
+    stale: staleFor(match, testedSeat, opponentSeat, game, testedSide),
+    autoPlay: true,
+  });
+  const frame = playback.current;
+  const board = frame?.board ?? match?.finalBoard ?? null;
+  const geometry = geometryOf(board) ?? geometryFor(match?.game ?? game);
+
+  // The winning line is only shown on the final frame, and only when it matches the board it is
+  // claimed against. Showing it earlier would highlight cells that are not yet the winner's.
+  const atFinalFrame = playback.atEnd;
+  const winningLine = useMemo(() => {
+    if (!match || !atFinalFrame || match.outcome === "draw" || match.cancelled) {
+      return [];
+    }
+    return winningCoordinates(board, match.winningLine, match.winner);
+  }, [match, atFinalFrame, board]);
+
+  const lastMove = frame?.ply ? lastMoveCell(board, frame.ply.played) : null;
+  const activeSide = frame?.ply?.side ?? null;
 
   if (error) {
     return (
       <section className="panel arena-panel" aria-labelledby="arena-heading">
-        <div className="panel-heading">
-          <h2 id="arena-heading">ARENA</h2>
-          <span className="tone-error">COMMAND FAILED</span>
-        </div>
+        <h2 id="arena-heading">ARENA</h2>
         <p className="brain-error" role="alert">
-          {error}
-        </p>
-        <p className="panel-note">
-          The arena refuses a match rather than simulating one. Nothing on this panel is a placeholder.
+          <IconAlert size={14} /> {error}
         </p>
       </section>
     );
   }
 
-  if (games.length === 0) {
-    return (
-      <section className="panel arena-panel" aria-labelledby="arena-heading">
-        <div className="panel-heading">
-          <h2 id="arena-heading">ARENA</h2>
-          <span className="muted">NO GAMES</span>
-        </div>
-        <p className="panel-note">
-          This build has no playable game registered. Connect four, rock-paper-scissors, and battleship
-          have types in the schema but no implementation, and are deliberately not offered rather than
-          offered and left to fail.
-        </p>
-      </section>
-    );
-  }
+  const seatLines = (view: ArenaMatchView | null, side: "first" | "second"): [string, string][] => {
+    if (!view) {
+      return [];
+    }
+    const totalMs = view.turns.reduce((total, turn) => total + turn.elapsedMs, 0);
+    const tokens = view.turns.reduce<number | null>((carry, turn) => {
+      if (turn.usage?.totalTokens === null || turn.usage === null) {
+        return carry;
+      }
+      return (carry ?? 0) + turn.usage.totalTokens;
+    }, null);
+    return [
+      ["Turns", String(view.plies)],
+      ["Decision time", formatMillis(totalMs)],
+      ["Tokens", tokens === null ? "not reported" : String(tokens)],
+      [
+        "Invalid moves",
+        view.illegalMoves.length === 0 ? "none" : String(view.illegalMoves.length),
+      ],
+    ];
+  };
 
-  const configurationSummary =
-    `${tested?.name ?? "Not selected"} vs ${opponent?.name ?? "Not selected"} · ${selectedSide === "first" ? "First (X)" : "Second (O)"}`;
+  const testedAgentLabel = match?.testedAgent ?? seatLabel(testedSeat);
+  const opponentAgentLabel = match?.opponentAgent ?? seatLabel(opponentSeat);
+  const testedSeatKind =
+    match?.testedSeat ?? (testedSeat.kind === "model" ? "model" : "reference_policy");
+  const opponentSeatKind =
+    match?.opponentSeat ?? (opponentSeat.kind === "model" ? "model" : "reference_policy");
+  const testedSideNow = match?.testedSide ?? testedSide;
 
   return (
     <section className="panel arena-panel" aria-labelledby="arena-heading">
-      <div className="panel-heading">
-        <h2 id="arena-heading">ARENA</h2>
-        <span className="arena-header-game">{game?.name ?? "—"}</span>
-        <span
-          className={
-            match ? `arena-status arena-status--${match.outcome}` : "arena-status arena-status--idle"
-          }
-        >
-          {match ? outcomeLabel(match.outcome) : "NO ACTIVE MATCH"}
-        </span>
-      </div>
+      <header className="arena-head">
+        <div>
+          <p className="eyebrow">
+            <IconBoard size={14} /> COMPETITIVE BENCH
+          </p>
+          <h2 id="arena-heading">{match?.gameName ?? "Arena"}</h2>
+        </div>
+        {match ? (
+          <div className="arena-head__verdict">
+            <span className={`arena-verdict arena-verdict--${match.outcome}`}>
+              {testedResultLabel(match)}
+            </span>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => {
+                void navigator.clipboard?.writeText(match.matchId);
+              }}
+              aria-label={`Match identifier ${match.matchId}. Activate to copy.`}
+              title={match.matchId}
+            >
+              <span className="mono">{shortId(match.matchId)}</span>
+            </button>
+          </div>
+        ) : (
+          <span className="arena-head__verdict arena-verdict--none">NO MATCH</span>
+        )}
+      </header>
 
-      <div className="arena-layout">
-        <div className="arena-main">
-          {match && shownCells ? (
-            <>
-              {stale ? (
-                <div className="arena-stale" role="status">
-                  <span className="arena-stale-badge">PREVIOUS CONFIGURATION</span>
-                  <p>
-                    This board is the match that was played, not one your selectors describe now. It was{" "}
-                    <strong>{match.testedAgent}</strong> against <strong>{match.opponentAgent}</strong>{" "}
-                    playing <strong>{match.testedSide}</strong>. Your selectors now read{" "}
-                    <strong>{configurationSummary}</strong>. Play a match to record the new pairing.
-                  </p>
-                </div>
-              ) : null}
-              {/*
-                * The transport sits above the board rather than below it.
-                *
-                * A board is the tallest thing on this panel, and putting the controls after it meant
-                * they landed below the fold on a 900px window — the controls for watching a match were
-                * the one thing you had to scroll to find. Above the board they are visible while the
-                * board is, which is what a viewer needs: the position, and the means to move it, at the
-                * same time.
-                */}
-              {frames.length > 1 ? (
-                <section className="brain-section arena-playback-section" aria-labelledby="arena-replay-heading">
-                  <h3 id="arena-replay-heading">Watch this match</h3>
-                  <p className="section-note">
-                    Recorded positions from the engine&rsquo;s own telemetry, played back in order.
-                    Playback reads the recording and contacts nothing — it cannot re-run the match or
-                    reach a model.
-                  </p>
-                  <Playback playback={playback} />
-                </section>
-              ) : null}
-              <div className="arena-board-frame">
+      {match ? (
+        <p className={`arena-gloss arena-gloss--${match.outcome}`} role="status">
+          {match.cancelled ? <IconStop size={14} /> : null}
+          {match.outcome === "win" ? <IconCheck size={14} /> : null}
+          {match.outcome === "no_result" ? <IconAlert size={14} /> : null}
+          {outcomeGloss(match)}
+        </p>
+      ) : null}
+
+      {match?.failure ? (
+        <p className="arena-failure" role="note">
+          <IconAlert size={14} />
+          <span>
+            <strong>Why there is no result:</strong> {match.failure}
+          </span>
+        </p>
+      ) : null}
+
+      {playback.stale && match ? (
+        <p className="arena-stale" role="status">
+          <IconInfo size={14} /> The selectors have changed since this match was played. The recording
+          below is what actually happened.
+        </p>
+      ) : null}
+
+      <div className="arena-stage">
+        <div className="arena-board-column">
+          {match ? (
+            geometry && geometry.game === "connect_four" ? (
+              <ConnectFourFrame geometry={geometry}>
                 <Board
-                  cells={shownCells}
-                  winningLine={shownWinningLine}
-                  lastMove={playedCell(current?.ply ?? null)}
+                  board={board}
+                  geometry={geometry}
+                  winningLine={winningLine}
+                  lastMove={lastMove}
+                  activeSide={activeSide}
+                  dimmed={false}
                 />
-              </div>
-              <p className="arena-outcome-gloss">{outcomeGloss(match)}</p>
-            </>
-          ) : match ? (
-            <p className="panel-note">
-              This match reports a board the panel cannot draw. It is shown in the telemetry below
-              rather than guessed at.
-            </p>
+              </ConnectFourFrame>
+            ) : (
+              <Board
+                board={board}
+                geometry={geometry}
+                winningLine={winningLine}
+                lastMove={lastMove}
+                activeSide={activeSide}
+                dimmed={false}
+              />
+            )
           ) : (
-            <div className="arena-empty">
-              <h3>NO ACTIVE MATCH</h3>
-              <p>
-                Choose a pairing below and start one. A match runs to completion in the engine, and the
-                board shown is the position the engine recorded — not a local simulation.
+            <div className="arena-board arena-board--idle">
+              <p className="arena-board__idle-text">NO ACTIVE MATCH</p>
+              <p className="muted">
+                Seat two competitors and start one. Every move is played by the engine; nothing here
+                simulates a decision.
               </p>
             </div>
           )}
         </div>
 
-        <aside className="arena-side">
-          <div className="arena-seats">
-            <Seat label="Under test" agent={tested} side={selectedSide} isTested />
-            <Seat
-              label="Opponent"
-              agent={opponent}
-              side={selectedSide === "first" ? "second" : "first"}
-              isTested={false}
-            />
-          </div>
-
-          {match ? <Telemetry match={match} /> : null}
-
-          {match && match.outcome !== "no_result" ? (
-            <div className={`arena-result arena-result--${match.outcome}`}>
-              <span className="arena-result-label">{testedResultLabel(match)}</span>
-              <span className="arena-result-detail">
-                {match.outcome === "draw"
-                  ? "No side completed a line; the board filled."
-                  : `${sideMark(match.winner ?? "first")} (${match.winner}) completed the winning line.`}
-              </span>
-            </div>
-          ) : null}
-
-          {match && match.failure ? (
-            <div className="arena-result arena-result--failure">
-              <span className="arena-result-label">MATCH FAILED</span>
-              <span className="arena-result-detail">{match.failure}</span>
-            </div>
-          ) : null}
-
-          {match && match.illegalMoves.length > 0 ? (
-            <div className="arena-illegal">
-              <h4>Refused moves</h4>
-              <ul>
-                {match.illegalMoves.map((illegal, index) => (
-                  <li key={`${illegal.ply}-${index}`}>
-                    <span className="illegal-ply">ply {illegal.ply}</span>
-                    <span className="illegal-reason">{illegal.reason}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-        </aside>
+        {/*
+       * A plain `div`, not `<aside>`.
+       *
+       * A complementary landmark is only meaningful at the top level of a page. This rail sits inside
+       * the arena's own labelled `<section>`, and nesting a landmark inside another landmark is what
+       * axe calls `landmark-complementary-is-top-level`. The label is kept, so the rail is still
+       * named and announced; only the landmark role is dropped.
+       */}
+      <div className="arena-rail" aria-label="Competitors and live statistics">
+          <Seat
+            title="UNDER TEST"
+            agent={testedAgentLabel}
+            side={testedSideNow}
+            seatKind={testedSeatKind}
+            active={activeSide === testedSideNow}
+            lines={seatLines(match, testedSideNow)}
+          />
+          <Seat
+            title="OPPONENT"
+            agent={opponentAgentLabel}
+            side={testedSideNow === "first" ? "second" : "first"}
+            seatKind={opponentSeatKind}
+            active={activeSide !== null && activeSide !== testedSideNow}
+            lines={match ? [] : []}
+          />
+          <TurnTelemetryPanel turn={frame?.turn ?? null} />
+        </div>
       </div>
 
       <div className="arena-controls">
-        <div className="field-group">
-          <label htmlFor="arena-game">GAME</label>
-          <select
-            id="arena-game"
-            value={selectedGame}
-            onChange={(event) => onGameChange(event.target.value)}
-            disabled={playing}
-          >
-            {games.map((candidate) => (
-              <option key={candidate.id} value={candidate.id}>
-                {candidate.name}
-              </option>
-            ))}
-          </select>
+        <Playback match={match} playback={playback} />
+
+        <section className="arena-setup" aria-labelledby="arena-setup-heading">
+          <h3 id="arena-setup-heading" className="arena-subhead">
+            MATCH SETUP
+          </h3>
+          <div className="arena-setup__grid">
+            <label className="field">
+              <span>Game</span>
+              <select
+                value={game}
+                onChange={(event) => onGameChange(event.target.value)}
+                disabled={playing}
+              >
+                {games.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.name} · {entry.width}×{entry.height}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <SeatPicker
+              label="Under test"
+              agents={agents}
+              seat={testedSeat}
+              localModels={localModels}
+              modelConfig={modelConfig}
+              disabled={playing}
+              onChange={onTestedSeatChange}
+            />
+            <SeatPicker
+              label="Opponent"
+              agents={agents}
+              seat={opponentSeat}
+              localModels={localModels}
+              modelConfig={modelConfig}
+              disabled={playing}
+              onChange={onOpponentSeatChange}
+            />
+            <label className="field">
+              <span>Tested side</span>
+              <select
+                value={testedSide}
+                onChange={(event) => onSideChange(event.target.value as "first" | "second")}
+                disabled={playing}
+              >
+                <option value="first">First — moves first</option>
+                <option value="second">Second — moves second</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Seed</span>
+              <input
+                type="number"
+                min={0}
+                step={1}
+                value={seed}
+                onChange={(event) => onSeedChange(Number(event.target.value) || 0)}
+                disabled={playing}
+              />
+            </label>
+          </div>
+          <div className="arena-setup__actions">
+            <button
+              type="button"
+              className="btn btn-primary btn-lg"
+              onClick={onPlay}
+              disabled={!canPlay || playing}
+            >
+              {playing ? (
+                <>
+                  <IconRefresh size={14} /> PLAYING…
+                </>
+              ) : match ? (
+                <>
+                  <IconPlay size={14} /> RUN AGAIN
+                </>
+              ) : (
+                <>
+                  <IconBoard size={14} /> PLAY MATCH
+                </>
+              )}
+            </button>
+            {playing ? (
+              <button type="button" className="btn btn-danger" onClick={onCancel}>
+                <IconStop size={14} /> STOP
+              </button>
+            ) : null}
+          </div>
+          {playing ? (
+            <p className="arena-setup__note" role="status">
+              A match against a real model runs one provider call per turn, so it takes real time.
+              Turn events stream in as the engine applies them; stopping takes effect at the next turn
+              boundary and the match is recorded as far as it actually got.
+            </p>
+          ) : null}
+        </section>
+
+        <div className="arena-secondary">
+          <History match={match} />
+          <MatchArchive summaries={summaries} openingId={openingId} onOpen={onOpen} />
         </div>
-        <div className="field-group">
-          <label htmlFor="arena-tested">UNDER TEST</label>
-          <select
-            id="arena-tested"
-            value={selectedTested}
-            onChange={(event) => onTestedChange(event.target.value)}
-            disabled={playing}
-          >
-            {agents.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {agent.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="field-group">
-          <label htmlFor="arena-opponent">OPPONENT</label>
-          <select
-            id="arena-opponent"
-            value={selectedOpponent}
-            onChange={(event) => onOpponentChange(event.target.value)}
-            disabled={playing}
-          >
-            {agents
-              .filter((agent) => agent.canBeOpponent)
-              .map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.name}
-                </option>
-              ))}
-          </select>
-        </div>
-        <div className="field-group">
-          <label htmlFor="arena-side">TESTED SEAT</label>
-          <select
-            id="arena-side"
-            value={selectedSide}
-            onChange={(event) => onSideChange(event.target.value as "first" | "second")}
-            disabled={playing}
-          >
-            <option value="first">First (X)</option>
-            <option value="second">Second (O)</option>
-          </select>
-        </div>
-        <button
-          type="button"
-          className="brain-run-button"
-          onClick={onPlay}
-          disabled={!canPlay || playing}
-        >
-          {playing ? "PLAYING…" : match ? "RUN AGAIN" : "PLAY MATCH"}
-        </button>
-        <button
-          type="button"
-          className="btn btn-ghost"
-          onClick={onReset}
-          disabled={!match || playing}
-          title="Clear the board and return to setup. Stored matches are kept."
-        >
-          NEW MATCH
-        </button>
       </div>
 
       {/*
-       * There is no "submit a move" control and no "your turn" indicator, and both absences are
-       * deliberate. `play_match` is atomic: a match runs to completion, so no turn is ever the
-       * user's to take. A clickable board that silently ignored clicks would look like a working
-       * human-versus-agent mode that does not exist.
+       * Batch statistics sit BELOW the panel's two columns, spanning the full width, rather than
+       * inside the control column.
+       *
+       * Nested inside `.arena-controls` first, which was wrong in a way no unit test could see: the
+       * panel grid stretches its left column to match the taller one, so a statistics block ~2000px tall
+       * dragged the stage to 3000px and pushed the board itself to y=1157 — entirely below the fold of
+       * a 900px window. The board is the panel's subject; a reading of many matches must never be able
+       * to push the subject off the screen.
        */}
-      <p className="arena-no-human-note">
-        Matches run agent against agent to completion. There is no human seat — the environment is the
-        only thing that moves the board.
-      </p>
-
-      {match && frames.length < 2 ? (
-        <section className="brain-section" aria-labelledby="arena-replay-heading">
-          <h3 id="arena-replay-heading">Watch this match</h3>
-          <Playback playback={playback} />
-        </section>
-      ) : null}
-
-      <section className="brain-section" aria-labelledby="arena-archive-heading">
-        <h3 id="arena-archive-heading">Match archive</h3>
-        <p className="section-note">
-          Every match this machine has played, newest first. Stored matches are never deleted by the
-          controls on this page.
-        </p>
-        <MatchArchive
-          summaries={matchSummaries}
-          openId={match?.matchId ?? null}
-          loadingId={openingId}
-          onOpen={onOpenMatch}
-        />
-      </section>
-
-      {match ? (
-        <section className="brain-section">
-          <h3>Action history</h3>
-          <p className="section-note">
-            One row per ply, from the engine&apos;s own telemetry. Each row carries the board the
-            engine recorded for that position.
-          </p>
-          <History match={match} />
-        </section>
-      ) : null}
-
-      {match && match.timeline.length > 0 ? (
-        <section className="brain-section">
-          <h3>Match events</h3>
-          <ul className="brain-timeline">
-            {match.timeline.map((event) => (
-              <li key={event.sequence} className="brain-event tone-info">
-                <span className="event-sequence">
-                  {String(event.sequence).padStart(2, "0")}
-                </span>
-                <span className="event-code">{event.code}</span>
-                <span className="event-severity">{event.severity}</span>
-                <span className="event-detail">{event.detail}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
+      <BatchStatistics {...batch} />
     </section>
   );
+}
+
+/** The label for a seat, whether or not it has been played yet. */
+export function seatLabel(seat: ArenaSeatRequest): string {
+  return seat.kind === "policy" ? seat.id : seat.label;
+}
+
+/**
+ * Whether the recording on screen belongs to the selectors as they stand now.
+ *
+ * The seed is deliberately excluded, exactly as it was before: changing the seed changes what *would*
+ * be played, not what *was* recorded, and flagging the recording as stale for an unused control would
+ * be a warning about a change the user never asked for. The seat identity, the game, and the side are
+ * the three things that change what a match means.
+ */
+export function staleFor(
+  match: ArenaMatchView | null,
+  tested: ArenaSeatRequest,
+  opponent: ArenaSeatRequest,
+  game: string,
+  testedSide: "first" | "second",
+): boolean {
+  if (!match) {
+    return false;
+  }
+  return (
+    match.game !== game ||
+    match.testedAgent !== seatLabel(tested) ||
+    match.opponentAgent !== seatLabel(opponent) ||
+    match.testedSide !== testedSide
+  );
+}
+
+/**
+ * A picker that can seat either a shipped policy or a locally installed model.
+ *
+ * The model list is populated from what the local executor actually reported, so a name in the picker
+ * is a model that exists. A free-text field would let an operator type a name that has not been pulled
+ * and then discover it at ply one.
+ */
+function SeatPicker({
+  label,
+  agents,
+  seat,
+  localModels,
+  modelConfig,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  agents: ArenaAgentSummary[];
+  seat: ArenaSeatRequest;
+  localModels: string[];
+  modelConfig: { baseUrl: string; apiKeyEnv: string; timeoutSeconds: number };
+  disabled: boolean;
+  onChange: (seat: ArenaSeatRequest) => void;
+}) {
+  const value = seat.kind === "policy" ? `policy:${seat.id}` : `model:${seat.label}`;
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <select
+        value={value}
+        disabled={disabled}
+        onChange={(event) => {
+          const chosen = event.target.value;
+          if (chosen.startsWith("policy:")) {
+            onChange({ kind: "policy", id: chosen.slice("policy:".length) });
+            return;
+          }
+          const model = chosen.slice("model:".length);
+          onChange({
+            kind: "model",
+            label: model,
+            config: {
+              kind: "openai_compatible",
+              // The IPC payload for a nested request is snake_case throughout: the arena command's own
+              // fields are camelCase, but the provider configuration is a Rust struct that is not
+              // `rename_all`-ed, and sending camelCase here would decode to the schema default and
+              // silently run against the wrong contract version.
+              schema_version: MODEL_RUN_CONFIG_SCHEMA_VERSION,
+              base_url: modelConfig.baseUrl,
+              api_key_env: modelConfig.apiKeyEnv,
+              model,
+              timeout_seconds: modelConfig.timeoutSeconds,
+              temperature: 0,
+              max_tokens: 200,
+            },
+          });
+        }}
+      >
+        <optgroup label="Shipped policies">
+          {agents.map((agent) => (
+            <option key={agent.id} value={`policy:${agent.id}`}>
+              {agent.name} — {agent.categoryLabel}
+            </option>
+          ))}
+        </optgroup>
+        <optgroup label="Local models">
+          {localModels.length === 0 ? (
+            <option value="model:" disabled>
+              none detected
+            </option>
+          ) : (
+            localModels.map((model) => (
+              <option key={model} value={`model:${model}`}>
+                {model}
+              </option>
+            ))
+          )}
+        </optgroup>
+      </select>
+    </label>
+  );
+}
+
+/** Whether a column can accept a disc, used by the board's hover affordance. */
+export function playableColumn(board: GameBoardView | null, column: number): boolean {
+  return columnIsPlayable(board, column);
 }

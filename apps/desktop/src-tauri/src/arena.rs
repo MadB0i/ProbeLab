@@ -10,20 +10,42 @@
 //!
 //! A "submit a move" command. There is no human-turn path, and inventing one would mean a second
 //! execution path with its own state transitions and its own validation — in a panel whose entire value
-//! is that the environment is the only thing that moves the board. A match is agent against agent, it
-//! runs to completion, and the panel shows the recorded result.
+//! is that the environment is the only thing that moves the board. A match is seat against seat, it
+//! runs to a terminal state, and the panel shows the recorded result.
 //!
 //! The commands are also strictly read-mostly. There is no force, no override, and no way to seed a
 //! fabricated result: `play_arena_match` runs a real match or returns a typed refusal.
+//!
+//! # Why a real model match is asynchronous
+//!
+//! A policy-versus-policy tic-tac-toe match finishes in microseconds. A connect-four match against a
+//! depth-bounded search takes seconds. A match against a real model on a laptop takes *minutes* — a
+//! 42-ply game with a 0.5B model on CPU is thirty seconds of inference per ply at the low end, and
+//! longer if the machine is busy.
+//!
+//! Running that on the IPC thread would freeze the window: the panel would not paint, the stop button
+//! would not respond, and the operating system would mark the app as not responding. So the match
+//! runs on a blocking worker, per-turn events stream out to the frontend as they are played, and the
+//! command's future resolves when the match reaches a terminal state. Nothing about that changes the
+//! engine: the same `play_match` produces the same result whether it is called from a test or from a
+//! worker thread.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use probelab_core::{GameKind, GameSide, TelemetryRecorder};
-use probelab_lab::{ArenaMatchView, ArenaRunError, ArenaRunner};
+use probelab_lab::{ArenaMatchView, ArenaRunError, ArenaRunner, TurnTelemetry};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
+use crate::provider::ModelRunConfig;
 use crate::AppState;
+
+/// The event a live match emits on every ply.
+pub const ARENA_TURN_EVENT: &str = "probe-lab/arena-turn";
+
+/// The event emitted once when a match reaches its terminal state.
+pub const ARENA_MATCH_EVENT: &str = "probe-lab/arena-match";
 
 /// One game the arena can be asked to play.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -43,7 +65,7 @@ pub struct ArenaGameSummary {
     pub max_plies: u32,
 }
 
-/// One agent, as the arena's seat picker renders it.
+/// One seat the arena can fill, as the seat picker renders it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArenaAgentSummary {
@@ -59,17 +81,49 @@ pub struct ArenaAgentSummary {
     pub can_be_opponent: bool,
 }
 
+/// One seat in a match request.
+///
+/// Either a registry identifier or a live model configuration, tagged — because "seat a shipped policy"
+/// and "seat a real model" are different capabilities with different failure modes, and a frontend
+/// that conflated them would have no way to tell a typo from an unreachable provider.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ArenaSeatRequest {
+    /// A policy from the agent registry.
+    Policy {
+        /// The registry identifier.
+        id: String,
+    },
+    /// A real model reached over a provider adapter.
+    Model {
+        /// A short label for the seat, so a match between two models is readable in the archive.
+        label: String,
+        /// The provider configuration. Validated by the same code a benchmark run uses.
+        config: ModelRunConfig,
+    },
+}
+
+impl ArenaSeatRequest {
+    /// The label for one seat, for the archive and for telemetry.
+    pub fn seat_label(&self) -> String {
+        match self {
+            ArenaSeatRequest::Policy { id } => id.clone(),
+            ArenaSeatRequest::Model { label, .. } => label.clone(),
+        }
+    }
+}
+
 /// A request to play one match.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArenaMatchRequest {
     /// Which game to play.
     pub game: String,
-    /// The agent under test.
-    pub tested_agent: String,
-    /// The opponent policy.
-    pub opponent_agent: String,
-    /// Which side the tested agent plays, `first` or `second`.
+    /// The seat under test.
+    pub tested_agent: ArenaSeatRequest,
+    /// The opposing seat.
+    pub opponent_agent: ArenaSeatRequest,
+    /// Which side the tested seat plays, `first` or `second`.
     pub tested_side: String,
     /// The seed, so the match replays.
     pub seed: u64,
@@ -107,9 +161,68 @@ impl From<ArenaRunError> for ArenaCommandError {
 #[derive(Clone, Default)]
 pub struct ArenaSurface {
     matches: Arc<Mutex<Vec<(String, ArenaMatchView)>>>,
+    /// Matches currently running, and the flag that stops them.
+    ///
+    /// A registry rather than a single flag so two matches cannot cancel each other, and so a
+    /// finished match's handle cannot cancel whatever started next. The handle is removed in the same
+    /// scope that played the match, which is what makes the "stop this match" button safe to press
+    /// twice.
+    running: Arc<Mutex<Vec<RunningMatch>>>,
 }
 
+/// How many matches this process will retain.
+const SESSION_MATCH_LIMIT: usize = 20;
+
+/// One match currently executing, and the flag that stops it.
+///
+/// A named type rather than a tuple, because this value is pushed, searched, retained against, and
+/// read in four places, and a two-element tuple of a string and an Arc is not a thing a reader can
+/// check at a glance.
+type RunningMatch = (String, Arc<AtomicBool>);
+
 impl ArenaSurface {
+    /// Registers a running match and returns the flag that stops it.
+    pub(crate) fn begin(&self, match_id: &str) -> Result<Arc<AtomicBool>, ArenaCommandError> {
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut running = self.running.lock().map_err(|_| ArenaCommandError {
+            code: "surface_unavailable".to_owned(),
+            message:
+                "the arena's run registry was left locked by an earlier fault; matches cannot \
+                      be started or stopped"
+                    .to_owned(),
+        })?;
+        running.push((match_id.to_owned(), Arc::clone(&flag)));
+        Ok(flag)
+    }
+
+    /// Removes a match's handle. Always called when a match finishes, whatever its outcome.
+    pub(crate) fn finish(&self, match_id: &str) {
+        if let Ok(mut running) = self.running.lock() {
+            running.retain(|(id, _)| id != match_id);
+        }
+    }
+
+    /// Signals a running match to stop at its next ply boundary.
+    ///
+    /// Returns `false` when nothing with that identifier is running, so a stop button cannot report
+    /// success for a match that has already finished — the same rule the experiment cancel uses.
+    pub fn cancel(&self, match_id: &str) -> bool {
+        let Ok(running) = self.running.lock() else {
+            return false;
+        };
+        let found = running
+            .iter()
+            .find(|(id, _)| id == match_id)
+            .map(|(_, flag)| Arc::clone(flag));
+        match found {
+            Some(flag) => {
+                flag.store(true, Ordering::SeqCst);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Stores a completed match.
     ///
     /// Failure to store is reported rather than panicked on. A poisoned lock means some other thread
@@ -122,7 +235,7 @@ impl ArenaSurface {
                       written to; matches from this session will not be retained"
                 .to_owned(),
         })?;
-        if matches.len() >= 20 {
+        if matches.len() >= SESSION_MATCH_LIMIT {
             matches.remove(0);
         }
         matches.push((match_id, view));
@@ -181,11 +294,15 @@ pub fn list_arena_games() -> Vec<ArenaGameSummary> {
         .collect()
 }
 
-/// Returns every agent that can legally be seated in `game`.
+/// Returns every policy that can legally be seated in `game`.
 ///
 /// The filter is the registry's own `supported_games`, decided in the backend. A frontend cannot offer
 /// a pairing the arena would refuse, and adding a game later cannot surface a policy that has no idea
 /// what its rules are.
+///
+/// A real model is *not* in this list, because a model is not a registry entry — it is a runtime
+/// configuration. The panel seats one by sending a `ModelRunConfig`, and the list tells it which
+/// policies are available to compare the model against.
 #[tauri::command(rename_all = "snake_case")]
 pub fn list_arena_agents(game: String) -> Result<Vec<ArenaAgentSummary>, ArenaCommandError> {
     let kind = parse_game(&game)?;
@@ -232,6 +349,9 @@ pub fn latest_arena_match(state: State<'_, AppState>) -> Option<ArenaMatchView> 
 ///
 /// A summary list rather than full recordings: the history list draws one line per match and should
 /// not have to decode every full board recording to do it. The full match is fetched on open.
+///
+/// Bounded on both sides. The caller's `limit` is clamped, so a malformed or hostile value cannot ask
+/// the database for an unbounded scan, and the default of 50 is far more than the panel renders.
 #[tauri::command(rename_all = "snake_case")]
 pub fn list_arena_matches(
     state: State<'_, AppState>,
@@ -269,7 +389,9 @@ pub fn get_arena_match(
 ///
 /// The reconstruction reads recorded data and nothing else: no engine, no provider, no broker. It
 /// therefore cannot produce a different result than the recording, and cannot call a model even by
-/// accident — which is what makes it a replay rather than a second run.
+/// accident — which is what makes it a replay rather than a second run. This matters more now than it
+/// did: a match against a real model costs real provider time, and "open a recording" must never mean
+/// "pay for the same decisions again".
 ///
 /// Reads the durable archive, so a match played in an earlier session can still be replayed.
 ///
@@ -286,43 +408,113 @@ pub fn replay_arena_match(
     Ok(probelab_lab::replay_match(&view))
 }
 
+/// Stops a running match at its next ply boundary.
+///
+/// Returns `false` — not an error — when nothing with that identifier is running. That is the same
+/// contract the experiment cancel uses, and for the same reason: a stop button that reports success
+/// for a match that already finished teaches the operator nothing about whether their click worked.
+#[tauri::command(rename_all = "snake_case")]
+pub fn cancel_arena_match(state: State<'_, AppState>, match_id: String) -> bool {
+    state.arena.cancel(&match_id)
+}
+
 /// Plays one match and returns what the engine produced.
 ///
-/// The whole match runs here and comes back projected: there is no partial state to get out of step
-/// with the environment, because the environment is the only thing that ever had state.
+/// The match runs on a blocking worker and the command's future resolves when it reaches a terminal
+/// state, so a minutes-long real-model match does not freeze the window. Per-turn events are emitted
+/// on [`ARENA_TURN_EVENT`] as they are played and the terminal view on [`ARENA_MATCH_EVENT`].
+///
+/// The engine is still the only thing that decides anything: this function builds two seats, hands them
+/// to [`ArenaRunner::play`], and projects what comes back. It cannot steer a move, cannot declare a
+/// winner, and cannot skip the environment's legality check.
 #[tauri::command(rename_all = "snake_case")]
-pub fn play_arena_match(
+pub async fn play_arena_match(
+    app: AppHandle,
     state: State<'_, AppState>,
     request: ArenaMatchRequest,
 ) -> Result<ArenaMatchView, ArenaCommandError> {
     let game = parse_game(&request.game)?;
     let side = parse_side(&request.tested_side)?;
-    let match_id = new_match_id(request.seed);
+    let tested_label = request.tested_agent.seat_label();
+    let opponent_label = request.opponent_agent.seat_label();
+    let match_id = new_match_id(game, request.seed);
+
+    // Both seats are built *before* anything runs, so a bad provider configuration is refused up
+    // front rather than half-way through a match that has already been recorded. A model that cannot
+    // be constructed has not answered anything, and a match that stopped on ply one because of a typo
+    // in an endpoint would be indistinguishable from a model that lost on ply one.
+    let spec = probelab_lab::ArenaMatchSpec::new(
+        game,
+        &tested_label,
+        &opponent_label,
+        side,
+        request.seed,
+        &match_id,
+    );
+    let runner = ArenaRunner::new();
+    let (tested_seat, opponent_seat) = seats(&request.tested_agent, &request.opponent_agent, game)?;
+
+    let cancel = state.arena.begin(&match_id)?;
     let recorder: Arc<dyn TelemetryRecorder> = state.recorder.clone();
+    let app_for_turns = app.clone();
+    let id_for_turns = match_id.clone();
+    let archive = state.arena_matches.clone();
 
-    let played = ArenaRunner::new()
-        .play(
-            &probelab_lab::ArenaMatchSpec::new(
-                game,
-                &request.tested_agent,
-                &request.opponent_agent,
-                side,
-                request.seed,
-                &match_id,
-            ),
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        let mut on_turn = move |turn: &TurnTelemetry| {
+            // The engine's own authoritative board, plus that turn's cost and identity. Emitted from
+            // the worker thread, so the frontend can follow a live match rather than waiting minutes
+            // for a frozen panel.
+            if let Err(error) = app_for_turns.emit(
+                ARENA_TURN_EVENT,
+                TurnEnvelope {
+                    match_id: id_for_turns.clone(),
+                    turn: turn.clone(),
+                },
+            ) {
+                tracing::warn!(
+                    error = %error,
+                    "a live arena turn could not be emitted; the match itself is unaffected"
+                );
+            }
+        };
+        let played = runner.play(
+            &spec,
+            tested_seat,
+            opponent_seat,
             Some(recorder),
-        )
-        .map_err(ArenaCommandError::from)?;
+            Some(cancel.as_ref()),
+            &mut on_turn,
+        );
+        (played, cancel)
+    })
+    .await;
 
+    let (played, cancel) = match outcome {
+        Ok(pair) => pair,
+        Err(error) => {
+            state.arena.finish(&match_id);
+            return Err(ArenaCommandError {
+                code: "engine_failed".to_owned(),
+                message: format!("the arena worker thread could not be joined: {error}"),
+            });
+        }
+    };
+    // The handle is released whichever way the match ended, so a finished match can never stop
+    // whatever starts next under the same identifier.
+    drop(cancel);
+    state.arena.finish(&match_id);
+
+    let played = played.map_err(ArenaCommandError::from)?;
     // A match that played successfully but could not be retained in the session surface is still a
     // real result, and the caller is holding it. The failure to retain is reported through the
     // surface's own state rather than by discarding the match.
-    state.arena.store(match_id, played.view.clone())?;
+    state.arena.store(match_id.clone(), played.view.clone())?;
     // The durable archive is written second, and a failure there does not fail the match. The match
     // genuinely happened and the caller is holding the full recording; failing the whole command would
     // discard a real result because a cache could not be written. The loss is logged instead, so the
     // gap between what was played and what is archived is visible rather than silent.
-    if let Err(error) = state.arena_matches.put(&played.view, unix_milliseconds()) {
+    if let Err(error) = archive.put(&played.view, unix_milliseconds()) {
         tracing::error!(
             match_id = %played.view.match_id,
             error = %error,
@@ -330,12 +522,120 @@ pub fn play_arena_match(
              session only and will be lost when the application closes"
         );
     }
+    if let Err(error) = app.emit(ARENA_MATCH_EVENT, &played.view) {
+        tracing::warn!(
+            error = %error,
+            "the completed arena match could not be emitted; the caller still receives it directly"
+        );
+    }
     Ok(played.view)
+}
+
+/// What one live turn carries to the frontend.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TurnEnvelope {
+    pub(crate) match_id: String,
+    pub(crate) turn: TurnTelemetry,
+}
+
+/// Checks that both seats are legal for `game`, then builds them.
+///
+/// A registry policy is checked against the registry's own `supported_games`, which is what keeps the
+/// panel's list and the arena's capabilities the same set — the decision is made in the backend, not
+/// by a frontend that could be wrong. A model seat is legal for connect four and for nothing else,
+/// because a nine-ply tic-tac-toe board against a real model measures formatting rather than play.
+///
+/// The check runs *before* anything is built or played, so an illegal pairing is a refusal rather than
+/// a match that fails on ply one.
+fn seats(
+    request: &ArenaSeatRequest,
+    other: &ArenaSeatRequest,
+    game: GameKind,
+) -> Result<
+    (
+        probelab_engine::arena::BoxedSeat,
+        probelab_engine::arena::BoxedSeat,
+    ),
+    ArenaCommandError,
+> {
+    for seat in [request, other] {
+        match seat {
+            ArenaSeatRequest::Policy { id } => {
+                let registry = probelab_lab::AgentRegistry::built_in();
+                let spec = registry.spec(id).ok_or_else(|| ArenaCommandError {
+                    code: "unknown_agent".to_owned(),
+                    message: format!("no agent is registered as {id:?}"),
+                })?;
+                if !spec.supported_games.contains(&game) {
+                    return Err(ArenaCommandError {
+                        code: "incompatible_agent".to_owned(),
+                        message: format!(
+                            "{} cannot play {}; it is registered for {}",
+                            spec.name,
+                            game.as_str(),
+                            describe_games(&spec.supported_games)
+                        ),
+                    });
+                }
+            }
+            ArenaSeatRequest::Model { .. } if game != GameKind::ConnectFour => {
+                return Err(ArenaCommandError {
+                    code: "incompatible_agent".to_owned(),
+                    message: "a real model can only be seated in connect four; tic-tac-toe's \
+                              nine-ply ceiling makes it a protocol probe rather than a measurement"
+                        .to_owned(),
+                });
+            }
+            ArenaSeatRequest::Model { .. } => {}
+        }
+    }
+    Ok((build_seat(request)?, build_seat(other)?))
+}
+
+/// What an agent declares it can play, for a refusal message.
+fn describe_games(games: &[GameKind]) -> String {
+    if games.is_empty() {
+        return "no arena games".to_owned();
+    }
+    games
+        .iter()
+        .map(|game| game.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Builds one seat.
+///
+/// A policy goes through the registry, so its per-episode reset and its non-privilege claim come from
+/// the same code the grid benchmarks use. A model is constructed from its validated configuration by
+/// the same code a benchmark run uses, so a model cannot behave differently in the arena than in a
+/// grid-world run for reasons that have nothing to do with the game.
+pub(crate) fn build_seat(
+    seat: &ArenaSeatRequest,
+) -> Result<probelab_engine::arena::BoxedSeat, ArenaCommandError> {
+    match seat {
+        ArenaSeatRequest::Policy { id } => probelab_lab::AgentRegistry::built_in()
+            .build_seat(id, 0)
+            .map_err(|error| ArenaCommandError {
+                code: "unknown_agent".to_owned(),
+                message: error.to_string(),
+            }),
+        ArenaSeatRequest::Model { label, config } => {
+            let agent = config.build_agent(0).map_err(|error| ArenaCommandError {
+                code: "model_unavailable".to_owned(),
+                message: error.to_string(),
+            })?;
+            Ok(Box::new(probelab_engine::arena::ModelSeat::new(
+                agent, label,
+            )))
+        }
+    }
 }
 
 /// Now, in Unix milliseconds. `0` rather than a panic: a clock before the epoch is absurd, and it
 /// only orders history, so refusing to record a match over it would be the wrong trade.
-fn unix_milliseconds() -> i64 {
+pub(crate) fn unix_milliseconds() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)
@@ -343,9 +643,10 @@ fn unix_milliseconds() -> i64 {
 }
 
 /// Parses a game identifier, refusing anything this build cannot play.
-fn parse_game(game: &str) -> Result<GameKind, ArenaCommandError> {
+pub(crate) fn parse_game(game: &str) -> Result<GameKind, ArenaCommandError> {
     match game {
         "tic_tac_toe" => Ok(GameKind::TicTacToe),
+        "connect_four" => Ok(GameKind::ConnectFour),
         other => Err(ArenaCommandError {
             code: "unknown_game".to_owned(),
             message: format!("this build cannot play {other:?}"),
@@ -354,7 +655,7 @@ fn parse_game(game: &str) -> Result<GameKind, ArenaCommandError> {
 }
 
 /// Parses a side.
-fn parse_side(side: &str) -> Result<GameSide, ArenaCommandError> {
+pub(crate) fn parse_side(side: &str) -> Result<GameSide, ArenaCommandError> {
     match side {
         "first" => Ok(GameSide::First),
         "second" => Ok(GameSide::Second),
@@ -365,8 +666,8 @@ fn parse_side(side: &str) -> Result<GameSide, ArenaCommandError> {
     }
 }
 
-/// A match identifier: the seed it was played with, plus a timestamp and counter that make each play
-/// unique.
+/// A match identifier: the game and seed it was played with, plus a timestamp and counter that make
+/// each play unique.
 ///
 /// The identifier doubles as the telemetry `run_id`, and the telemetry schema enforces a gap-free
 /// sequence per run. A seed-derived id would therefore reuse a run that already holds events, and the
@@ -374,15 +675,19 @@ fn parse_side(side: &str) -> Result<GameSide, ArenaCommandError> {
 /// stays unique across restarts — a counter alone would reset to 1 and collide with the run a
 /// previous session already recorded under the same seed. The counter disambiguates two matches that
 /// land in the same millisecond.
+///
+/// The game is part of the prefix, not a hard-coded `"ttt"`. A hard-coded prefix on a build that also
+/// plays connect four would put both games' matches under a name that says tic-tac-toe, which is a lie
+/// in the one field an operator uses to tell two recordings apart.
 static MATCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn new_match_id(seed: u64) -> String {
+pub(crate) fn new_match_id(game: GameKind, seed: u64) -> String {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis())
         .unwrap_or(0);
     let ordinal = MATCH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("arena-ttt-{seed}-{millis}-{ordinal}")
+    format!("arena-{}-{seed}-{millis}-{ordinal}", game.as_str())
 }
 
 #[cfg(test)]
@@ -390,16 +695,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_tic_tac_toe_is_exposed() {
+    fn both_games_are_exposed() {
         let games = list_arena_games();
-        assert_eq!(games.len(), 1);
-        assert_eq!(games[0].id, "tic_tac_toe");
-        assert_eq!(games[0].width, 3);
+        let ids: Vec<&str> = games.iter().map(|game| game.id.as_str()).collect();
+        assert_eq!(ids, vec!["tic_tac_toe", "connect_four"]);
+        assert_eq!((games[0].width, games[0].height), (3, 3));
+        assert_eq!((games[1].width, games[1].height), (7, 6));
     }
 
     #[test]
     fn an_unimplemented_game_is_refused_by_name() {
-        for game in ["connect_four", "rps", "battleship", "not-a-game"] {
+        for game in ["rps", "battleship", "not-a-game"] {
             let error = parse_game(game).expect_err("should be refused");
             assert_eq!(error.code, "unknown_game");
             assert!(
@@ -428,6 +734,15 @@ mod tests {
             !ids.contains(&"optimal"),
             "a grid policy must not be offered a board"
         );
+
+        let connect_four = list_arena_agents("connect_four".to_owned()).expect("catalog");
+        let ids: Vec<&str> = connect_four.iter().map(|agent| agent.id.as_str()).collect();
+        assert!(ids.contains(&"depth_bounded_connect_four"));
+        assert!(ids.contains(&"first_legal_connect_four"));
+        assert!(
+            !ids.contains(&"perfect_tictactoe"),
+            "a tic-tac-toe policy must not be offered a connect-four board"
+        );
     }
 
     #[test]
@@ -454,19 +769,16 @@ mod tests {
     #[test]
     fn a_stored_match_stays_reachable_after_another_is_played() {
         let surface = ArenaSurface::default();
-        let first = sample_view("arena-ttt-1");
-        let second = sample_view("arena-ttt-2");
+        let first = sample_view("arena-1");
+        let second = sample_view("arena-2");
         surface
-            .store("arena-ttt-1".to_owned(), first)
+            .store("arena-1".to_owned(), first)
             .expect("store first");
         surface
-            .store("arena-ttt-2".to_owned(), second)
+            .store("arena-2".to_owned(), second)
             .expect("store second");
-        assert_eq!(surface.latest().expect("latest").match_id, "arena-ttt-2");
-        assert_eq!(
-            surface.get("arena-ttt-1").expect("first").match_id,
-            "arena-ttt-1"
-        );
+        assert_eq!(surface.latest().expect("latest").match_id, "arena-2");
+        assert_eq!(surface.get("arena-1").expect("first").match_id, "arena-1");
     }
 
     #[test]
@@ -478,9 +790,47 @@ mod tests {
                 .expect("store");
         }
         assert!(
-            surface.len() <= 20,
+            surface.len() <= SESSION_MATCH_LIMIT,
             "history grew unbounded: {}",
             surface.len()
+        );
+    }
+
+    /// A cancelled match stops, and only the match that was asked for.
+    ///
+    /// The second half is the point. Two matches running at once is not a hypothetical in a panel
+    /// with a stop button, and a shared flag would let pressing stop on one silently abort the other.
+    #[test]
+    fn cancelling_signals_only_the_named_match() {
+        let surface = ArenaSurface::default();
+        let first = surface.begin("match-a").expect("begin a");
+        let second = surface.begin("match-b").expect("begin b");
+        assert!(!first.load(Ordering::SeqCst));
+        assert!(!second.load(Ordering::SeqCst));
+
+        assert!(surface.cancel("match-a"), "a running match reports success");
+        assert!(first.load(Ordering::SeqCst));
+        assert!(
+            !second.load(Ordering::SeqCst),
+            "stopping one match must not touch another"
+        );
+        // Pressing stop again while the match is still winding down still reports success: it *is*
+        // running, and it has been asked to stop. Reporting failure here would tell the operator their
+        // second click did nothing, which is true but not useful — the match is on its way out.
+        assert!(surface.cancel("match-a"));
+
+        surface.finish("match-a");
+        assert!(
+            !surface.cancel("match-a"),
+            "a finished match cannot be cancelled again"
+        );
+        assert!(
+            !surface.cancel("never-existed"),
+            "an unknown identifier is not a success"
+        );
+        assert!(
+            surface.cancel("match-b"),
+            "the other match is still running"
         );
     }
 
@@ -529,14 +879,19 @@ mod tests {
     }
 
     #[test]
-    fn a_match_id_carries_the_seed_but_is_unique_per_play() {
-        let first = new_match_id(7);
-        let second = new_match_id(7);
-        assert!(first.starts_with("arena-ttt-7-"), "got {first}");
-        assert!(second.starts_with("arena-ttt-7-"), "got {second}");
+    fn a_match_id_names_its_game_and_is_unique_per_play() {
+        let first = new_match_id(GameKind::TicTacToe, 7);
+        let second = new_match_id(GameKind::TicTacToe, 7);
+        assert!(first.starts_with("arena-tic_tac_toe-7-"), "got {first}");
         assert_ne!(
             first, second,
             "two plays of the same seed must be two telemetry runs, or the second is rejected"
+        );
+        // Two games must not share an identifier prefix, or the archive cannot tell them apart.
+        let other_game = new_match_id(GameKind::ConnectFour, 7);
+        assert!(
+            other_game.starts_with("arena-connect_four-7-"),
+            "got {other_game}"
         );
     }
 
@@ -579,6 +934,8 @@ mod tests {
             outcome: probelab_lab::ArenaOutcome::Draw,
             tested_agent: "perfect_tictactoe".to_owned(),
             opponent_agent: "perfect_tictactoe".to_owned(),
+            tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
+            opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
             tested_side: GameSide::First,
             seed: 1,
             plies: 9,
@@ -589,8 +946,10 @@ mod tests {
             winning_line: None,
             illegal_moves: Vec::new(),
             history: Vec::new(),
+            turns: Vec::new(),
             timeline: Vec::new(),
             failure: None,
+            cancelled: false,
         }
     }
 
@@ -609,6 +968,46 @@ mod tests {
         let value = serde_json::to_value(mov).expect("move serializes");
         assert_eq!(value["game"], "tic_tac_toe");
         assert_eq!(value["move"], 4);
+    }
+
+    /// The connect-four wire shape, pinned for the same reason and with the column-major detail the
+    /// frontend has to get right.
+    ///
+    /// The frontend indexes this vector to draw the board, and the schema stores it column-major. If
+    /// that ever changed — or if the dimension fields were dropped — the panel would render a
+    /// correctly-shaped grid of the wrong cells, which is a silent and very confusing failure. The
+    /// `cells` length is asserted against `columns * rows` rather than hard-coded, so the two cannot
+    /// disagree.
+    #[test]
+    fn a_connect_four_board_serializes_column_major_with_consistent_dimensions() {
+        let mut cells = vec![probelab_core::ConnectFourCell::Empty; 42];
+        cells[0] = probelab_core::ConnectFourCell::First;
+        let board = probelab_core::GameBoard::ConnectFour {
+            columns: 7,
+            rows: 6,
+            cells: cells.clone(),
+        };
+        let value = serde_json::to_value(&board).expect("board serializes");
+        assert_eq!(value["game"], "connect_four");
+        let state = &value["state"];
+        assert_eq!(state["columns"], 7);
+        assert_eq!(state["rows"], 6);
+        let serialized = state["cells"].as_array().expect("cells is an array");
+        assert_eq!(
+            serialized.len(),
+            7 * 6,
+            "the cell count must equal columns times rows, or the frontend cannot index it safely"
+        );
+        // Column-major: the first cell is the bottom of the leftmost column.
+        assert_eq!(serialized[0], "first");
+
+        let mov = probelab_core::GameMove::ConnectFour(3);
+        let value = serde_json::to_value(mov).expect("move serializes");
+        assert_eq!(value["game"], "connect_four");
+        assert_eq!(
+            value["move"], 3,
+            "a connect-four move names a column index, not a row-major cell index"
+        );
     }
 
     const SURFACE_SOURCE: &str = include_str!("arena.rs");

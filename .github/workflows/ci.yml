@@ -74,13 +74,38 @@ jobs:
       - name: Build the frontend
         run: pnpm build
         working-directory: apps/desktop
-      - name: Enforce the legibility floor
+      - name: Enforce the legibility floor and the contrast contract
         # Asserts no rendered font size falls below 11px, in both `px` and `rem`. The floor used to
         # live only in a CSS comment that claimed it was satisfied while 58 rules were under it --
         # the original check matched `px` and not `rem`, and this stylesheet mixes both. A comment
         # cannot fail, so it is a script now.
+        #
+        # `check:styles` also runs the contrast contract. `--ink-3` and `--ink-4` shipped at 2.72:1 on
+        # a tinted chip and 3.06:1 on a panel, across sixty rules, because they were tuned against the
+        # panel they were designed in and never measured against the tints and hover states they also
+        # appear on. Nothing failed because the accessibility audit only ever visited two routes, and
+        # those two happened to be clean. The tokens now carry the guarantee and this gate holds them
+        # to it against every surface in the palette.
         run: pnpm check:styles
         working-directory: apps/desktop
+      - name: Validate the Tauri packaging configuration
+        # `tauri build` is the only thing in this project that reads `tauri.conf.json`, and it is the
+        # one step that produces installers, so it runs last, by hand, and never on CI. A misspelled
+        # key in that file therefore survived every gate here and surfaced as a failed release build.
+        # This validates it against the schema that ships inside `@tauri-apps/cli` -- read from
+        # node_modules, not fetched, so it cannot drift from the version actually in use -- and asserts
+        # the production properties the schema cannot express: no development-server origin in the
+        # shipped CSP, no `unsafe-eval` in either policy, `freezePrototype` on, and bundle metadata
+        # present so the installer does not ship with an empty publisher.
+        run: node scripts/check-tauri-config.mjs
+        working-directory: apps/desktop
+      - name: Check version provenance
+        # The version lives in the workspace manifest, the Tauri config, and the frontend manifest.
+        # Cargo stamps the first into the binary and Tauri stamps the second into the installer, so a
+        # disagreement ships an application and an installer that report different versions. This also
+        # reads the version claims out of `docs/STATUS.md`, which is how the stale `0.4.1` in that
+        # document was found.
+        run: python3 scripts/check-version-provenance.py
       - name: Check the app icons match their source
         # `app-icon.svg` used to be referenced by nothing: a file that looked like the icon source and
         # was not one, so editing it changed nothing a user would see. `pnpm icons` regenerates every

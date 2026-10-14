@@ -39,11 +39,15 @@ Recorded from the built Windows executable. The benchmark run, the match, and th
 
 ## Features
 
-- **Benchmark execution** — runs a selected model or agent against an embedded benchmark catalog, with a live progress feed and the run's event stream.
-- **Durable run history** — completed runs persist to SQLite and reopen after restart, with lifecycle state, episode counts, and scores.
+- **Benchmark execution** — runs a selected model or agent against an embedded benchmark catalog, with a live progress feed and the run's event stream, and a **STOP RUN** control that ends the run at a committed turn boundary rather than killing it.
+- **Grid-world navigation trace** — a partially observable 5×5 grid drawn turn by turn. The board shows only what the agent has actually sensed; tiles it has never seen stay marked as never seen, and no frame is drawn from terrain the run did not record.
+- **Durable run history** — completed runs persist to SQLite and reopen after restart, with lifecycle state, episode counts, and scores. A recorded run reopens from disk with a full transport: play, step, and a scrubber.
 - **Match arena** — plays two policies against each other through the engine and records every position, with frame-by-frame playback, a scrubber, and a winning line from the engine.
+- **Agent and benchmark registries** — browsable catalogues of what the product can run and what each entry measures, with honest completion state per entry.
 - **Task packages** — save a guided task to disk as a self-contained, portable package you can open and run elsewhere.
 - **Comparison** — selects two stored runs and states, in plain language, why they may or may not be comparable.
+- **Integrity reporting** — protocol compliance and action legality reported as two separate rates from one record, because a model can answer every turn in perfect protocol and still have most of its moves refused. Both are shown; neither is derived from the other.
+- **Security sweep** — probes the execution boundary itself and reports what was blocked as a passing result, separately from what a model attempted.
 - **Readiness preflight** — checks the machine before a run and names the specific blocking step and its fix.
 - **Replay** — re-reads recorded run events without contacting anything.
 
@@ -60,21 +64,33 @@ The baseline mode is a real execution path, not a placeholder: the benchmark def
 
 These are the actual boundaries of the current build, stated plainly.
 
-- **No vendor model has been measured.** The connected path is proven end to end against a local stand-in provider. That the transport speaks the right protocol is not the same claim as a benchmark result from a specific vendor's model.
+- **No vendor model has been measured.** The connected path has been driven end to end through the built application against a local `qwen2.5:0.5b` over loopback and against a controlled slow provider. That the transport speaks the right protocol is not the same claim as a benchmark result from a specific vendor's model.
 - **One provider is selectable.** The OpenAI-compatible adapter is the only one the desktop product admits. Anthropic and Gemini adapters exist as library artifacts with unit tests but are not wired into the product.
 - **One Arena game.** Tic-Tac-Toe only. Connect Four, RPS, Battleship, and a human seat are declared in the feature matrix as not implemented.
 - **Replay of a stored run shows measurements and provenance, not the original planner's decisions or live timeline.** Those were never persisted; the panel leaves them absent rather than reconstructing them.
 - **Not independently audited.** The security model is designed and enforced in-process; it has not been through an external review, and no independent security guarantee is claimed.
 - **No scientific validation.** Benchmarks are internally consistent and reproducible from a recorded seed. Nothing here has been validated as a measure of model capability in the research sense.
+- **No published release.** Nothing has been signed, tagged, or published, so there is no download to verify. See [docs/RELEASE-CHECKLIST.md](docs/RELEASE-CHECKLIST.md) for exactly which release steps remain and what each is waiting on.
 
 ## Install
 
-Download the latest release and run the installer:
+**There is no published release.** No installer has been generated, signed, or published, and this
+repository deliberately has no automation that would do any of those things without a person deciding
+to.
 
-- **`ProbeLab_<version>_x64-setup.exe`** — NSIS installer, recommended.
-- **`ProbeLab_<version>_x64_en-US.msi`** — MSI installer for managed deployment.
+To build one yourself:
 
-Verify the download against the published `SHA256SUMS.txt`.
+```powershell
+pnpm --dir apps/desktop tauri build
+```
+
+which produces `target/release/bundle/nsis/ProbeLab_<version>_x64-setup.exe` and the MSI alongside it.
+Record what you built and verify it later with:
+
+```powershell
+node scripts/release-provenance.mjs write artifacts/provenance.json target\release\probelab-desktop.exe
+node scripts/release-provenance.mjs verify artifacts/provenance.json
+```
 
 No installation is required to build or run from source — see below.
 
@@ -109,7 +125,26 @@ The Rust crates are the product; the desktop shell is one front end over them.
 
 ### Verification
 
-`scripts/` contains the checks used before a release, including native-window capture, route overflow auditing, and durability checks that restart the real executable and confirm the data survives.
+Everything below runs on a normal development build and is enforced on every commit by
+`.github/workflows/ci.yml`.
+
+| Check | What it actually verifies |
+| --- | --- |
+| `cargo test --workspace` | 932 tests across the engine, lab, sandbox, broker, telemetry and the desktop command surface |
+| `pnpm --dir apps/desktop test` | 443 frontend tests |
+| `pnpm --dir apps/desktop check:styles` | no font size below 11px, **and** every text colour clears 4.5:1 against every surface in the palette |
+| `node apps/desktop/scripts/check-tauri-config.mjs` | the packaging configuration matches the Tauri schema that ships in this repository, and the shipped CSP carries no development origin |
+| `python3 scripts/check-version-provenance.py` | the workspace manifest, the Tauri config, the frontend manifest, and `docs/STATUS.md` all state the same version |
+| `python3 scripts/check-feature-matrix.py` | every registered Tauri command is reachable from the frontend, and every capability claim matches what is wired |
+
+Beyond the build gates, `scripts/` contains the checks that drive the **real executable** over the
+DevTools protocol, because several of the properties that matter cannot be observed from a test harness:
+
+- `grid-trace.mjs` — a live run and a recorded replay, with board geometry measured at 1366×768, 1600×900 and 1920×1080.
+- `cancel-through-ui.mjs` with `slow-provider.mjs` — presses STOP against a provider slow enough to stop, then checks that the committed events are the only ones persisted and that a second run starts immediately.
+- `replay-integrity.mjs` — compares an in-page content digest against the engine's own replay digest, frame by frame and across a real process restart, and checks that no frame paints terrain the run did not record.
+- `grid-durability.mjs` — terminates the process, restarts it against the same database, and drives the scrubber.
+- `audit-a11y.mjs` — axe-core plus focus visibility, accessible names, `aria-hidden` traps, clipping and horizontal overflow, across **all eleven routes**, and a reduced-motion check measured in both directions.
 
 ## License
 

@@ -13,3 +13,13 @@ dist
 Thumbs.db
 .idea
 .vscode
+
+# Local agent tooling. Not part of ProbeLab: these are per-machine editor/agent configuration,
+# including third-party plugins that reference their own LOCALAPPDATA directories. They belong to the
+# person using the repository, not to the repository.
+.opencode/
+
+# Python bytecode cache from the check scripts in scripts/. Regenerated on every run, differs by
+# interpreter version, and is never reviewed.
+__pycache__/
+*.pyc

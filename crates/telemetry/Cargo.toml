@@ -15,3 +15,9 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 rusqlite.workspace = true
+
+[dev-dependencies]
+# Only for the read-back tests, which open the store directly to assert that its append-only
+# triggers still refuse an update and a delete after a read. The read itself goes through the
+# repository's own API; this is the independent witness.
+rusqlite.workspace = true

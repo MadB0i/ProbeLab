@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+pub mod game;
+
 use probelab_core::{
     Action, AsyncModelProvider, CapabilityRequest, Coordinate, GridSize, ModelCallFailure,
     ModelCallFailureKind, ModelCallInfo, ModelDecision, ModelDescriptor, ModelProvider,
@@ -20,6 +22,15 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
+
+/// The validated endpoint a request is sent to.
+///
+/// Re-exported as a named alias so a caller that only needs the *type* — the desktop IPC layer
+/// deciding whether an endpoint is loopback — does not have to take a direct dependency on `url` just
+/// to name it. It is still the real `url::Url`, so nothing about the validation is weakened.
+pub use url::Url as EndpointUrl;
+
+use crate::transport::resolve_credential;
 
 /// Version of the embedded grid-world prompt template.
 pub const GRID_WORLD_PROMPT_TEMPLATE_VERSION: &str = "grid_world_v2";
@@ -573,40 +584,56 @@ impl OpenAiCompatibleProvider {
         &self,
         request: ModelRequest,
     ) -> Result<ModelResponse, ModelCallFailure> {
-        request.validate().map_err(|_| {
+        request.validate().map_err(|reason| {
             ModelCallFailure::new(
                 ModelCallFailureKind::Configuration,
-                "model request validation failed",
+                format!("model request validation failed: {reason}"),
             )
         })?;
-        let api_key = std::env::var(&self.config.api_key_env).map_err(|_| {
+        // A validated endpoint decides whether a credential is needed at all. A loopback endpoint
+        // resolves to `None` without reading the environment, so a local model needs no placeholder
+        // secret and no unrelated real credential is ever forwarded to it.
+        let endpoint = self.config.endpoint().map_err(|error| {
             ModelCallFailure::new(
                 ModelCallFailureKind::Configuration,
-                "provider API key environment variable is not set",
+                format!("provider endpoint is invalid: {error}"),
             )
         })?;
-        if api_key.is_empty() {
-            return Err(ModelCallFailure::new(
-                ModelCallFailureKind::Configuration,
-                "provider API key environment variable is empty",
-            ));
+        let credential =
+            resolve_credential(&endpoint, &self.config.api_key_env).map_err(|error| {
+                ModelCallFailure::new(
+                    ModelCallFailureKind::Configuration,
+                    format!("provider credential is unusable: {error}"),
+                )
+            })?;
+        let secret = credential.secret().unwrap_or_default().to_owned();
+
+        // The system prompt is chosen from the request itself, so a game can never be sent under the
+        // grid-world template and a grid episode can never be sent a board prompt. The version travels
+        // back in the call metadata so a result bundle states which rules the model was given.
+        let game_kind = request.game.as_ref().map(|game| game.kind);
+        let (system_prompt, template_version) = match game_kind {
+            Some(kind) => game::prompt_for(kind),
+            None => prompt_for(request.process_spawn_available),
+        };
+
+        let request_json = match &game_kind {
+            Some(_) => {
+                let game_request = request
+                    .game
+                    .as_ref()
+                    .expect("game kind implies a game request");
+                serde_json::to_string(&game::prompt_request(&request.episode_id, game_request))
+            }
+            None => serde_json::to_string(&PromptRequest::from(&request)),
         }
-        let request_json = serde_json::to_string(&PromptRequest::from(&request)).map_err(|_| {
+        .map_err(|_| {
             ModelCallFailure::new(
                 ModelCallFailureKind::Configuration,
                 "model request could not be serialized",
             )
         })?;
-        // The system prompt is chosen from the same flag the model is shown, so a request can never be
-        // sent under a template that does not describe the action the model is being offered. The
-        // version travels back in the call metadata so a result bundle says which template ran.
-        let (system_prompt, template_version) = prompt_for(request.process_spawn_available);
-        let endpoint = self.config.endpoint().map_err(|_| {
-            ModelCallFailure::new(
-                ModelCallFailureKind::Configuration,
-                "provider endpoint is invalid",
-            )
-        })?;
+
         let body = serde_json::json!({
             "model": self.config.model,
             "temperature": self.config.temperature,
@@ -618,22 +645,50 @@ impl OpenAiCompatibleProvider {
             ],
         });
         let started = Instant::now();
-        let response = self
-            .client
-            .post(endpoint)
-            .bearer_auth(&api_key)
-            .json(&body)
-            .send()
-            .await;
+        // A loopback call carries no `Authorization` header. A remote call carries exactly one, and
+        // only because the credential resolved.
+        let mut outgoing = self.client.post(endpoint);
+        if let Some(secret) = credential.secret() {
+            outgoing = outgoing.bearer_auth(secret);
+        }
+        let response = outgoing.json(&body).send().await;
         let response = match response {
             Ok(response) => response,
             Err(error) if error.is_timeout() => {
                 return Err(ModelCallFailure {
                     kind: ModelCallFailureKind::Timeout,
-                    message: "provider request timed out".to_owned(),
+                    message: format!(
+                        "provider did not answer within the configured {}s timeout",
+                        self.config.timeout_seconds
+                    ),
                     response_text: None,
                     usage: None,
                     elapsed_ms: Some(elapsed_ms(started)),
+                    http_status: None,
+                });
+            }
+            Err(error) if error.is_connect() => {
+                // Refused and disconnected are different problems with different fixes, so they are
+                // reported differently. A refused connection almost always means the provider is not
+                // running on that port.
+                let refused = is_connection_refused(&error);
+                return Err(ModelCallFailure {
+                    kind: if refused {
+                        ModelCallFailureKind::ConnectionRefused
+                    } else {
+                        ModelCallFailureKind::TransportDisconnect
+                    },
+                    message: if refused {
+                        "the provider refused the connection; nothing is listening on this address \
+                         and port"
+                            .to_owned()
+                    } else {
+                        "provider transport failed before a response".to_owned()
+                    },
+                    response_text: None,
+                    usage: None,
+                    elapsed_ms: Some(elapsed_ms(started)),
+                    http_status: None,
                 });
             }
             Err(_) => {
@@ -643,6 +698,7 @@ impl OpenAiCompatibleProvider {
                     response_text: None,
                     usage: None,
                     elapsed_ms: Some(elapsed_ms(started)),
+                    http_status: None,
                 });
             }
         };
@@ -650,15 +706,25 @@ impl OpenAiCompatibleProvider {
             .headers()
             .get("x-request-id")
             .and_then(|value| value.to_str().ok())
-            .map(|value| sanitize_response_text(value, &api_key));
+            .map(|value| crate::transport::sanitize_response_text(value, &secret));
         let status = response.status();
         if !status.is_success() {
+            // The body is read and bounded before the status is classified, because the body is
+            // where every one of the actionable answers lives: a server that has never heard of the
+            // model says so in the body, and a prompt that did not fit says so in the body. Before
+            // this, all three arrived as an anonymous "non-success HTTP status".
+            let status_code = status.as_u16();
+            let raw_body = response.text().await.unwrap_or_default();
+            let body = crate::transport::sanitize_response_text(&raw_body, &secret);
+            let kind = classify_http_failure(status_code, &body);
+            let detail = describe_http_failure(status_code, kind, &body);
             return Err(ModelCallFailure {
-                kind: ModelCallFailureKind::HttpError,
-                message: "provider returned a non-success HTTP status".to_owned(),
-                response_text: None,
+                kind,
+                message: detail,
+                response_text: (!body.is_empty()).then_some(body),
                 usage: None,
                 elapsed_ms: Some(elapsed_ms(started)),
+                http_status: Some(status_code),
             });
         }
         let response_text = response.text().await.map_err(|_| ModelCallFailure {
@@ -667,8 +733,9 @@ impl OpenAiCompatibleProvider {
             response_text: None,
             usage: None,
             elapsed_ms: Some(elapsed_ms(started)),
+            http_status: None,
         })?;
-        let sanitized_response = sanitize_response_text(&response_text, &api_key);
+        let sanitized_response = crate::transport::sanitize_response_text(&response_text, &secret);
         let elapsed = elapsed_ms(started);
         let payload = match serde_json::from_str::<ChatResponse>(&response_text) {
             Ok(payload) => payload,
@@ -679,6 +746,7 @@ impl OpenAiCompatibleProvider {
                     response_text: Some(sanitized_response),
                     usage: None,
                     elapsed_ms: Some(elapsed),
+                    http_status: Some(status.as_u16()),
                 });
             }
         };
@@ -690,6 +758,7 @@ impl OpenAiCompatibleProvider {
                 response_text: Some(sanitized_response),
                 usage,
                 elapsed_ms: Some(elapsed),
+                http_status: Some(status.as_u16()),
             });
         };
         let Some(content) = choice
@@ -703,25 +772,57 @@ impl OpenAiCompatibleProvider {
                 response_text: Some(sanitized_response),
                 usage,
                 elapsed_ms: Some(elapsed),
+                http_status: Some(status.as_u16()),
             });
         };
-        let sanitized_content = sanitize_response_text(&content, &api_key);
-        let decision = match parse_decision_response(
-            &content,
-            &request.available_actions,
-            request.process_spawn_available,
-        ) {
+        let sanitized_content = crate::transport::sanitize_response_text(&content, &secret);
+        let parsed: Result<ModelDecision, ActionProtocolError> = match game_kind {
+            Some(kind) => {
+                let legal = request
+                    .game
+                    .as_ref()
+                    .map(|view| view.legal_moves.as_slice())
+                    .unwrap_or_default();
+                game::parse_game_move_response(&content, kind, legal).map(ModelDecision::GameMove)
+            }
+            None => parse_decision_response(
+                &content,
+                &request.available_actions,
+                request.process_spawn_available,
+            ),
+        };
+        let decision = match parsed {
             Ok(decision) => decision,
             Err(error) => {
                 return Err(ModelCallFailure {
                     kind: error.kind(),
-                    message: "provider response did not follow the action protocol".to_owned(),
+                    message: format!(
+                        "provider response did not follow the {} protocol",
+                        match game_kind {
+                            Some(_) => "game move",
+                            None => "action",
+                        }
+                    ),
                     response_text: Some(sanitized_content),
                     usage,
                     elapsed_ms: Some(elapsed),
+                    http_status: Some(status.as_u16()),
                 });
             }
         };
+        // The engine re-validates the decision against the request that produced it. Doing it here
+        // as well is deliberate: a parse that succeeded but produced an illegal move should be
+        // reported as the protocol error it is, not as a rules violation discovered later.
+        if let Err(reason) = request.validate_decision(&decision) {
+            return Err(ModelCallFailure {
+                kind: ModelCallFailureKind::InvalidAction,
+                message: format!("provider response returned an unusable move: {reason}"),
+                response_text: Some(sanitized_content),
+                usage,
+                elapsed_ms: Some(elapsed),
+                http_status: Some(status.as_u16()),
+            });
+        }
         Ok(ModelResponse {
             decision,
             call: Some(ModelCallInfo {
@@ -731,7 +832,7 @@ impl OpenAiCompatibleProvider {
                 request_id,
                 finish_reason: choice
                     .finish_reason
-                    .map(|reason| sanitize_response_text(&reason, &api_key)),
+                    .map(|reason| crate::transport::sanitize_response_text(&reason, &secret)),
                 usage,
                 timeout_seconds: Some(self.config.timeout_seconds),
                 elapsed_ms: elapsed,
@@ -739,6 +840,101 @@ impl OpenAiCompatibleProvider {
             }),
         })
     }
+}
+
+/// Whether a connection error was an explicit refusal rather than any other connect failure.
+///
+/// `reqwest::Error::is_connect` covers every failure to establish a connection: a refused socket, an
+/// unroutable address, a name that does not resolve, a TLS handshake rejection. Only the first of
+/// those means "nothing is listening", which is the diagnosis an operator can act on, so the chain is
+/// walked to the underlying `io::Error` rather than reporting all four identically.
+fn is_connection_refused(error: &reqwest::Error) -> bool {
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(current) = cause {
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+            return io_error.kind() == std::io::ErrorKind::ConnectionRefused;
+        }
+        cause = current.source();
+    }
+    false
+}
+
+/// Classifies a non-success HTTP response into a failure the operator can act on.
+///
+/// The status code alone is not enough, and relying on it alone was the defect: a 404 from a local
+/// server that has never heard of the model is the single most common misconfiguration in this lab,
+/// and it is indistinguishable by status from a wrong URL path. So the bounded body is consulted for
+/// the markers every major server actually uses, and the status supplies the fallback.
+pub(crate) fn classify_http_failure(status: u16, body: &str) -> ModelCallFailureKind {
+    let haystack = body.to_ascii_lowercase();
+    if status == 404 || haystack.contains("model not found") || haystack.contains("not found") {
+        // A 404 from an endpoint that serves models is a missing model; a 404 from one that does not
+        // is a wrong path. The body tells them apart, and the status alone cannot.
+        if haystack.contains("model") || status == 404 {
+            return ModelCallFailureKind::ModelNotFound;
+        }
+    }
+    if status == 400
+        && (haystack.contains("context")
+            || haystack.contains("too many tokens")
+            || haystack.contains("context_length")
+            || haystack.contains("exceeds") && haystack.contains("token"))
+    {
+        return ModelCallFailureKind::ContextLengthExceeded;
+    }
+    ModelCallFailureKind::HttpError
+}
+
+/// Builds the operator-facing message for a non-success HTTP response.
+///
+/// Bounded on purpose. This text reaches a result bundle, a log, and a UI, so it names the status and
+/// the first useful line of the body and nothing more.
+pub(crate) fn describe_http_failure(status: u16, kind: ModelCallFailureKind, body: &str) -> String {
+    let headline = match kind {
+        ModelCallFailureKind::ModelNotFound => {
+            "the provider does not have this model; check the model name and that it is installed"
+        }
+        ModelCallFailureKind::ContextLengthExceeded => {
+            "the provider rejected the request as too long for its context window"
+        }
+        _ => "provider returned a non-success HTTP status",
+    };
+    let detail = first_useful_line(body);
+    if detail.is_empty() {
+        format!("{headline} ({status})")
+    } else {
+        format!("{headline} ({status}): {detail}")
+    }
+}
+
+/// The first line of a response body that carries information.
+pub(crate) fn first_useful_line(body: &str) -> String {
+    let mut out = String::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed == "{}" || trimmed == "[]" {
+            continue;
+        }
+        // Prefer a structured message over a JSON envelope, because every server nests the useful
+        // part under one and an operator reading a raw envelope learns nothing from it.
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(message) = value
+                .get("error")
+                .and_then(|error| error.get("message").or(Some(error)))
+                .and_then(serde_json::Value::as_str)
+            {
+                out.push_str(message);
+                break;
+            }
+            if let Some(message) = value.get("message").and_then(serde_json::Value::as_str) {
+                out.push_str(message);
+                break;
+            }
+        }
+        out.push_str(trimmed);
+        break;
+    }
+    out.chars().take(200).collect()
 }
 
 impl AsyncModelProvider for OpenAiCompatibleProvider {
@@ -753,15 +949,6 @@ impl AsyncModelProvider for OpenAiCompatibleProvider {
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
-}
-
-fn sanitize_response_text(value: &str, api_key: &str) -> String {
-    let bounded = value.chars().take(2048).collect::<String>();
-    if api_key.is_empty() {
-        bounded
-    } else {
-        bounded.replace(api_key, "[REDACTED]")
-    }
 }
 
 #[derive(Deserialize)]
@@ -2187,7 +2374,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_error_does_not_expose_response_body() {
+    async fn http_error_surfaces_a_bounded_body_and_its_status() {
+        // This test used to assert the opposite — that the body must be absent. That was the defect:
+        // a 404 saying `model "qwen2.5:3b" not found` arrived as an anonymous "non-success HTTP
+        // status", which is unactionable. The body is now surfaced, bounded, and paired with the
+        // status, because the body is where the fix lives.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
@@ -2196,64 +2387,165 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let env_name = "PROBELAB_TEST_HTTP_KEY";
-        std::env::set_var(env_name, "test-only-http-key");
-        let provider = provider_for(&server, env_name, 5).await;
+        let provider = provider_for(&server, "PROBELAB_TEST_HTTP_KEY", 5).await;
         let failure = provider
             .predict(request(Coordinate { x: 0, y: 0 }, 1, None))
             .await
             .expect_err("HTTP error");
-        std::env::remove_var(env_name);
         assert_eq!(failure.kind, ModelCallFailureKind::HttpError);
-        assert!(failure.response_text.is_none());
-        assert!(!failure.to_string().contains("test-only-http-secret"));
-        assert!(!failure.to_string().contains("test-only-http-key"));
+        assert_eq!(failure.http_status, Some(429));
+        assert!(
+            failure
+                .response_text
+                .as_deref()
+                .is_some_and(|body| body.contains("test-only-http-secret")),
+            "the bounded body must reach the operator: {failure:?}"
+        );
+        assert!(failure.to_string().contains("429"));
+        // And bounded, so a chatty error page cannot inflate a result bundle. Asserted on the
+        // sanitized text rather than on the limit, because a body far larger than the cap is the
+        // failure mode that matters and comparing two constants would only ever pass.
+        let body = failure
+            .response_text
+            .as_deref()
+            .expect("the HTTP failure carries the body the operator needs");
+        assert!(body.chars().count() <= crate::transport::SANITIZED_LIMIT);
     }
 
     #[tokio::test]
-    async fn malformed_empty_and_invalid_outputs_are_typed_and_redacted() {
+    async fn a_model_the_server_does_not_have_is_named_as_such() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(404).set_body_string(
+                r#"{"error":{"message":"model \"qwen2.5:3b\" not found, try pulling it first"}}"#,
+            ))
+            .mount(&server)
+            .await;
+        let provider = provider_for(&server, "PROBELAB_TEST_MISSING_MODEL_KEY", 5).await;
+        let failure = provider
+            .predict(request(Coordinate { x: 0, y: 0 }, 1, None))
+            .await
+            .expect_err("missing model");
+        assert_eq!(failure.kind, ModelCallFailureKind::ModelNotFound);
+        assert_eq!(failure.http_status, Some(404));
+        assert!(
+            failure.to_string().contains("not found"),
+            "the server's own explanation must survive: {failure}"
+        );
+        assert!(
+            failure.to_string().contains("pull"),
+            "the actionable half of the message must survive: {failure}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prompt_that_did_not_fit_is_reported_as_a_budget_problem() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"error":{"message":"the request exceeds the context window of 4096 tokens"}}"#,
+            ))
+            .mount(&server)
+            .await;
+        let provider = provider_for(&server, "PROBELAB_TEST_CONTEXT_KEY", 5).await;
+        let failure = provider
+            .predict(request(Coordinate { x: 0, y: 0 }, 1, None))
+            .await
+            .expect_err("context failure");
+        assert_eq!(failure.kind, ModelCallFailureKind::ContextLengthExceeded);
+    }
+
+    #[tokio::test]
+    async fn a_loopback_provider_needs_no_credential_and_sends_no_authorization_header() {
+        // The whole point of the loopback exemption, asserted at the wire. A local model must not
+        // require the operator to invent a placeholder secret, and must not be sent one even when an
+        // unrelated real credential happens to be exported.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "{\"action\":\"WAIT\"}"}}]
+            })))
+            .mount(&server)
+            .await;
+        let env_name = "PROBELAB_TEST_LOOPBACK_UNUSED_KEY";
+        std::env::set_var(env_name, "test-only-unrelated-real-credential");
+        let provider = provider_for(&server, env_name, 5).await;
+        let response = provider
+            .predict(request(Coordinate { x: 0, y: 0 }, 1, None))
+            .await
+            .expect("a loopback call must not require a credential");
+        std::env::remove_var(env_name);
+        assert_eq!(response.decision, ModelDecision::GridAction(Action::Wait));
+        let received = server.received_requests().await.expect("received requests");
+        assert!(
+            !received[0].headers.contains_key("authorization"),
+            "a loopback call must carry no Authorization header: {:?}",
+            received[0].headers
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_remote_provider_is_refused_before_any_request_is_attempted() {
+        // The other half of the contract: the exemption is loopback-only. A remote endpoint with no
+        // credential fails closed at configuration time and never touches the network, so a
+        // misconfigured remote provider can never be mistaken for a model that answers badly.
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url: "https://api.example.invalid/v1".to_owned(),
+            api_key_env: "PROBELAB_TEST_REMOTE_ABSENT_KEY".to_owned(),
+            model: "some-model".to_owned(),
+            timeout_seconds: 5,
+            temperature: 0.0,
+            max_tokens: 200,
+        })
+        .expect("configuration is structurally valid");
+        let failure = provider
+            .predict(request(Coordinate { x: 0, y: 0 }, 1, None))
+            .await
+            .expect_err("a remote endpoint must refuse to run without a credential");
+        assert_eq!(failure.kind, ModelCallFailureKind::Configuration);
+        assert!(failure.message.contains("credential"));
+    }
+
+    #[tokio::test]
+    async fn malformed_empty_and_invalid_outputs_are_typed_and_bounded() {
+        // The taxonomy is the assertion here, not redaction. Redaction moved with the credential:
+        // a loopback call resolves no secret, so there is nothing to redact, and a remote call's
+        // redaction is covered where a real credential actually exists — in the transport unit tests
+        // and in `an_unreachable_remote_provider_is_refused_before_any_request_is_attempted`.
         let cases = [
+            ("{\"choices\":[", ModelCallFailureKind::MalformedResponse),
             (
-                "PROBELAB_TEST_MALFORMED_KEY",
-                "test-only-malformed-secret",
-                "{\"choices\":[",
-                ModelCallFailureKind::MalformedResponse,
-            ),
-            (
-                "PROBELAB_TEST_EMPTY_KEY",
-                "test-only-empty-secret",
-                "{\"choices\":[{\"message\":{\"content\":\"\"}}],\"debug\":\"test-only-empty-secret\"}",
+                "{\"choices\":[{\"message\":{\"content\":\"\"}}]}",
                 ModelCallFailureKind::EmptyResponse,
             ),
             (
-                "PROBELAB_TEST_INVALID_KEY",
-                "test-only-invalid-secret",
-                "{\"choices\":[{\"message\":{\"content\":\"{\\\"action\\\":\\\"JUMP\\\"}\"}}],\"debug\":\"test-only-invalid-secret\"}",
+                "{\"choices\":[{\"message\":{\"content\":\"{\\\"action\\\":\\\"JUMP\\\"}\"}}]}",
                 ModelCallFailureKind::InvalidAction,
             ),
         ];
-        for (env_name, secret, body, expected_kind) in cases {
+        for (body, expected_kind) in cases {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/v1/chat/completions"))
                 .respond_with(ResponseTemplate::new(200).set_body_string(body))
                 .mount(&server)
                 .await;
-            std::env::set_var(env_name, secret);
-            let provider = provider_for(&server, env_name, 5).await;
+            let provider = provider_for(&server, "PROBELAB_TEST_TAXONOMY_UNSET", 5).await;
             let failure = provider
                 .predict(request(Coordinate { x: 0, y: 0 }, 1, None))
                 .await
                 .expect_err("invalid provider output");
-            std::env::remove_var(env_name);
-            assert_eq!(failure.kind, expected_kind);
-            assert!(!failure.to_string().contains(secret));
-            assert!(failure
-                .response_text
-                .as_deref()
-                .is_none_or(|text| !text.contains(secret)));
+            assert_eq!(failure.kind, expected_kind, "for body {body}");
+            assert_eq!(failure.http_status, Some(200), "for body {body}");
             assert!(
-                failure.usage.is_none() || expected_kind == ModelCallFailureKind::EmptyResponse
+                failure
+                    .response_text
+                    .as_deref()
+                    .is_some_and(|text| text.chars().count() <= crate::transport::SANITIZED_LIMIT),
+                "the echoed body must stay inside the sanitizer's bound"
             );
         }
     }
@@ -2293,7 +2585,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_api_key_is_rejected_before_any_request() {
+    async fn a_loopback_provider_ignores_an_empty_credential_variable_entirely() {
+        // Previously this failed closed with `Configuration`. That was right for a remote endpoint
+        // and wrong for a local one: an exported-but-empty variable is not a credential, and a local
+        // server that authenticates nothing must not be blocked by the absence of one.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
@@ -2302,20 +2597,20 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let env_name = "PROBELAB_TEST_EMPTY_KEY";
+        let env_name = "PROBELAB_TEST_EMPTY_LOOPBACK_KEY";
         std::env::set_var(env_name, "");
         let provider = provider_for(&server, env_name, 5).await;
-        let failure = provider
+        let response = provider
             .predict(request(Coordinate { x: 0, y: 0 }, 1, None))
             .await
-            .expect_err("empty credential must fail closed");
+            .expect("an empty variable is not a credential and is not read");
         std::env::remove_var(env_name);
-        assert_eq!(failure.kind, ModelCallFailureKind::Configuration);
-        assert!(server
-            .received_requests()
-            .await
-            .expect("requests")
-            .is_empty());
+        assert_eq!(response.decision, ModelDecision::GridAction(Action::Wait));
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            1,
+            "the call must actually have been made, not skipped"
+        );
     }
 
     #[tokio::test]

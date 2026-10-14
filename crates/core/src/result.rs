@@ -104,6 +104,26 @@ pub struct ProtocolAdherence {
     pub transport_failures: u64,
     /// Calls rejected by provider or request configuration.
     pub configuration_failures: u64,
+    /// Calls the provider answered by saying it does not have the named model.
+    ///
+    /// Its own counter rather than a fold into `http_failures`, because it is the single most common
+    /// local-model misconfiguration and it means the run measured nothing at all: a mistyped model
+    /// name produces a run whose every call failed, and reporting that as a generic HTTP failure
+    /// hides the one-line fix.
+    pub model_not_found: u64,
+    /// Calls the provider rejected because the prompt exceeded its context window.
+    ///
+    /// Also its own counter, because the remedy is a budget change — a shorter history window, a
+    /// smaller board — and never a retry. Folding it into `http_failures` would invite a retry loop
+    /// that cannot succeed.
+    pub context_length_exceeded: u64,
+    /// Calls that failed because the harness could not reach or could not use the provider.
+    ///
+    /// A roll-up over configuration failures, timeouts, transport disconnects, and refused
+    /// connections, counted because it is the number that decides whether a low score is evidence
+    /// about the model at all. Every call in this bucket is a call where the model never got to
+    /// answer, so scoring it as a model error understates a model that was merely unreachable.
+    pub harness_failures: u64,
     /// Valid responses divided by total calls, expressed in basis points.
     pub valid_response_rate_basis_points: u32,
 }
@@ -135,12 +155,21 @@ impl ProtocolAdherence {
             ModelCallFailureKind::HttpError => {
                 self.http_failures = self.http_failures.saturating_add(1);
             }
-            ModelCallFailureKind::TransportDisconnect => {
+            ModelCallFailureKind::TransportDisconnect | ModelCallFailureKind::ConnectionRefused => {
                 self.transport_failures = self.transport_failures.saturating_add(1);
+            }
+            ModelCallFailureKind::ModelNotFound => {
+                self.model_not_found = self.model_not_found.saturating_add(1);
+            }
+            ModelCallFailureKind::ContextLengthExceeded => {
+                self.context_length_exceeded = self.context_length_exceeded.saturating_add(1);
             }
             ModelCallFailureKind::Configuration => {
                 self.configuration_failures = self.configuration_failures.saturating_add(1);
             }
+        }
+        if kind.is_harness_failure() {
+            self.harness_failures = self.harness_failures.saturating_add(1);
         }
         self.refresh_rate();
     }

@@ -1,13 +1,14 @@
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use super::{
-    emit_run_error, new_run_id, AppState, ModelRunConfig, ProviderStatus, RunCompleteEnvelope,
-    RunId,
+    emit_run_cancelled, emit_run_error, new_run_id, AppState, ModelRunConfig, ProviderStatus,
+    RunCompleteEnvelope, RunId,
 };
 use probelab_core::{
     BenchmarkSummary, CompletedRun, RunMetadata, TelemetryEvent, TelemetryRecorder, TestResult,
 };
-use probelab_engine::BenchmarkRunner;
+use probelab_engine::{BenchmarkRunner, EngineError, RunContext};
 use probelab_evaluator::GridWorldEvaluator;
 use probelab_lab::AgentRegistry;
 use probelab_model_adapters::ProviderKind;
@@ -275,31 +276,83 @@ pub fn run_benchmark(
         );
     }
 
+    // The cancel handle is registered *before* the worker starts and removed when it finishes,
+    // whichever way it finishes. Registering after would leave a window in which the run is executing
+    // but the stop button reports "nothing is running"; never removing would let a stale handle stop
+    // whatever started next under the same identifier.
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut registry = state
+            .cancels
+            .lock()
+            .map_err(|_| "the cancel registry was left locked by an earlier fault".to_owned())?;
+        registry.insert(task_run_id.clone(), Arc::clone(&cancel));
+    }
+    let registry = Arc::clone(&state.cancels);
+    let id_for_cleanup = task_run_id.clone();
+    // Every exit path from the worker removes the handle. A `Drop` guard would be tidier, but this
+    // function already has four exits and an explicit removal at each is easier to verify than a
+    // guard's drop order.
+    let release = move || {
+        if let Ok(mut registry) = registry.lock() {
+            registry.remove(&id_for_cleanup);
+        }
+    };
+
     tauri::async_runtime::spawn(async move {
         let run_id_for_engine = task_run_id.clone();
         let run_id_for_persist = task_run_id.clone();
+        let results_for_terminal = Arc::clone(&results);
         let engine_task = tauri::async_runtime::spawn_blocking(move || {
-            let completed = BenchmarkRunner::new()
-                .run_with_metadata(
+            let context = RunContext::ephemeral("grid")
+                .map_err(|error| error.to_string())?
+                .with_cancel(Arc::clone(&cancel));
+            let completed: Result<CompletedRun, EngineError> = BenchmarkRunner::new()
+                .run_with_context(
                     benchmark.as_ref(),
                     agent,
                     &GridWorldEvaluator::new(),
                     benchmark_seed,
                     run_id_for_engine,
                     recorder,
-                )
-                .map_err(|error| error.to_string())?;
-            persist_run(&results, &run_id_for_persist, &completed)?;
-            Ok::<CompletedRun, String>(completed)
+                    context,
+                );
+            // A cancelled run is recorded as `interrupted` — a correct terminal state, not a failure
+            // and not a success. Writing it here rather than skipping the write is the point: an
+            // experiment row that says `running` after the process has moved on is the one state this
+            // persistence layer is designed never to leave behind.
+            //
+            // The outcome is typed rather than an `Err(String)`. Cancellation used to come back as
+            // `Err("the run was cancelled")`, which forced the caller to recover the fact that it was a
+            // cancellation by matching on English prose — and which meant the event the UI received could
+            // not distinguish "the operator stopped this" from "something broke".
+            match completed {
+                Ok(completed) => {
+                    persist_run(&results, &run_id_for_persist, &completed)?;
+                    Ok::<RunOutcome, String>(RunOutcome::Completed(Box::new(completed)))
+                }
+                Err(EngineError::Cancelled { turns_used }) => {
+                    record_cancelled_experiment(
+                        &results,
+                        &run_id_for_persist,
+                        &task_benchmark_id,
+                        turns_used,
+                    );
+                    Ok(RunOutcome::Cancelled { turns_used })
+                }
+                Err(error) => Ok(RunOutcome::Failed(error.to_string())),
+            }
         });
 
-        let completed = match engine_task.await {
-            Ok(Ok(completed)) => completed,
+        let outcome = match engine_task.await {
+            Ok(Ok(outcome)) => outcome,
             Ok(Err(error)) => {
+                release();
                 emit_run_error(&app, &task_run_id, error);
                 return;
             }
             Err(error) => {
+                release();
                 emit_run_error(
                     &app,
                     &task_run_id,
@@ -309,10 +362,70 @@ pub fn run_benchmark(
             }
         };
 
-        emit_run_complete(&app, &task_run_id, completed);
+        release();
+        drop(results_for_terminal);
+        match outcome {
+            RunOutcome::Completed(completed) => emit_run_complete(&app, &task_run_id, *completed),
+            RunOutcome::Cancelled { turns_used } => {
+                emit_run_cancelled(&app, &task_run_id, turns_used)
+            }
+            RunOutcome::Failed(error) => emit_run_error(&app, &task_run_id, error),
+        }
     });
 
     Ok(run_id)
+}
+
+/// How a benchmark run ended, as three outcomes rather than a result-or-error pair.
+///
+/// A stop is not a failure and is not a success, and folding it into `Err` is what made it look like
+/// one. Every consumer of a run's outcome now has to say which of the three it is handling, so the
+/// default case is no longer "assume it worked".
+///
+/// The completed run is boxed because `CompletedRun` carries a whole `TestResult` — some nine hundred
+/// bytes of benchmark metadata — and this value crosses a thread boundary and an async task to reach
+/// the emitter. Unboxed, every cancel and every failure moved that much memory to carry a `u32`.
+#[derive(Debug)]
+enum RunOutcome {
+    Completed(Box<CompletedRun>),
+    Cancelled { turns_used: u32 },
+    Failed(String),
+}
+
+/// Writes the lifecycle row for a run the operator stopped.
+///
+/// `Interrupted` rather than `Failed`, and with `has_score = false` and a null score. A cancelled run
+/// produced no measurement, and recording a partial one as a score would put a number in the history
+/// that no benchmark ever produced.
+fn record_cancelled_experiment(
+    results: &SqliteResultRepository,
+    run_id: &str,
+    benchmark_id: &str,
+    turns_used: u32,
+) {
+    let outcome = results.put_experiment(&probelab_telemetry::ExperimentRecord {
+        experiment_id: run_id.to_owned(),
+        benchmark_id: benchmark_id.to_owned(),
+        lifecycle: probelab_telemetry::ExperimentLifecycle::Interrupted,
+        terminal_reason: Some(probelab_lab::TerminalReason::Cancelled.to_wire_json()),
+        episodes_requested: 1,
+        episodes_completed: 0,
+        episodes_failed: 0,
+        has_score: false,
+        score: None,
+        result_json: None,
+        updated_unix_ms: unix_milliseconds(),
+        target_agent: None,
+        root_seed: None,
+    });
+    if let Err(error) = outcome {
+        tracing::error!(
+            error = %error,
+            turns_used,
+            "a cancelled benchmark run could not be recorded as interrupted; the history will show \
+             it as still running until the next launch corrects it"
+        );
+    }
 }
 
 /// Commits the result and its durable metadata before any completion event is emitted.
@@ -421,6 +534,39 @@ pub fn get_run_metadata(state: State<'_, AppState>, run_id: RunId) -> Result<Run
 #[tauri::command(rename_all = "snake_case")]
 pub fn subscribe_telemetry(state: State<'_, AppState>, run_id: RunId) -> Vec<TelemetryEvent> {
     state.recent_events.replay(&run_id)
+}
+
+/// Reads a run's committed telemetry back out of the append-only store.
+///
+/// # Why this is not `subscribe_telemetry`
+///
+/// `subscribe_telemetry` reads a bounded in-memory buffer of the *current session*, and says so. It
+/// exists to close the gap between subscribing to live events and the first one arriving, so it
+/// deliberately holds a bounded number of recent events for one run. Two things follow, and both
+/// would have produced a convincing, wrong playback:
+///
+/// * A run from a previous session is not in the buffer at all, so after a restart its recording was
+///   on disk and unreachable.
+/// * Even in the same session, a long run would have its oldest events evicted, so the episode would
+///   replay from the middle.
+///
+/// So this reads the durable table instead, which is append-only and holds every event the run
+/// committed. It performs no execution and holds no model, provider, or engine: every field returned
+/// is a field already on disk, which is what makes a replayed episode the same episode rather than a
+/// second experiment.
+///
+/// An unknown run identifier is an empty vector, not an error, because "nothing was recorded under
+/// that name" is the truthful answer and every caller would otherwise have to invent a distinction
+/// between a run that never happened and a recording that is missing.
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_run_telemetry(
+    state: State<'_, AppState>,
+    run_id: RunId,
+) -> Result<Vec<TelemetryEvent>, String> {
+    state
+        .results
+        .telemetry_events(&run_id)
+        .map_err(|error| error.to_string())
 }
 
 fn emit_run_complete(app: &AppHandle, run_id: &str, completed: CompletedRun) {

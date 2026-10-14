@@ -115,9 +115,15 @@
     {
       "id": "arena-connect-four",
       "area": "arena",
-      "status": "not-implemented",
-      "command": null,
-      "summary": "Types exist in the core schema and no engine module implements them. Refused with a typed `ArenaRunError::UnknownGame` before a match starts, and the panel states this rather than offering a picker that would fail. The product thesis is the controlled evaluation laboratory, not the number of games."
+      "status": "complete",
+      "command": "play_arena_match",
+      "implementation": "crates/engine/src/arena/connect_four.rs",
+      "summary": "Connect Four played end to end on a 7x6 board, with gravity, seven legal columns, all four win directions and draws. The board is stored column-major (index = column * 6 + row, row 0 at the bottom) because gravity is a per-column stack, and the frontend indexes it through the single accessor in boards.ts rather than arithmetic of its own. The depth-bounded opponent is a real search over the game's own rule set, so it is a measured opponent rather than a fixed script. An illegal move is recorded as an illegal move, not as a loss.",
+      "tests": [
+        "crates/lab/tests/arena.rs",
+        "apps/desktop/src/boards.test.ts",
+        "apps/desktop/src/ArenaPanel.test.tsx"
+      ]
     },
     {
       "id": "arena-rps",
@@ -382,9 +388,10 @@
       "status": "complete",
       "command": "cancel_experiment",
       "implementation": "crates/lab/src/runner.rs",
-      "summary": "Cooperative cancellation between episodes: the in-flight episode always finishes so cleanup runs, then the runner stops with a Cancelled terminal reason and a timeline entry. Handles are registered per experiment id and removed on completion, so a stale handle cannot stop a later run. A token-budget cap stops before the next episode with the same honesty.",
+      "summary": "Stopping a run from the product, not only from the library. The command center carries a native STOP RUN control that appears while a run is in flight, and a stop is a first-class terminal state: the run's outcome is typed Completed/Cancelled/Failed rather than a result-or-error pair, so every consumer has to say which of the three it is handling. A cancelled run's lifecycle row is written as Interrupted with no score, because recording a partial run's partial reward would put a number in the history that no benchmark produced. Cancellation is cooperative: the in-flight turn finishes so cleanup runs, then the runner stops with a Cancelled terminal reason and a timeline entry. Handles are registered per experiment id and removed on completion, so a stale handle cannot stop a later run -- cancel_experiment answers false once a run has ended. Verified through the built executable against a provider slow enough to stop, checking that the persisted events are exactly the committed ones with a gap-free sequence, that no further provider calls arrive after the stop, and that a second run starts immediately.",
       "tests": [
-        "crates/lab/tests/runner.rs"
+        "crates/lab/tests/runner.rs",
+        "apps/desktop/src-tauri/tests/grid_recording.rs"
       ]
     },
     {
@@ -397,6 +404,35 @@
       "tests": [
         "apps/desktop/src-tauri/src/executors.rs",
         "apps/desktop/src/BrainPanel.test.tsx"
+      ]
+    },
+    {
+      "id": "arena-batch-statistics",
+      "area": "arena",
+      "status": "complete",
+      "command": "run_arena_batch",
+      "implementation": "crates/lab/src/arena_stats.rs",
+      "summary": "Durable batch evaluation. A batch plays N matches (1..50), archiving each one to the SQLite archive BEFORE the next begins, so an interrupted batch leaves a true prefix rather than a summary that cannot be reconstructed. Statistics are then computed by reading those recordings BACK OUT of the archive rather than from the values the worker still held -- one query per match, in exchange for the panel's numbers being provably the database's numbers, including after a restart. Four rules the module will not bend. (1) NoResult is a fourth bucket with its own count and is excluded from every rate denominator: a cancelled match, a refused provider and a model that was never installed are not defeats. (2) Statistics are grouped by game and pairing and are NEVER summed across games -- a tic-tac-toe win and a connect-four win are different events, and the shape that would make a global leaderboard easy is deliberately not exposed. (3) Both win rates carry a Wilson interval and their denominators: win/decided and win/decisive, because they answer different questions and collapsing them answers neither. (4) A group with fewer than ten decided matches is labelled a small sample in prose, above the numbers. Latency and token averages cover only measured turns, so a shipped policy's silence is never averaged into a model's cost, and an unreported usage block stays null rather than becoming zero. Every group names the recordings behind it and a digest over them. This is NOT a ranking: a win rate against one opponent does not measure an agent, which is what the comparison module is for.",
+      "tests": [
+        "crates/lab/tests/arena_stats.rs",
+        "crates/lab/tests/arena_store.rs",
+        "apps/desktop/src-tauri/tests/arena_batch.rs",
+        "apps/desktop/src/BatchStatistics.test.tsx"
+      ]
+    },
+    {
+      "id": "grid-navigation-trace",
+      "area": "visualisation",
+      "status": "complete",
+      "command": "get_run_telemetry",
+      "implementation": "apps/desktop/src/gridFrames.ts",
+      "summary": "A grid episode drawn as a trace of its committed turns, animated and steppable. Every tile on the board came from an observation the engine committed: the stage cannot see the seed, the benchmark definition, or the environment's own map, so there is no path by which terrain appears that the agent did not sense, and tiles no observation ever carried are drawn as a hatched void rather than as ground. One frame per recorded turn, plus one for the position the final recorded move landed on -- which appears in no observation, only in the transition outcome, and without it every episode would stop a square short of where it ended. Knowledge never crosses an episode boundary, because each episode is a different world. Live and recorded playback are the same renderer over the same event type, and the tests assert the live stream and the durable record are the same events. Replaying is a READ: get_run_telemetry returns the append-only telemetry table, holds no provider, no engine and no broker, and is reached only after a restart or for an archived run the session buffer no longer holds. Nothing is extrapolated past the end of a recording: a cancelled run shows the turns it committed and the transport simply stops. The stage prints no verdict of its own -- success is the independent evaluator's stored answer and is passed in, and with no matching stored result the stage says the recording ends here and says nothing about how the run went.",
+      "tests": [
+        "crates/telemetry/tests/grid_readback.rs",
+        "apps/desktop/src-tauri/tests/grid_recording.rs",
+        "apps/desktop/src/gridFrames.test.ts",
+        "apps/desktop/src/useGridPlayback.test.ts",
+        "apps/desktop/src/GridWorldStage.test.tsx"
       ]
     }
   ]

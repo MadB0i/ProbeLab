@@ -1,497 +1,569 @@
 /**
- * Arena panel tests.
+ * The Arena panel: what it claims, what it refuses to claim, and what it can be operated by.
  *
- * The theme is that the panel shows the engine's facts and nothing else. There is no client-side game
- * loop to test, because there is no client-side game loop — which is the whole design claim, so several
- * of these tests are about what is *absent*: no human seat, no score, no local board, and no invented
- * result when the backend refuses.
+ * The assertions here are deliberately about *honesty* as much as about rendering. A game panel's
+ * credibility rests entirely on never inventing something: no score the engine did not produce, no
+ * "your turn" on a match that is already over, no progress bar for work that is not happening, and no
+ * statistic that reads like a capability claim when it is a count of recorded events. Those are the
+ * properties worth pinning, and each one below names the defect it would catch.
  */
 
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  ArenaPanel,
-  cellGlyph,
-  moveLabel,
-  outcomeGloss,
-  outcomeLabel,
-  sideMark,
-  ticTacToeCells,
-} from "./ArenaPanel";
-import type { ArenaAgentSummary, ArenaGameSummary, ArenaMatchView } from "./api";
+import { ArenaPanel, outcomeGloss, outcomeLabel, seatLabel, staleFor, testedResultLabel } from "./ArenaPanel";
+import { boardCell } from "./boards";
+import type {
+  GameBoardView,
+  ArenaAgentSummary,
+  ArenaGameSummary,
+  ArenaMatchSummary,
+  ArenaMatchView,
+  ArenaSeatRequest,
+} from "./api";
 
-const GAME: ArenaGameSummary = {
-  id: "tic_tac_toe",
-  name: "Tic-Tac-Toe",
-  description: "Three by three.",
-  width: 3,
-  height: 3,
-  maxPlies: 9,
-};
+/* ------------------------------------------------------------------ fixtures */
 
-const PERFECT: ArenaAgentSummary = {
-  id: "perfect_tictactoe",
-  name: "Perfect Tic-Tac-Toe",
-  description: "Exhaustive minimax.",
-  categoryLabel: "REFERENCE / CEILING",
-  canBeOpponent: true,
-};
-
-const FIRST_LEGAL: ArenaAgentSummary = {
-  id: "first_legal_tictactoe",
-  name: "First Legal Tic-Tac-Toe",
-  description: "Lowest legal cell.",
-  categoryLabel: "DETERMINISTIC BASELINE",
-  canBeOpponent: true,
-};
-
-function match(overrides: Partial<ArenaMatchView> = {}): ArenaMatchView {
+/**
+ * A finished tic-tac-toe match the engine could genuinely have produced.
+ *
+ * First completes the top row on ply five. Every field is internally consistent: the board really
+ * contains the line `winningLine` names, and the history is the sequence of moves that produced it.
+ * An inconsistent fixture would be caught by `winningCoordinates`, but a test that relied on a
+ * fixture being rejected would be testing the fixture rather than the panel.
+ */
+function wonMatch(overrides: Partial<ArenaMatchView> = {}): ArenaMatchView {
+  const empty = (): GameBoardView => ({
+    game: "tic_tac_toe",
+    state: { cells: Array<string>(9).fill("empty") },
+  });
+  const withCells = (cells: string[]): GameBoardView => ({
+    game: "tic_tac_toe",
+    state: { cells },
+  });
   return {
-    matchId: "arena-ttt-7",
+    matchId: "arena-tic_tac_toe-7-1700000000000-1",
     game: "tic_tac_toe",
     gameName: "Tic-Tac-Toe",
-    outcome: "draw",
-    testedAgent: "perfect_tictactoe",
+    outcome: "win",
+    testedAgent: "first_legal_tictactoe",
     opponentAgent: "perfect_tictactoe",
+    testedSeat: "reference_policy",
+    opponentSeat: "reference_policy",
     testedSide: "first",
     seed: 7,
-    plies: 9,
-    finalBoard: {
-      game: "tic_tac_toe",
-      state: {
-        cells: ["first", "second", "first", "first", "second", "second", "second", "first", "second"],
-      },
-    },
-    winner: null,
-    winningLine: null,
+    plies: 5,
+    finalBoard: withCells(["first", "first", "first", "empty", "second", "empty", "empty", "empty", "empty"]),
+    winner: "first",
+    winningLine: [
+      [0, 0],
+      [1, 0],
+      [2, 0],
+    ],
     illegalMoves: [],
     history: [
-      {
-        ply: 1,
-        side: "first",
-        board: {
-          game: "tic_tac_toe",
-          state: { cells: ["first", "empty", "empty", "empty", "empty", "empty", "empty", "empty", "empty"] },
-        },
-        played: { game: "tic_tac_toe", move: 0 },
-      },
-      {
-        ply: 2,
-        side: "second",
-        board: {
-          game: "tic_tac_toe",
-          state: { cells: ["first", "second", "empty", "empty", "empty", "empty", "empty", "empty", "empty"] },
-        },
-        played: { game: "tic_tac_toe", move: 1 },
-      },
+      { ply: 1, side: "first", board: withCells(["first", "empty", "empty", "empty", "empty", "empty", "empty", "empty", "empty"]), played: { game: "tic_tac_toe", move: 0 } },
+      { ply: 2, side: "second", board: withCells(["first", "empty", "empty", "empty", "second", "empty", "empty", "empty", "empty"]), played: { game: "tic_tac_toe", move: 4 } },
+      { ply: 3, side: "first", board: withCells(["first", "first", "empty", "empty", "second", "empty", "empty", "empty", "empty"]), played: { game: "tic_tac_toe", move: 1 } },
+      { ply: 4, side: "second", board: withCells(["first", "first", "empty", "empty", "second", "empty", "empty", "empty", "empty"]), played: { game: "tic_tac_toe", move: 7 } },
+      { ply: 5, side: "first", board: withCells(["first", "first", "first", "empty", "second", "empty", "empty", "empty", "empty"]), played: { game: "tic_tac_toe", move: 2 } },
     ],
-    timeline: [
-      {
-        sequence: 0,
-        code: "arena.ply_recorded",
-        severity: "info",
-        detail: "ply 1 by First",
-      },
-      {
-        sequence: 1,
-        code: "arena.match_completed",
-        severity: "info",
-        detail: "Draw after 9 plies",
-      },
-    ],
+    turns: [],
+    timeline: [],
     failure: null,
+    cancelled: false,
     ...overrides,
   };
 }
 
-function renderPanel(props: Partial<Parameters<typeof ArenaPanel>[0]> = {}) {
-  return render(
-    <ArenaPanel
-      games={[GAME]}
-      agents={[PERFECT, FIRST_LEGAL]}
-      match={null}
-      matchSummaries={[]}
-      openingId={null}
-      stale={false}
-      error={null}
-      playing={false}
-      selectedGame="tic_tac_toe"
-      selectedTested="perfect_tictactoe"
-      selectedOpponent="perfect_tictactoe"
-      selectedSide="first"
-      onPlay={() => {}}
-      onReset={() => {}}
-      onOpenMatch={() => {}}
-      onGameChange={() => {}}
-      onTestedChange={() => {}}
-      onOpponentChange={() => {}}
-      onSideChange={() => {}}
-      canPlay
-      {...props}
-    />,
-  );
+function games(): ArenaGameSummary[] {
+  return [
+    {
+      id: "tic_tac_toe",
+      name: "Tic-Tac-Toe",
+      description: "Three by three.",
+      width: 3,
+      height: 3,
+      maxPlies: 9,
+    },
+    {
+      id: "connect_four",
+      name: "Connect Four",
+      description: "Seven by six, played under gravity.",
+      width: 7,
+      height: 6,
+      maxPlies: 42,
+    },
+  ];
 }
 
-describe("board helpers", () => {
-  it("maps the backend's cell names to glyphs", () => {
-    expect(cellGlyph("empty")).toBe("");
-    expect(cellGlyph("first")).toBe("X");
-    expect(cellGlyph("second")).toBe("O");
-  });
+function agents(): ArenaAgentSummary[] {
+  return [
+    {
+      id: "perfect_tictactoe",
+      name: "Perfect Tic-Tac-Toe",
+      description: "Exhaustive minimax.",
+      categoryLabel: "REFERENCE / CEILING",
+      canBeOpponent: true,
+    },
+    {
+      id: "first_legal_tictactoe",
+      name: "First Legal Tic-Tac-Toe",
+      description: "Lowest legal cell.",
+      categoryLabel: "BASELINE",
+      canBeOpponent: true,
+    },
+  ];
+}
 
-  it("names each side's mark", () => {
-    expect(sideMark("first")).toBe("X");
-    expect(sideMark("second")).toBe("O");
-  });
+function summary(overrides: Partial<ArenaMatchSummary> = {}): ArenaMatchSummary {
+  return {
+    matchId: "arena-tic_tac_toe-7-1700000000000-1",
+    game: "tic_tac_toe",
+    outcome: "win",
+    testedAgent: "first_legal_tictactoe",
+    opponentAgent: "perfect_tictactoe",
+    testedSide: "first",
+    seed: 7,
+    plies: 3,
+    recordedUnixMs: 1_700_000_000_000,
+    digest: "abcdef0123456789",
+    ...overrides,
+  };
+}
 
-  it("reads a tic-tac-toe board and refuses anything else", () => {
-    const cells = ticTacToeCells({ game: "tic_tac_toe", state: { cells: ["empty", "first"] } });
-    expect(cells).toBeNull();
-    // An unimplemented game must not be coerced into a board of the wrong size.
-    expect(ticTacToeCells({ game: "connect_four" })).toBeNull();
-    expect(ticTacToeCells(null)).toBeNull();
-    expect(
-      ticTacToeCells({
-        game: "tic_tac_toe",
-        state: { cells: new Array(9).fill("empty") },
-      }),
-    ).toHaveLength(9);
-  });
+function renderPanel(overrides: Partial<React.ComponentProps<typeof ArenaPanel>> = {}) {
+  const props: React.ComponentProps<typeof ArenaPanel> = {
+    games: games(),
+    agents: agents(),
+    match: wonMatch(),
+    summaries: [summary()],
+    game: "tic_tac_toe",
+    testedSeat: { kind: "policy", id: "first_legal_tictactoe" },
+    opponentSeat: { kind: "policy", id: "perfect_tictactoe" },
+    testedSide: "first",
+    seed: 7,
+    localModels: ["qwen2.5:0.5b", "qwen2.5:3b"],
+    modelConfig: {
+      baseUrl: "http://127.0.0.1:11434/v1",
+      apiKeyEnv: "OPENAI_COMPATIBLE_API_KEY",
+      timeoutSeconds: 120,
+    },
+    onGameChange: () => {},
+    onTestedSeatChange: () => {},
+    onOpponentSeatChange: () => {},
+    onSideChange: () => {},
+    onSeedChange: () => {},
+    onPlay: () => {},
+    onCancel: () => {},
+    onOpen: () => {},
+    playing: false,
+    openingId: null,
+    error: null,
+    canPlay: true,
+    batch: {
+      statistics: null,
+      running: false,
+      progress: null,
+      requestedMatches: 10,
+      alternateSides: true,
+      canRun: true,
+      onRunBatch: () => {},
+      onCancelBatch: () => {},
+      onAlternateSidesChange: () => {},
+      onMatchesChange: () => {},
+    },
+    ...overrides,
+  };
+  return render(<ArenaPanel {...props} />);
+}
 
-  it("describes a move in the game's own coordinates, or admits it cannot", () => {
-    // The backend indexes cells from zero; the panel speaks in one-based cells so it matches what a
-    // human counts, and says so rather than silently shifting.
-    expect(
-      moveLabel({
-        ply: 1,
-        side: "first",
-        board: { game: "tic_tac_toe", state: { cells: [] } },
-        played: { game: "tic_tac_toe", move: 4 },
-      }),
-    ).toBe("cell 5");
-    expect(
-      moveLabel({
-        ply: 1,
-        side: "first",
-        board: { game: "tic_tac_toe", state: { cells: [] } },
-        played: null,
-      }),
-    ).toMatch(/no move/);
-    expect(
-      moveLabel({
-        ply: 1,
-        side: "first",
-        board: { game: "tic_tac_toe", state: { cells: [] } },
-        played: {},
-      }),
-    ).toMatch(/not identified/);
-  });
-});
+/* ------------------------------------------------------------------ labels */
 
 describe("outcome wording", () => {
-  it("keeps a failure distinct from a loss", () => {
-    expect(outcomeLabel("win")).toBe("WIN");
-    expect(outcomeLabel("loss")).toBe("LOSS");
-    expect(outcomeLabel("draw")).toBe("DRAW");
-    expect(outcomeLabel("no_result")).toBe("NO RESULT");
+  it("names a harness failure as no result rather than a loss", () => {
+    // The distinction the whole design rests on: a policy did not lose a match the harness never
+    // finished playing.
+    const failed = wonMatch({ outcome: "no_result", failure: "the provider refused the connection" });
+    expect(outcomeLabel(failed.outcome)).toBe("NO RESULT");
+    expect(testedResultLabel(failed)).toBe("NO RESULT");
+    expect(outcomeGloss(failed)).toMatch(/did not reach a result/i);
+    // The gloss contains the word "lost" only inside "nothing was won or lost", which is a
+    // denial. What must never appear is a claim that the tested policy lost.
+    expect(outcomeGloss(failed)).not.toMatch(/\bfirst_legal_tictactoe\b.*\blost\b/i);
+    expect(outcomeGloss(failed)).toMatch(/nothing was won or lost/i);
   });
 
-  it("says plainly that a failed match is not a loss", () => {
-    const gloss = outcomeGloss(
-      match({ outcome: "no_result", failure: "illegal move at ply 3" }),
-    );
-    expect(gloss).toMatch(/not a loss/i);
-    expect(gloss).toMatch(/harness/i);
+  it("names a cancelled match as cancelled, not as a loss or a failure", () => {
+    const stopped = wonMatch({ outcome: "no_result", cancelled: true, plies: 4 });
+    expect(testedResultLabel(stopped)).toBe("CANCELLED");
+    expect(outcomeGloss(stopped)).toMatch(/stopped after 4 turns/i);
   });
 
-  it("does not call a draw a pass", () => {
-    expect(outcomeGloss(match({ outcome: "draw" }))).toMatch(/neither side could force a win/i);
-  });
-});
-
-describe("ArenaPanel — empty state", () => {
-  it("shows an intentional empty arena rather than a blank board", () => {
-    renderPanel();
-    // "NO ACTIVE MATCH" appears twice by design — in the status badge and as the empty state's heading —
-    // so this asserts both are present rather than treating the duplication as a problem.
-    expect(screen.getAllByText("NO ACTIVE MATCH").length).toBeGreaterThan(0);
-    expect(screen.getByText(/a match runs to completion in the engine/i)).toBeInTheDocument();
-    // No board, and no invented history.
-    expect(document.querySelector(".arena-board")).toBeNull();
-    expect(screen.queryByText(/Action history/i)).not.toBeInTheDocument();
+  it("says who won and from which seat", () => {
+    expect(outcomeGloss(wonMatch())).toMatch(/first_legal_tictactoe.*first seat.*completed a line/i);
   });
 
-  it("says so when the build has no playable game at all", () => {
-    renderPanel({ games: [] });
-    expect(screen.getByText("NO GAMES")).toBeInTheDocument();
-    expect(screen.getByText(/no implementation/i)).toBeInTheDocument();
-  });
-
-  it("offers only Tic-Tac-Toe, because only it is implemented", () => {
-    renderPanel();
-    const select = screen.getByLabelText("GAME") as HTMLSelectElement;
-    const options = Array.from(select.options).map((option) => option.value);
-    expect(options).toEqual(["tic_tac_toe"]);
+  it("reports a draw as a draw, without calling it a result the model earned", () => {
+    const drawn = wonMatch({ outcome: "draw", winner: null, winningLine: null });
+    expect(outcomeGloss(drawn)).toMatch(/neither seat completed a line/i);
   });
 });
 
-describe("ArenaPanel — no human seat", () => {
-  it("states that there is no human seat", () => {
-    renderPanel();
-    expect(screen.getByText(/no human seat/i)).toBeInTheDocument();
+/* ------------------------------------------------------------------ the board */
+
+describe("the board", () => {
+  it("draws one cell per position and names each of them", () => {
+    const { container } = renderPanel();
+    expect(container.querySelectorAll(".arena-cell")).toHaveLength(9);
+    // A board a screen reader can read is a board, not a picture of one.
+    const cell = container.querySelector(".arena-cell") as HTMLElement;
+    expect(cell).toHaveAttribute("aria-label", expect.stringContaining("Cell 1, column 1"));
+    expect(cell.getAttribute("aria-label")).toMatch(/empty|first|second/i);
   });
 
-  it("offers no way to submit a move or advance a turn", () => {
-    // A clickable board that silently ignored clicks would look like a working human mode that does
-    // not exist, so the absence of these controls is a tested property.
-    renderPanel({ match: match() });
-    for (const forbidden of [/submit move/i, /your turn/i, /next turn/i, /play move/i]) {
-      expect(screen.queryByRole("button", { name: forbidden })).not.toBeInTheDocument();
-    }
-    expect(document.querySelectorAll(".arena-cell")).toHaveLength(9);
-  });
-});
-
-describe("ArenaPanel — board rendering", () => {
-  /*
-   * Playback opens on the opening position, so a test that wants the final board has to seek to it.
-   * Going through the real transport rather than a prop is deliberate: it exercises the control the
-   * user actually presses, so "the last frame shows the final board" is a claim about the panel rather
-   * than about a test-only shortcut.
-   */
-  function seekToEnd() {
-    const end = screen.getByLabelText("Go to the last frame");
-    expect(end).not.toBeDisabled();
-    fireEvent.click(end);
-  }
-
-  it("renders the engine's board, not a locally derived one", () => {
-    renderPanel({ match: match() });
-    seekToEnd();
-    const cells = document.querySelectorAll(".arena-cell");
-    expect(cells).toHaveLength(9);
-    // The fixture's final board is X O X / X O O / O X O.
-    const marks = Array.from(cells).map((cell) => cell.querySelector(".arena-cell-mark")!.textContent);
-    expect(marks).toEqual(["X", "O", "X", "X", "O", "O", "O", "X", "O"]);
+  it("highlights the engine's winning line only on the final frame", () => {
+    // The panel must never mark a line mid-replay: those cells are not the winner's yet. Autoplay
+    // opens on the first frame, so the opening render is exactly the mid-replay case.
+    const { container } = renderPanel();
+    expect(container.querySelectorAll(".arena-cell--winning")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: /go to the final position/i }));
+    expect(container.querySelectorAll(".arena-cell--winning")).toHaveLength(3);
   });
 
-  it("describes each cell for assistive technology, so the board is not colour-only", () => {
-    renderPanel({ match: match() });
-    seekToEnd();
-    const board = screen.getByRole("img", { name: /board/i });
-    expect(board).toBeInTheDocument();
-    expect(screen.getByLabelText("Cell 1: X")).toBeInTheDocument();
-    // Every one of the nine cells is individually named. A drawn board has no empty cell, so this
-    // asserts coverage rather than picking one.
-    for (let index = 1; index <= 9; index += 1) {
-      expect(screen.getByLabelText(new RegExp(`^Cell ${index}: `))).toBeInTheDocument();
-    }
-  });
-
-  it("names an empty cell as empty, not as a blank", () => {
-    renderPanel({
-      match: match({
-        plies: 1,
-        finalBoard: {
-          game: "tic_tac_toe",
-          state: { cells: ["first", "empty", "empty", "empty", "empty", "empty", "empty", "empty", "empty"] },
-        },
+  it("shows no winning line for a draw", () => {
+    const { container } = renderPanel({
+      match: wonMatch({
+        outcome: "draw",
+        winner: null,
+        winningLine: null,
+        finalBoard: { game: "tic_tac_toe", state: { cells: Array<string>(9).fill("empty") } },
       }),
     });
-    seekToEnd();
-    expect(screen.getByLabelText("Cell 5: empty")).toBeInTheDocument();
+    expect(container.querySelectorAll(".arena-cell--winning")).toHaveLength(0);
   });
 
-  it("refuses to draw a board it does not understand", () => {
-    renderPanel({
-      match: match({ finalBoard: { game: "connect_four" }, history: [] }),
+  it("shows no winning line for a cancelled match", () => {
+    // The board is where it actually got to, and nobody won it. A highlight here would be a claim.
+    const { container } = renderPanel({
+      match: wonMatch({ outcome: "no_result", cancelled: true, winner: null }),
     });
-    expect(document.querySelector(".arena-board")).toBeNull();
-    expect(screen.getByText(/cannot draw/i)).toBeInTheDocument();
+    expect(container.querySelectorAll(".arena-cell--winning")).toHaveLength(0);
   });
 
-  it("draws a half-played board without inventing the rest", () => {
-    renderPanel({
-      match: match({
-        outcome: "no_result",
-        failure: "illegal move",
-        plies: 1,
+  it("renders a connect-four board at its real size, indexed column-major", () => {
+    const cells = new Array(42).fill("empty");
+    // Column 3's bottom cell.
+    cells[3 * 6 + 0] = "first";
+    const { container } = renderPanel({
+      game: "connect_four",
+      match: wonMatch({
+        game: "connect_four",
+        gameName: "Connect Four",
+        testedSeat: "model",
+        turns: [],
+        finalBoard: { game: "connect_four", state: { columns: 7, rows: 6, cells } },
         history: [],
-        finalBoard: {
-          game: "tic_tac_toe",
-          state: { cells: ["first", "empty", "empty", "empty", "empty", "empty", "empty", "empty", "empty"] },
-        },
+        winner: null,
+        winningLine: null,
       }),
+      testedSeat: { kind: "model", label: "qwen2.5:0.5b", config: MODEL_CONFIG },
+      opponentSeat: { kind: "policy", id: "depth_bounded_connect_four" },
+      agents: agents(),
     });
-    // One recorded position and no transport to seek with: the board itself is the whole recording,
-    // and it is the terminal board.
-    const cells = document.querySelectorAll(".arena-cell");
-    expect(cells).toHaveLength(9);
-    expect(cells[0].querySelector(".arena-cell-mark")!.textContent).toBe("X");
-    expect(cells[8].querySelector(".arena-cell-mark")!.textContent).toBe("");
-    expect(screen.getByText(/nothing to step through/i)).toBeInTheDocument();
+    expect(container.querySelectorAll(".arena-cell")).toHaveLength(42);
+    // Read through the same accessor the renderer uses, so this test and the panel cannot disagree
+    // about where a disc is.
+    expect(
+      boardCell({ game: "connect_four", state: { columns: 7, rows: 6, cells } }, 3, 0),
+    ).toBe("first");
+  });
+
+  it("shows an explicit idle state rather than an empty board when nothing has been played", () => {
+    const { container } = renderPanel({ match: null });
+    expect(screen.getByText(/NO ACTIVE MATCH/i)).toBeInTheDocument();
+    // An empty board plus a heading would read as a match that produced nothing.
+    expect(container.querySelectorAll(".arena-cell")).toHaveLength(0);
   });
 });
 
-describe("ArenaPanel — completed match", () => {
-  it("shows the real outcome, seed, plies, and match id", () => {
-    renderPanel({ match: match() });
-    expect(screen.getByText("DRAW")).toBeInTheDocument();
-    expect(screen.getByText("arena-ttt-7")).toBeInTheDocument();
-    expect(screen.getByText("7")).toBeInTheDocument();
-  });
+/* ------------------------------------------------------------------ honesty */
 
-  it("names the winner, and says none for a draw", () => {
-    const draw = renderPanel({ match: match({ outcome: "draw", winner: null }) });
-    const winnerCard = screen.getByText("Winner").closest("div")!;
-    expect(within(winnerCard as HTMLElement).getByText("None")).toBeInTheDocument();
-    draw.unmount();
-
-    renderPanel({
-      match: match({ outcome: "win", winner: "first", testedSide: "first" }),
-    });
-    const winCard = screen.getByText("Winner").closest("div")!;
-    expect(within(winCard as HTMLElement).getByText("X")).toBeInTheDocument();
-  });
-
-  it("reports a loss as a loss and a failure as no result", () => {
-    const lost = renderPanel({ match: match({ outcome: "loss", winner: "second" }) });
-    expect(screen.getByText("LOSS")).toBeInTheDocument();
-    lost.unmount();
-
-    renderPanel({ match: match({ outcome: "no_result", failure: "boom" }) });
-    expect(screen.getByText("NO RESULT")).toBeInTheDocument();
-    expect(screen.queryByText("LOSS")).not.toBeInTheDocument();
-  });
-
-  it("shows the action history from the engine's telemetry", () => {
-    renderPanel({ match: match() });
-    const plies = document.querySelectorAll(".arena-ply");
-    expect(plies).toHaveLength(2);
-    expect(plies[0]).toHaveTextContent("cell 1");
-    expect(plies[1]).toHaveTextContent("cell 2");
-  });
-
-  it("shows the match's own event stream", () => {
-    renderPanel({ match: match() });
-    expect(screen.getByText("arena.ply_recorded")).toBeInTheDocument();
-    expect(screen.getByText("arena.match_completed")).toBeInTheDocument();
-  });
-
-  it("lists refused moves with their reason", () => {
-    renderPanel({
-      match: match({
-        illegalMoves: [{ ply: 3, attempted: null, reason: "that cell is already taken" }],
-      }),
-    });
-    expect(screen.getByText("Refused moves")).toBeInTheDocument();
-    expect(screen.getByText("that cell is already taken")).toBeInTheDocument();
-    expect(screen.getByText("ply 3")).toBeInTheDocument();
-  });
-
-  it("shows no refused-moves section for a clean match", () => {
-    renderPanel({ match: match() });
-    expect(screen.queryByText("Refused moves")).not.toBeInTheDocument();
-  });
-});
-
-describe("ArenaPanel — agent identity", () => {
-  it("names both seats and their categories", () => {
-    renderPanel({
-      selectedTested: "first_legal_tictactoe",
-      selectedOpponent: "perfect_tictactoe",
-    });
-    // The seat labels sit in the meta line beneath each name, so they are read by class rather than
-    // by a bare text match that would be ambiguous against the select labels.
-    const metas = Array.from(document.querySelectorAll(".seat-meta")).map((n) => n.textContent);
-    expect(metas.some((text) => text?.includes("Under test"))).toBe(true);
-    expect(metas.some((text) => text?.includes("Opponent"))).toBe(true);
-    expect(screen.getByText(/REFERENCE \/ CEILING/)).toBeInTheDocument();
-  });
-
-  it("offers only policies that can take the opponent seat", () => {
-    renderPanel({
-      agents: [
-        PERFECT,
-        { ...FIRST_LEGAL, canBeOpponent: false },
-      ],
-      selectedOpponent: "perfect_tictactoe",
-    });
-    const opponentSelect = screen.getByLabelText("OPPONENT") as HTMLSelectElement;
-    expect(Array.from(opponentSelect.options).map((o) => o.value)).toEqual([
-      "perfect_tictactoe",
-    ]);
-  });
-
-  it("falls back to a label when a seat has no agent", () => {
-    renderPanel({ selectedTested: "", selectedOpponent: "" });
-    expect(screen.getAllByText("Not selected").length).toBeGreaterThan(0);
-  });
-});
-
-describe("ArenaPanel — errors", () => {
-  it("shows a backend refusal and invents no result", () => {
-    renderPanel({
-      match: null,
-      error: "The match could not be played: this build cannot play \"connect_four\"",
-    });
-    expect(screen.getByRole("alert")).toHaveTextContent("cannot play");
-    // A refusal must not leave a board or a fabricated outcome behind.
-    expect(document.querySelector(".arena-board")).toBeNull();
-    expect(screen.queryByText(/DRAW|WIN|LOSS|NO RESULT/)).not.toBeInTheDocument();
-  });
-});
-
-describe("ArenaPanel — controls", () => {
-  it("starts a match when pressed", () => {
-    const onPlay = vi.fn();
-    renderPanel({ onPlay });
-    screen.getByRole("button", { name: /PLAY MATCH/i }).click();
-    expect(onPlay).toHaveBeenCalledTimes(1);
-  });
-
-  it("disables play while a match is running", () => {
-    renderPanel({ playing: true });
-    expect(screen.getByRole("button", { name: /PLAYING/i })).toBeDisabled();
-  });
-
-  it("disables play when no pairing is selected", () => {
-    renderPanel({ canPlay: false });
-    expect(screen.getByRole("button", { name: /PLAY MATCH/i })).toBeDisabled();
-  });
-
-  it("reports a seat change upward rather than mutating the match itself", () => {
-    const onTestedChange = vi.fn();
-    const onSideChange = vi.fn();
-    renderPanel({ onTestedChange, onSideChange });
-    (screen.getByLabelText("UNDER TEST") as HTMLSelectElement).value = "first_legal_tictactoe";
-    fireChange(screen.getByLabelText("UNDER TEST"));
-    expect(onTestedChange).toHaveBeenCalledWith("first_legal_tictactoe");
-    expect(onSideChange).not.toHaveBeenCalled();
-  });
-});
-
-/** Fires a change event for a select whose value was just assigned. */
-function fireChange(element: HTMLElement) {
-  element.dispatchEvent(new Event("change", { bubbles: true }));
-}
-
-describe("ArenaPanel — no fabricated metrics", () => {
-  it("shows no score, rating, or percentage anywhere", () => {
-    // Tic-tac-toe has no meaningful performance metric, so none is invented. A "performance score"
-    // would be a number nobody computed.
-    const { container } = renderPanel({ match: match() });
+describe("what the panel refuses to invent", () => {
+  it("never offers a score, a rating, or a percentage", () => {
+    const { container } = renderPanel();
     const text = container.textContent ?? "";
-    for (const forbidden of ["score", "rating", "elo", "%"]) {
-      expect(text.toLowerCase()).not.toContain(forbidden);
-    }
+    // A number that reads as a capability claim on a two-policy match would be a fabrication: the
+    // engine produces an outcome, not a rating, and nothing on this page may imply otherwise.
+    expect(text).not.toMatch(/\d+\s*%/);
+    expect(text).not.toMatch(/\belo\b|\brating\b|\bgrade\b|\bscore\b/i);
+    expect(text).not.toMatch(/\bthinking\b|\bconsidering\b/i);
   });
 
-  it("shows no provider or model for an in-process policy match", () => {
-    // Both seats are deterministic policies, so there is no provider to name — and the panel does not
-    // reach for one.
-    const { container } = renderPanel({ match: match() });
-    expect(container.textContent ?? "").not.toMatch(/openai|anthropic|gemini|ollama/i);
+  it("never invites a human to take a turn", () => {
+    const { container } = renderPanel();
+    expect(container.textContent).not.toMatch(/your turn/i);
+    // Every cell is a plain gridcell, not a button. A clickable board would imply an input the panel
+    // cannot honour.
+    expect(container.querySelectorAll(".arena-cell button")).toHaveLength(0);
+  });
+
+  it("keeps the connect-four board reachable, and hides only the column tray", () => {
+    // The column tray is decoration. The board is not: each of its 42 cells carries a spoken name,
+    // and for connect four that name is the only account of the position there is.
+    //
+    // This failed before. `aria-hidden` sat on the wrapper that also contains the board, so the whole
+    // grid dropped out of the accessibility tree. It passed unnoticed because the tic-tac-toe board,
+    // which has no wrapper, was the one the tests above were reading — the bug was specific to the
+    // game that has the frame around it.
+    //
+    // `getByRole` queries the accessibility tree, so these assertions are about what a screen reader
+    // would find, not about what happens to be in the DOM.
+    const cells = new Array(42).fill("empty");
+    renderPanel({
+      game: "connect_four",
+      match: wonMatch({
+        game: "connect_four",
+        gameName: "Connect Four",
+        testedSeat: "model",
+        turns: [],
+        finalBoard: { game: "connect_four", state: { columns: 7, rows: 6, cells } },
+        history: [],
+        winner: null,
+        winningLine: null,
+      }),
+      testedSeat: { kind: "model", label: "qwen2.5:0.5b", config: MODEL_CONFIG },
+      opponentSeat: { kind: "policy", id: "depth_bounded_connect_four" },
+      agents: agents(),
+    });
+
+    // All 42 cells are in the accessibility tree. With the bug present this found none.
+    expect(screen.getAllByRole("gridcell")).toHaveLength(42);
+    // And they are individually addressable, which is the point of naming each one.
+    expect(screen.getByLabelText(/row 1, column 1, empty/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/row 6, column 7, empty/i)).toBeInTheDocument();
+
+    // The tray is the only thing allowed to be invisible, and it is the only thing that is.
+    const tray = document.querySelector(".arena-c4__tray");
+    expect(tray).toHaveAttribute("aria-hidden", "true");
+    expect(tray?.querySelectorAll(".arena-c4__slot")).toHaveLength(7);
+    expect(document.querySelector(".arena-c4")).not.toHaveAttribute("aria-hidden");
+  });
+
+  it("says nothing was reported rather than reporting zero when the provider gave no tokens", () => {
+    const withTurn = {
+      ply: 1,
+      side: "first" as const,
+      seat: "model" as const,
+      seatLabel: "qwen2.5:0.5b",
+      elapsedMs: 1420,
+      usage: null,
+      promptTemplateVersion: "connect_four_v1",
+      responseText: null,
+      failure: null,
+      requestBoard: {
+        game: "connect_four" as const,
+        state: { columns: 7, rows: 6, cells: new Array(42).fill("empty") },
+      },
+    };
+    const { container } = renderPanel({ match: wonMatch({ turns: [withTurn] }) });
+    fireEvent.click(screen.getByRole("button", { name: /go to the final position/i }));
+    expect(container.textContent).toMatch(/tokens\s*not\s*reported/i);
+    expect(container.textContent).not.toMatch(/0\s*tokens/i);
+  });
+
+  it("surfaces a recorded failure without claiming the command failed", () => {
+    // The match ran and produced no result. That is a status, not an alert: an alert would tell the
+    // operator the command broke, which is a different problem with a different fix.
+    const failed = wonMatch({
+      outcome: "no_result",
+      failure: "the provider refused the connection",
+      turns: [],
+    });
+    renderPanel({ match: failed });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText(/did not reach a result/i)).toBeInTheDocument();
+    expect(screen.getAllByText("NO RESULT").length).toBeGreaterThan(0);
+  });
+
+  it("shows the recorded failure reason somewhere the operator can read it", () => {
+    const failed = wonMatch({
+      outcome: "no_result",
+      failure: "the provider refused the connection; nothing is listening on this address and port",
+      turns: [],
+    });
+    const { container } = renderPanel({ match: failed });
+    expect(container.textContent).toMatch(/refused the connection/i);
+  });
+});
+
+/* ------------------------------------------------------------------ states */
+
+describe("the panel's states", () => {
+  it("shows a command failure as an alert rather than a blank board", () => {
+    renderPanel({ error: "The match could not be played: the provider refused the connection" });
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/refused the connection/i);
+  });
+
+  it("offers a stop button only while a match is running", () => {
+    const { unmount } = renderPanel({ playing: true });
+    expect(screen.getByRole("button", { name: /^stop$/i })).toBeInTheDocument();
+    unmount();
+    renderPanel({ playing: false });
+    expect(screen.queryByRole("button", { name: /^stop$/i })).not.toBeInTheDocument();
+  });
+
+  it("disables the setup controls while a match is running", () => {
+    renderPanel({ playing: true });
+    const setup = screen.getByRole("region", { name: /match setup/i });
+    // The setup controls only. The replay transport stays live on purpose: watching a match you just
+    // started is the point, and a panel that locked its own scrubber would make that impossible.
+    for (const control of within(setup).getAllByRole("combobox")) {
+      expect(control).toBeDisabled();
+    }
+    for (const control of within(setup).getAllByRole("spinbutton")) {
+      expect(control).toBeDisabled();
+    }
+    expect(within(setup).getByRole("button", { name: /playing/i })).toBeDisabled();
+  });
+
+  it("explains why a real-model match takes time, instead of showing a bare spinner", () => {
+    renderPanel({ playing: true });
+    expect(screen.getByText(/one provider call per turn/i)).toBeInTheDocument();
+  });
+});
+
+/* ------------------------------------------------------------------ replay */
+
+describe("replay", () => {
+  it("names every transport control for a screen reader", () => {
+    renderPanel();
+    for (const name of [
+      /go to the opening position/i,
+      /step back one turn/i,
+      /step forward one turn/i,
+      /go to the final position/i,
+    ]) {
+      expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    }
+    // Autoplay starts the transport moving, so the play control is the pause control. Both names must
+    // exist: a control that cannot be paused is not a transport.
+    expect(screen.getByRole("button", { name: /pause playback/i })).toBeInTheDocument();
+  });
+
+  it("uses drawn icons for the transport rather than Unicode transport glyphs", () => {
+    // The old transport used `⏮ ◀ ▶ ⏭ ❚❚`. Those render differently in every font, read as
+    // decoration to a screen reader, and look like a media player on a scientific instrument.
+    const { container } = renderPanel();
+    expect(container.textContent).not.toMatch(/[⏮◀▶⏭❚]/);
+    expect(container.querySelectorAll(".arena-transport svg").length).toBeGreaterThan(0);
+  });
+
+  it("offers a speed control and a scrub position with a readable value", () => {
+    renderPanel();
+    expect(screen.getByLabelText(/playback speed/i)).toBeInTheDocument();
+    const slider = screen.getByRole("slider");
+    expect(slider).toHaveAttribute("aria-valuetext", expect.stringContaining("Frame 1"));
+  });
+
+  it("says so when there is nothing to step through", () => {
+    renderPanel({ match: null });
+    expect(screen.getByText(/nothing to step through yet/i)).toBeInTheDocument();
+  });
+});
+
+/* ------------------------------------------------------------------ staleness */
+
+describe("staleness", () => {
+  it("is not stale when the selectors still describe the recording", () => {
+    expect(
+      staleFor(
+        wonMatch(),
+        { kind: "policy", id: "first_legal_tictactoe" },
+        { kind: "policy", id: "perfect_tictactoe" },
+        "tic_tac_toe",
+        "first",
+      ),
+    ).toBe(false);
+  });
+
+  it("is stale when the seat, the game, or the side changed", () => {
+    const match = wonMatch();
+    expect(
+      staleFor(match, { kind: "policy", id: "perfect_tictactoe" }, { kind: "policy", id: "perfect_tictactoe" }, "tic_tac_toe", "first"),
+    ).toBe(true);
+    expect(
+      staleFor(match, { kind: "policy", id: "first_legal_tictactoe" }, { kind: "policy", id: "perfect_tictactoe" }, "connect_four", "first"),
+    ).toBe(true);
+    expect(
+      staleFor(match, { kind: "policy", id: "first_legal_tictactoe" }, { kind: "policy", id: "perfect_tictactoe" }, "tic_tac_toe", "second"),
+    ).toBe(true);
+  });
+
+  it("is never stale without a recording", () => {
+    expect(staleFor(null, { kind: "policy", id: "x" }, { kind: "policy", id: "y" }, "tic_tac_toe", "first")).toBe(false);
+  });
+
+  it("names a seat the same way whether or not it has been played", () => {
+    expect(seatLabel({ kind: "policy", id: "perfect_tictactoe" })).toBe("perfect_tictactoe");
+    expect(seatLabel({ kind: "model", label: "qwen2.5:3b", config: MODEL_CONFIG })).toBe("qwen2.5:3b");
+  });
+});
+
+const MODEL_CONFIG = {
+  kind: "openai_compatible",
+  schema_version: 1,
+  base_url: "http://127.0.0.1:11434/v1",
+  api_key_env: "OPENAI_COMPATIBLE_API_KEY",
+  model: "qwen2.5:3b",
+  timeout_seconds: 120,
+  temperature: 0,
+  max_tokens: 200,
+} as const;
+
+/* ------------------------------------------------------------------ archive */
+
+describe("the archive", () => {
+  it("lists recorded matches with their result and their seats", () => {
+    renderPanel();
+    const archive = screen.getByRole("region", { name: /match archive/i });
+    expect(within(archive).getByText(/WIN/)).toBeInTheDocument();
+    expect(within(archive).getByText(/first_legal_tictactoe vs perfect_tictactoe/i)).toBeInTheDocument();
+  });
+
+  it("opens a recording through the control the user presses", () => {
+    const onOpen = vi.fn();
+    renderPanel({ onOpen });
+    const archive = screen.getByRole("region", { name: /match archive/i });
+    const row = within(archive).getByRole("button");
+    row.click();
+    expect(onOpen).toHaveBeenCalledWith("arena-tic_tac_toe-7-1700000000000-1");
+  });
+
+  it("says so plainly when nothing has been recorded", () => {
+    renderPanel({ summaries: [] });
+    expect(screen.getByText(/no matches recorded yet/i)).toBeInTheDocument();
+  });
+});
+
+/* ------------------------------------------------------------------ seats */
+
+describe("the seat pickers", () => {
+  it("offers shipped policies and the locally installed models", () => {
+    renderPanel();
+    const tested = screen.getByLabelText(/under test/i);
+    const labels = within(tested)
+      .getAllByRole("option")
+      .map((option) => option.textContent ?? "");
+    expect(labels.some((label) => /perfect tic-tac-toe/i.test(label))).toBe(true);
+    // A model in the list is one discovery actually reported.
+    expect(labels.some((label) => /qwen2\.5:0\.5b/.test(label))).toBe(true);
+  });
+
+  it("says when no local model was detected rather than offering an empty option", () => {
+    renderPanel({ localModels: [] });
+    const tested = screen.getByLabelText(/under test/i);
+    expect(within(tested).getByRole("option", { name: /none detected/i })).toBeInTheDocument();
   });
 });

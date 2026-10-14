@@ -19,7 +19,9 @@ use probelab_core::{
 use probelab_engine::arena::tictactoe::{
     has_won, winning_line, PerfectTicTacToe, TicTacToe, MAX_PLIES,
 };
-use probelab_engine::arena::{play_match, Game, MatchConfig, MatchOutcome, NullRecorder};
+use probelab_engine::arena::{
+    play_match, Game, MatchConfig, MatchOutcome, ModelSeat, NullRecorder, PlyOutcome, ReferenceSeat,
+};
 
 /// Thirty matches. The rules have no seed dependence, so every match is the same game; the count is
 /// what makes a reported rate a rate rather than an anecdote.
@@ -132,15 +134,16 @@ fn run_batch(
     seeds(count)
         .into_iter()
         .map(|seed| {
-            let mut agent = tested(seed);
-            let mut opponent = PerfectTicTacToe::new();
+            let mut agent = ModelSeat::new(tested(seed), "tested");
+            let mut opponent = ReferenceSeat::new(Box::new(PerfectTicTacToe::new()));
             play_match(
                 &game,
-                agent.as_mut(),
+                &mut agent,
                 &mut opponent,
                 side,
                 &MatchConfig::new("	ested", "perfect", seed, "run", "episode"),
                 &NullRecorder,
+                &mut |_outcome: PlyOutcome| true,
             )
             .expect("a match completes")
         })
@@ -157,8 +160,11 @@ fn run_batch(
 fn ttt_perfect_against_perfect_is_a_draw_from_either_seat() {
     let game = TicTacToe::default_game();
     for (index, side) in [GameSide::First, GameSide::Second].into_iter().enumerate() {
-        let mut tested = ReferenceAsAgent(Box::new(PerfectTicTacToe::new()));
-        let mut opponent = PerfectTicTacToe::new();
+        let mut tested = ModelSeat::new(
+            Box::new(ReferenceAsAgent(Box::new(PerfectTicTacToe::new()))),
+            "perfect",
+        );
+        let mut opponent = ReferenceSeat::new(Box::new(PerfectTicTacToe::new()));
         let result = play_match(
             &game,
             &mut tested,
@@ -166,6 +172,7 @@ fn ttt_perfect_against_perfect_is_a_draw_from_either_seat() {
             side,
             &MatchConfig::new("perfect", "perfect", index as u64, "run", "episode"),
             &NullRecorder,
+            &mut |_outcome: PlyOutcome| true,
         )
         .expect("a match completes");
         assert_eq!(
@@ -281,11 +288,15 @@ fn ttt_an_illegal_move_is_recorded_and_ends_the_match() {
     let game = TicTacToe::default_game();
     let result = play_match(
         &game,
-        scripted_agent(vec![GameMove::TicTacToe(4), GameMove::TicTacToe(4)]).as_mut(),
-        &mut PerfectTicTacToe::new(),
+        &mut ModelSeat::new(
+            scripted_agent(vec![GameMove::TicTacToe(4), GameMove::TicTacToe(4)]),
+            "cell-reuser",
+        ),
+        &mut ReferenceSeat::new(Box::new(PerfectTicTacToe::new())),
         GameSide::First,
         &MatchConfig::new("cell-reuser", "perfect", 0, "run", "episode"),
         &NullRecorder,
+        &mut |_outcome: PlyOutcome| true,
     )
     .expect("a match completes");
 
@@ -327,11 +338,12 @@ fn ttt_every_ply_reaches_telemetry_with_its_board() {
 
     play_match(
         &game,
-        first_legal_agent().as_mut(),
-        &mut PerfectTicTacToe::new(),
+        &mut ModelSeat::new(first_legal_agent(), "first-legal"),
+        &mut ReferenceSeat::new(Box::new(PerfectTicTacToe::new())),
         GameSide::First,
         &MatchConfig::new("irst-legal", "perfect", 0, "run", "watch-me"),
         sink.as_ref(),
+        &mut |_outcome: PlyOutcome| true,
     )
     .expect("a match completes");
 

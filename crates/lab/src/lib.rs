@@ -21,6 +21,7 @@
 
 mod agents;
 mod arena;
+pub mod arena_stats;
 pub mod arena_store;
 mod brain;
 pub mod comparison;
@@ -40,8 +41,12 @@ pub use agents::{
     AgentSpec,
 };
 pub use arena::{
-    available_games, ArenaGame, ArenaMatch, ArenaMatchSpec, ArenaMatchView, ArenaOutcome,
-    ArenaRunError, ArenaRunner, IllegalMoveView, PlyView,
+    available_games, provenance_digest, ArenaGame, ArenaMatch, ArenaMatchSpec, ArenaMatchView,
+    ArenaOutcome, ArenaRunError, ArenaRunner, IllegalMoveView, PlyView, TurnTelemetry,
+};
+pub use arena_stats::{
+    arena_statistics, ArenaStatistics, CostStatistics, DecisionStatistics, MatchStatistics,
+    OutcomeCounts, PlyStatistics, DEFAULT_CONFIDENCE, SMALL_SAMPLE_MATCHES,
 };
 pub use arena_store::{ArenaMatchStoreError, ArenaMatchSummary, SqliteArenaMatchStore};
 pub use brain::{

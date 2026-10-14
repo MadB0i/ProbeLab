@@ -22,12 +22,19 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+      "devCsp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+      "freezePrototype": true
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "A measurement instrument for agent capability, protocol compliance, and integrity.",
+    "longDescription": "ProbeLab runs agent models against inspectable benchmark environments and reports what they did: which protocol they followed, which of their moves the world accepted, what they earned, and every integrity event raised against them. Runs are recorded turn by turn and replayed from disk, so a recorded result is a record rather than a claim.",
+    "publisher": "ProbeLab",
+    "copyright": "Copyright (c) ProbeLab contributors",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

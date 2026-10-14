@@ -16,6 +16,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 mod arena;
+mod arena_batch;
 mod brain;
 mod commands;
 mod executors;
@@ -35,17 +36,23 @@ pub use tasks::{
 };
 
 pub use arena::{
-    get_arena_match, latest_arena_match, list_arena_agents, list_arena_games, list_arena_matches,
-    play_arena_match, replay_arena_match, ArenaAgentSummary, ArenaCommandError, ArenaGameSummary,
-    ArenaMatchRequest, ArenaSurface,
+    cancel_arena_match, get_arena_match, latest_arena_match, list_arena_agents, list_arena_games,
+    list_arena_matches, play_arena_match, replay_arena_match, ArenaAgentSummary, ArenaCommandError,
+    ArenaGameSummary, ArenaMatchRequest, ArenaSeatRequest, ArenaSurface, ARENA_MATCH_EVENT,
+    ARENA_TURN_EVENT,
+};
+pub use arena_batch::{
+    arena_statistics, cancel_arena_batch, run_arena_batch, ArenaBatchProgress, ArenaBatchReport,
+    ArenaBatchRequest, ARENA_BATCH_EVENT, MAX_BATCH_MATCHES, MIN_BATCH_MATCHES,
+    STATISTICS_READ_LIMIT,
 };
 pub use brain::{
     brain_panel, get_experiment, run_experiment, BrainCommandError, BrainSurface, ExperimentRequest,
 };
 pub use commands::{
-    get_provider_status, get_result, get_run_metadata, list_agents, list_benchmark_details,
-    list_benchmarks, list_providers, run_benchmark, subscribe_telemetry, AgentSummary,
-    BenchmarkDetail, ProviderSummary,
+    get_provider_status, get_result, get_run_metadata, get_run_telemetry, list_agents,
+    list_benchmark_details, list_benchmarks, list_providers, run_benchmark, subscribe_telemetry,
+    AgentSummary, BenchmarkDetail, ProviderSummary,
 };
 // The comparison and settings request types are re-exported for the same reason the commands are: they
 // are the IPC contract. A caller that cannot name a type cannot write a test proving a malformed
@@ -193,6 +200,19 @@ struct RunErrorEnvelope {
     error: String,
 }
 
+/// A run the operator stopped.
+///
+/// Its own event rather than a `run-error` carrying a message that reads like a fault. A stopped run
+/// is a correct terminal state — the lifecycle row is written as `interrupted`, with no score, because a
+/// partial episode produced no measurement — and a viewer that can only tell "stopped" from "broken" by
+/// matching on an English string is a viewer that will call a stop a failure. The turns the run did
+/// commit are still on disk and still replayable; `turns_used` is what it actually got through.
+#[derive(Clone, Serialize)]
+struct RunCancelledEnvelope {
+    run_id: String,
+    turns_used: u32,
+}
+
 impl AppState {
     /// Builds application state over throwaway stores for integration tests.
     ///
@@ -267,9 +287,51 @@ fn emit_run_error(app: &AppHandle, run_id: &str, error: impl Into<String>) {
     }
 }
 
+fn emit_run_cancelled(app: &AppHandle, run_id: &str, turns_used: u32) {
+    let payload = RunCancelledEnvelope {
+        run_id: run_id.to_owned(),
+        turns_used,
+    };
+    if let Err(emit_error) = app.emit("probe-lab/run-cancelled", payload) {
+        tracing::error!(run_id, error = %emit_error, "failed to emit run cancellation event");
+    }
+}
+
 /// Starts the ProbeLab Tauri desktop application.
 pub fn run() {
     tauri::Builder::default()
+        // # Single-instance protection, and why it is not optional
+        //
+        // Two instances of this application share one SQLite database in one app-data directory. The
+        // consequences are not hypothetical:
+        //
+        // - Both would reconcile each other's in-flight runs at start-up, marking a *running*
+        //   experiment `interrupted` while it is still executing.
+        // - Both would write results under overlapping run identifiers, and the telemetry table
+        //   enforces a gap-free sequence per run, so the second writer's events are rejected.
+        // - Both would run the arena against the same archive, and a batch would interleave its
+        //   matches with another's.
+        //
+        // The worst case is the one that matters for an evaluation tool: a match that is half-recorded
+        // and *looks* complete. So the second instance refuses to start and says why, rather than
+        // starting, discovering the conflict, and corrupting a run that is in progress.
+        //
+        // The lock is a named mutex rather than a file lock because it is released by the operating
+        // system if the process dies — a crashed first instance must not leave the application
+        // permanently unable to start.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            // The second instance's arguments are handed to the running one so a "open this file"
+            // style launch reaches the existing window rather than starting a rival process.
+            tracing::warn!(
+                argv = ?argv,
+                cwd = ?cwd,
+                "a second ProbeLab instance was launched; focusing the running window instead"
+            );
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .setup(|app| {
             let filter = tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("probelab=info"));
@@ -413,14 +475,19 @@ pub fn run() {
             score_guided_submission,
             get_result,
             get_run_metadata,
+            get_run_telemetry,
             subscribe_telemetry,
             get_arena_match,
             latest_arena_match,
             list_arena_matches,
             list_arena_agents,
             list_arena_games,
+            cancel_arena_match,
             play_arena_match,
             replay_arena_match,
+            run_arena_batch,
+            cancel_arena_batch,
+            arena_statistics,
             latest_security_report,
             list_security_probes,
             run_security_sweep

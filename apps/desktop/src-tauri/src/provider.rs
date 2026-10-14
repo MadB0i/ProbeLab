@@ -332,17 +332,34 @@ impl ModelRunConfig {
             },
             Self::OpenAiCompatible { model, .. } => {
                 let model = model.clone();
-                let connected = || ProviderStatus {
+                let connected = |credential_source: &str, message: String| ProviderStatus {
                     schema_version: PROVIDER_STATUS_SCHEMA_VERSION,
                     provider: OPENAI_COMPATIBLE_PROVIDER.to_owned(),
                     model: model.clone(),
+                    // The prompt template is chosen per request from the benchmark, so the card
+                    // reports the grid-world one as the default and the arena reports the game's. Both
+                    // travel back in each call's metadata, so a stored result always states which ran.
                     prompt_template_version: GRID_WORLD_PROMPT_TEMPLATE_VERSION.to_owned(),
-                    credential_source: CREDENTIAL_SOURCE_ENVIRONMENT.to_owned(),
+                    credential_source: credential_source.to_owned(),
                     configured: true,
                     status: ProviderConnectionStatus::Connected,
-                    message: "Credential found in the environment. A connected run is ready to start."
-                        .to_owned(),
+                    message,
                 };
+                // A loopback endpoint needs no credential, and saying "not configured" because an
+                // environment variable is unset is exactly the wrong answer for a local model: the
+                // single most common configuration in this lab would read as broken.
+                if let Ok(url) = self.openai_endpoint() {
+                    if probelab_model_adapters::transport::credential_posture(&url)
+                        == probelab_model_adapters::transport::CredentialPosture::NotSentToLoopback
+                    {
+                        return connected(
+                            CREDENTIAL_SOURCE_NONE,
+                            "This is a local loopback endpoint, which needs no credential. None will \
+                             be read or sent."
+                                .to_owned(),
+                        );
+                    }
+                }
                 let not_configured = |reason: ModelRunConfigError| {
                     ProviderStatus::not_configured(
                         OPENAI_COMPATIBLE_PROVIDER,
@@ -363,15 +380,33 @@ impl ModelRunConfig {
                 };
                 self.validate()
                     .and_then(|()| credential_is_present(&credential_variable))
-                    .map_or_else(not_configured, |()| connected())
+                    .map_or_else(not_configured, |()| {
+                        connected(
+                            CREDENTIAL_SOURCE_ENVIRONMENT,
+                            "Credential found in the environment. A connected run is ready to start."
+                                .to_owned(),
+                        )
+                    })
             }
         }
     }
 
+    /// The validated endpoint, when this configuration is an OpenAI-compatible one.
+    ///
+    /// Returns the parsed URL rather than the string so the credential decision is made against the
+    /// *validated* value. A caller that parsed the string itself could be fooled by a URL that
+    /// validation would reject, which is precisely the check that must not be bypassed.
+    fn openai_endpoint(&self) -> Result<probelab_model_adapters::EndpointUrl, ModelRunConfigError> {
+        Ok(self.openai_config().endpoint()?)
+    }
+
     /// Builds the agent a run should use, after validating the configuration.
     ///
-    /// For a connected configuration this fails closed when the credential is missing; it
-    /// never fabricates a provider that would fail later inside the sandbox.
+    /// For a remote configuration this fails closed when the credential is missing; it never
+    /// fabricates a provider that would fail later inside the sandbox. For a validated **loopback**
+    /// endpoint it deliberately does not check at all: a local model server authenticates nothing, so
+    /// requiring an exported variable would force every operator to invent a placeholder secret and
+    /// then transmit it on every call.
     pub fn build_agent(&self, benchmark_seed: u64) -> Result<Box<dyn Agent>, ModelRunConfigError> {
         self.validate()?;
         match self {
@@ -379,7 +414,18 @@ impl ModelRunConfig {
                 MockModelProvider::new(*strategy, benchmark_seed),
             ))),
             Self::OpenAiCompatible { api_key_env, .. } => {
-                credential_is_present(api_key_env)?;
+                // Same decision as the adapter makes, from the same function, so the pre-flight can
+                // never disagree with the call it is pre-flighting.
+                let loopback = self
+                    .openai_endpoint()
+                    .map(|url| {
+                        probelab_model_adapters::transport::credential_posture(&url)
+                            == probelab_model_adapters::transport::CredentialPosture::NotSentToLoopback
+                    })
+                    .unwrap_or(false);
+                if !loopback {
+                    credential_is_present(api_key_env)?;
+                }
                 let provider = OpenAiCompatibleProvider::new(self.openai_config())?;
                 let agent = AsyncProviderAgent::from_provider(provider)
                     .map_err(ModelRunConfigError::Agent)?;

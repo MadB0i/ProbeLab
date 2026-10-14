@@ -31,7 +31,7 @@ impl TelemetryRecorder for CountingRecorder {
 
 fn play(tested: &str, opponent: &str, tested_side: GameSide) -> probelab_lab::ArenaMatch {
     ArenaRunner::new()
-        .play(
+        .play_simple(
             &ArenaMatchSpec::new(
                 GameKind::TicTacToe,
                 tested,
@@ -52,19 +52,88 @@ fn cells(board: &GameBoard) -> Vec<String> {
     }
 }
 
-/// The catalog offers Tic-Tac-Toe and nothing else.
+/// The catalog offers exactly the games this build can actually play.
 ///
-/// Asserting the length is the point: connect four, rock-paper-scissors, and battleship have types in
-/// the schema but no implementation behind this command, and listing them would offer a match that
-/// fails on the first ply.
+/// Asserting the *set* is the point, in both directions. Listing a game with types in the schema but
+/// no implementation behind this command would offer a match that fails on the first ply, and the
+/// set assertion is what stops rock-paper-scissors or battleship from quietly appearing in a dropdown
+/// because somebody added a type. The geometry is pinned too, because a renderer lays the board out
+/// from these numbers and a wrong row count draws a game nobody played.
 #[test]
-fn only_tic_tac_toe_is_offered() {
+fn only_implemented_games_are_offered() {
     let games = available_games();
-    assert_eq!(games.len(), 1);
-    assert_eq!(games[0].id, "tic_tac_toe");
-    assert_eq!(games[0].width, 3);
-    assert_eq!(games[0].height, 3);
-    assert_eq!(games[0].max_plies, 9);
+    let ids: Vec<&str> = games.iter().map(|game| game.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["tic_tac_toe", "connect_four"],
+        "the arena offers exactly the games it implements, in a stable order"
+    );
+    assert_eq!(
+        (games[0].width, games[0].height, games[0].max_plies),
+        (3, 3, 9)
+    );
+    assert_eq!(
+        (games[1].width, games[1].height, games[1].max_plies),
+        (7, 6, 42),
+        "connect four is a seven-by-six board that fills in forty-two plies"
+    );
+}
+
+/// Every offered game is playable end to end by the agents the registry seats for it.
+///
+/// The catalog and the runner are separate lists that have to agree, and a test that only checks the
+/// catalog's length would pass while `play` refused a listed game. This closes that gap by actually
+/// playing each one.
+#[test]
+fn every_offered_game_is_playable_by_its_registered_agents() {
+    for game in available_games() {
+        let kind = match game.id.as_str() {
+            "tic_tac_toe" => GameKind::TicTacToe,
+            "connect_four" => GameKind::ConnectFour,
+            other => panic!("{other} is offered but this test does not know its kind"),
+        };
+        let runner = ArenaRunner::new();
+        let agents = runner.agents_for(kind);
+        assert!(
+            agents.len() >= 2,
+            "{} needs at least two agents to form a match, has {}",
+            game.id,
+            agents.len()
+        );
+        let played = runner.play_simple(
+            &ArenaMatchSpec::new(
+                kind,
+                &agents[0].id,
+                &agents[1].id,
+                GameSide::First,
+                7,
+                "catalog-check",
+            ),
+            None,
+        );
+        let match_view = match played {
+            Ok(played) => played.view,
+            Err(error) => panic!("{} is offered but could not be played: {error}", game.id),
+        };
+        assert!(
+            match_view.plies > 0,
+            "{} produced no plies, so its outcome would be vacuous",
+            game.id
+        );
+        assert_eq!(
+            match_view.plies,
+            u32::try_from(match_view.history.len())
+                .expect("a board cannot exceed four billion plies"),
+            "the recorded ply count and the recorded history must be the same fact"
+        );
+        assert!(!match_view.turns.is_empty(), "every ply reports its cost");
+        assert!(
+            match_view.failure.is_none(),
+            "{} failed: {:?}",
+            game.id,
+            match_view.failure
+        );
+    }
 }
 
 /// A real match runs to a real terminal state.
@@ -132,9 +201,16 @@ fn a_win_records_the_winning_line_from_the_engine() {
         GameSide::First => "First",
         GameSide::Second => "Second",
     };
-    for index in line {
+    // The line is a list of `(column, row)` coordinates. Tic-tac-toe reports the second component as
+    // zero, so the row is derived from the index rather than read from the pair — and the assertion
+    // is that the *index* the engine named holds the winner's mark.
+    for [index, row] in &line {
         assert_eq!(
-            cells[usize::from(index)],
+            *row, 0,
+            "tic-tac-toe reports a flat cell index, not a two-dimensional coordinate"
+        );
+        assert_eq!(
+            cells[usize::from(*index)],
             winner_mark,
             "cell {index} is not the winner's mark, so this is not a line the winner completed"
         );
@@ -249,7 +325,7 @@ fn only_compatible_agents_are_offered() {
 /// An incompatible pairing is refused before anything runs.
 #[test]
 fn an_incompatible_agent_is_refused() {
-    let outcome = ArenaRunner::new().play(
+    let outcome = ArenaRunner::new().play_simple(
         &ArenaMatchSpec::new(
             GameKind::TicTacToe,
             "optimal",
@@ -269,18 +345,48 @@ fn an_incompatible_agent_is_refused() {
     );
 }
 
-/// An unimplemented game is refused, not half-played.
+/// A game with a schema type but no implementation is refused, not half-played.
+///
+/// Connect four used to be in this list; it is not any more, and the list is derived from the catalog
+/// rather than written out, so a game shipping later removes itself from the assertion instead of
+/// leaving a test that quietly contradicts the product.
 #[test]
 fn an_unimplemented_game_is_refused() {
-    for game in [GameKind::ConnectFour, GameKind::Rps, GameKind::Battleship] {
-        let outcome = ArenaRunner::new().play(
+    let offered: Vec<String> = available_games().into_iter().map(|game| game.id).collect();
+    let all = [
+        GameKind::TicTacToe,
+        GameKind::ConnectFour,
+        GameKind::Rps,
+        GameKind::Battleship,
+    ];
+    for game in all {
+        let outcome = ArenaRunner::new().play_simple(
             &ArenaMatchSpec::new(game, PERFECT, PERFECT, GameSide::First, 1, "m"),
             None,
         );
-        assert!(
-            matches!(outcome, Err(probelab_lab::ArenaRunError::UnknownGame(_))),
-            "{game:?} has no implementation and must be refused, got {outcome:?}"
-        );
+        if !offered.contains(&game.as_str().to_owned()) {
+            assert!(
+                matches!(outcome, Err(probelab_lab::ArenaRunError::UnknownGame(_))),
+                "{game:?} has no implementation and must be refused, got {outcome:?}"
+            );
+            continue;
+        }
+        // The game is listed, so the refusal must be about the *agents*, never about the game. A
+        // listed game that reports `UnknownGame` would be a catalog that lies, and one that accepts
+        // a tic-tac-toe policy would be a compatibility check that does not check.
+        match outcome {
+            Ok(played) => {
+                assert_eq!(
+                    played.view.game,
+                    game.as_str(),
+                    "a listed game must report its own identifier"
+                );
+            }
+            Err(probelab_lab::ArenaRunError::IncompatibleAgent { .. }) => {}
+            Err(other) => panic!(
+                "{game:?} is listed, so seating the wrong policy must be an incompatibility, got {other:?}"
+            ),
+        }
     }
 }
 
@@ -288,7 +394,7 @@ fn an_unimplemented_game_is_refused() {
 #[test]
 fn an_unknown_agent_is_refused() {
     for (tested, opponent) in [("nope", PERFECT), (PERFECT, "nope")] {
-        let outcome = ArenaRunner::new().play(
+        let outcome = ArenaRunner::new().play_simple(
             &ArenaMatchSpec::new(
                 GameKind::TicTacToe,
                 tested,
@@ -381,7 +487,7 @@ fn a_durable_recorder_receives_the_match() {
     let recorder = Arc::new(CountingRecorder::default());
     let sink: Arc<dyn TelemetryRecorder> = recorder.clone();
     ArenaRunner::new()
-        .play(
+        .play_simple(
             &ArenaMatchSpec::new(
                 GameKind::TicTacToe,
                 PERFECT,

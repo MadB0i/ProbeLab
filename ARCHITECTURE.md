@@ -1,8 +1,13 @@
 # ProbeLab architecture
 
-*Describes workspace version 0.4.1. Sections are labelled with the milestone that introduced them; the
+*Describes workspace version 0.5.0. Sections are labelled with the milestone that introduced them; the
 highest is **v0.5 (benchmark design)**. The security sections describe v0.4.1 and are unchanged by
 v0.5, which touched no containment, broker, or telemetry internals.*
+
+The version here is not maintained by hand. `scripts/check-version-provenance.py` reads it out of
+`Cargo.toml` and fails if this file, `docs/STATUS.md`, `tauri.conf.json`, or the frontend manifest
+disagree with it, and it fails if this sentence stops naming the same version the build stamps into the
+binary.*
 
 ## Trust boundary
 

@@ -7,7 +7,7 @@ pub mod harness;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,9 +35,28 @@ static NEXT_SANDBOX_ROOT: AtomicU64 = AtomicU64::new(0);
 pub struct RunContext {
     sandbox_root: PathBuf,
     owned_root: bool,
+    /// The cooperative cancel flag, when the caller installed one.
+    ///
+    /// Held rather than polled through a closure so the context stays `Send` and the flag can be
+    /// shared with the UI thread directly, with no adapter and no second source of truth.
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 impl RunContext {
+    /// The cooperative cancel flag, when one was installed.
+    pub fn cancel(&self) -> Option<&Arc<AtomicBool>> {
+        self.cancel.as_ref()
+    }
+
+    /// Installs a cooperative cancel flag.
+    ///
+    /// The flag is read once per turn by the run loop. Setting it stops the run at the next turn
+    /// boundary; it does not abort a turn already in progress.
+    pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
     /// Creates a run context with a fresh private sandbox root under the system temp directory.
     ///
     /// The root is created and canonicalized here, and it is removed when the context is dropped.
@@ -59,6 +78,7 @@ impl RunContext {
         Ok(Self {
             sandbox_root: canonical,
             owned_root: true,
+            cancel: None,
         })
     }
 
@@ -80,6 +100,7 @@ impl RunContext {
         Ok(Self {
             sandbox_root: canonical,
             owned_root: false,
+            cancel: None,
         })
     }
 
@@ -137,6 +158,17 @@ pub enum EngineError {
     TurnBudgetExhausted {
         /// Maximum turns declared by the benchmark summary.
         max_turns: u32,
+    },
+    /// The operator stopped the run.
+    ///
+    /// A distinct error rather than a failure, because the two mean opposite things to everything
+    /// downstream: a benchmark that failed says something about the model or the harness, while a
+    /// cancelled run says only that someone pressed stop. Folding the second into the first would
+    /// make an operator's own action appear in the history as a model failure.
+    #[error("run cancelled after {turns_used} turn(s)")]
+    Cancelled {
+        /// How many turns had completed when the flag was observed.
+        turns_used: u32,
     },
     /// The model request failed trusted cross-field validation.
     #[error("model request validation failed: {0}")]
@@ -297,6 +329,23 @@ impl BenchmarkRunner {
         let mut history_window_state: VecDeque<HistoryEntry> = VecDeque::new();
 
         while episode.status == EpisodeStatus::Running {
+            // Cooperative cancellation, checked at the top of every turn and never inside a model
+            // call. The placement is deliberate on both sides: checking here means the flag is
+            // observed between complete turns, so a cancelled run's telemetry ends on a turn boundary
+            // and the stored episode is a real prefix of a real episode rather than a half-applied
+            // action. Not checking inside the model call means an in-flight provider request is left
+            // to finish, because abandoning it would make the recorded latency a lie and would leave
+            // the provider holding a half-consumed response.
+            if let Some(cancel) = context.cancel() {
+                if cancel.load(Ordering::SeqCst) {
+                    // Reported as its own error so a caller can distinguish "the operator stopped
+                    // this" from "the benchmark failed", which have opposite meanings for the
+                    // lifecycle row this run is about to write.
+                    return Err(EngineError::Cancelled {
+                        turns_used: episode.turns_used,
+                    });
+                }
+            }
             if episode.turns_used >= summary.max_turns {
                 return Err(EngineError::TurnBudgetExhausted {
                     max_turns: summary.max_turns,
@@ -819,6 +868,7 @@ fn invalid_action_failure(
                 .and_then(|metadata| metadata.response_text.clone()),
             usage: call.as_ref().and_then(|metadata| metadata.usage.clone()),
             elapsed_ms: call.as_ref().map(|metadata| metadata.elapsed_ms),
+            http_status: None,
         },
         Some(action),
     )

@@ -3,40 +3,52 @@
  *
  * # What this plays back, and what it does not
  *
- * It steps through `ArenaMatchView.history` — the positions the engine recorded, in order — and shows
- * one of them. It does **not** re-run the match, re-query a model, or recompute a move. There is no
- * engine in the browser and no provider, so playback cannot produce a result the recording did not
- * already contain. That is the same guarantee the Replay panel makes, and it is why the two are
- * built on the same data rather than on two different notions of "replay".
+ * It steps through `ArenaMatchView.history` — the boards the engine recorded, in order — and shows one
+ * of them. It does **not** re-run the match, re-query a model, or recompute a move. There is no engine
+ * in the browser and no provider, so playback cannot produce a result the recording did not already
+ * contain.
  *
- * # Why this is a view concern
+ * That guarantee is worth more now than it was. A match against a real model costs real provider time
+ * and real tokens, so "open the recording" must never mean "pay for the same decisions again". The
+ * frontend holds no way to do it: the only commands in this path are `get_arena_match` and
+ * `replay_arena_match`, both of which read stored data.
  *
- * The recording is immutable and the backend is never consulted while the user moves between frames,
- * which is what makes seeking instant and provably free of side effects. A "replay" that had to ask
- * the backend for each frame would be a second execution path wearing the same name.
+ * # Frames are boards, not cell arrays
  *
- * # Frame 0 is the opening position
+ * An earlier version reduced every frame to a flat cell array and only understood tic-tac-toe, which
+ * made a connect-four recording unplayable. Frames now carry the board itself and are drawn through
+ * `boards.ts`, which is the one place the column-major indexing rule lives.
  *
- * `history[0]` is the board *after* the first ply. The position before any move was made is what a
- * viewer expects to see first, so it is reconstructed as a frame of its own by emptying the cells
- * the first recorded ply filled. A recording with no plies has exactly one frame: the opening.
+ * # The opening position is reconstructed, not invented
+ *
+ * The engine records the board *after* each move, so the position before any move was played has to be
+ * derived. It is derived by clearing the cell the first ply filled — which is only sound because that
+ * ply's move names the cell or column it changed. When it does not, no opening frame is produced and
+ * the viewer starts at the first recorded position rather than showing a board nobody reached.
+ *
+ * For connect four, clearing a drop means clearing the *top* disc of the column, which is where a
+ * dropped disc comes to rest. That is a different rule from tic-tac-toe's, and deriving it from the
+ * game's own gravity rule is what keeps the opening frame correct for both.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { ArenaMatchView, GameCell, PlyView } from "./api";
+import { boardCell, columnHeight, geometryOf } from "./boards";
+import type { ArenaMatchView, GameBoardView, PlyView } from "./api";
 
-/** One stop on the timeline: a position, and the move that produced it when there was one. */
+/** One stop on the timeline: a position, and the ply that produced it when there was one. */
 export type PlaybackFrame = {
   /** Zero-based index into the frame list. */
   index: number;
-  /** The recorded board for this frame. */
-  cells: GameCell[];
+  /** The board as of this frame. */
+  board: GameBoardView;
   /** The ply this frame records, or `null` for the opening position. */
   ply: PlyView | null;
+  /** The turn's own telemetry, when the backend recorded one. */
+  turn: ArenaMatchView["turns"][number] | null;
 };
 
-/** The playback speeds offered. Milliseconds per frame; `null` means "step only". */
+/** The playback speeds offered. Milliseconds per frame. */
 export const PLAYBACK_SPEEDS = [
   { label: "0.5×", delayMs: 1100 },
   { label: "1×", delayMs: 550 },
@@ -50,6 +62,43 @@ function delayFor(label: PlaybackSpeedLabel): number | null {
   return PLAYBACK_SPEEDS.find((speed) => speed.label === label)?.delayMs ?? null;
 }
 
+/** A copy of a board with one cell changed. Returns the original when the board is not drawable. */
+function withCellCleared(board: GameBoardView, column: number, row: number): GameBoardView | null {
+  const geometry = geometryOf(board);
+  if (!geometry) {
+    return null;
+  }
+  if (board.game === "tic_tac_toe") {
+    const cells = [...((board as { state: { cells: string[] } }).state.cells)];
+    cells[row * geometry.columns + column] = "empty";
+    return { game: "tic_tac_toe", state: { cells } } as GameBoardView;
+  }
+  const state = (board as { state: { columns: number; rows: number; cells: string[] } }).state;
+  const cells = [...state.cells];
+  cells[column * state.rows + row] = "empty";
+  return { game: "connect_four", state: { ...state, cells } } as GameBoardView;
+}
+
+/** A board of the right shape with every cell empty. */
+function emptyBoard(game: string): GameBoardView | null {
+  if (game === "tic_tac_toe") {
+    return { game: "tic_tac_toe", state: { cells: new Array(9).fill("empty") } } as GameBoardView;
+  }
+  if (game === "connect_four") {
+    return {
+      game: "connect_four",
+      state: { columns: 7, rows: 6, cells: new Array(42).fill("empty") },
+    } as GameBoardView;
+  }
+  return null;
+}
+
+/** A structural fingerprint of a board, used only to detect that two frames are the same position. */
+function fingerprint(board: GameBoardView): string {
+  const cells = (board as { state?: { cells?: unknown } }).state?.cells;
+  return Array.isArray(cells) ? cells.join(",") : "unreadable";
+}
+
 /**
  * The frames a recording can be stepped through.
  *
@@ -57,98 +106,138 @@ function delayFor(label: PlaybackSpeedLabel): number | null {
  * would be free to disagree with the stepper about how many frames there are.
  *
  * Three kinds of frame, in order: the opening position, one per recorded ply, and the terminal
- * position the match ended on. The last of those is appended only when it differs from the final ply —
- * a recording that captured the terminal board as its own ply does not get a duplicated frame, and a
- * recording that did not still reaches the position the match actually ended on. Without it, a
- * recording whose ply list stops one move short would play through to a position that was never the
- * result of the match.
+ * position the match ended on. The last is appended only when it differs from the final ply, so a
+ * recording that captured the terminal board as its own ply does not get a duplicated frame and a
+ * recording that did not still reaches the position the match actually ended on.
  */
 export function playbackFrames(match: ArenaMatchView | null): PlaybackFrame[] {
   if (!match) {
     return [];
   }
+  const finalBoard = match.finalBoard;
+  if (!geometryOf(finalBoard)) {
+    return [];
+  }
   const recorded = match.history;
-  const finalCells = cellsOf(match.finalBoard);
   if (recorded.length === 0) {
-    // A match that recorded no plies still has exactly one position to show: where it started, or
-    // where it ended if that is the only board there is.
-    const opening = emptyOpening(match) ?? finalCells;
-    return opening ? [{ index: 0, cells: opening, ply: null }] : [];
+    /*
+     * A match that recorded no plies still has one position to show, and the honest one is whatever
+     * board the recording actually holds.
+     *
+     * Falling back to an empty board here would be a small lie in the other direction: a recording
+     * that captured a board — because the match failed on its first ply, or was cancelled — has a
+     * real position, and replacing it with the opening would show a board the engine never reached at
+     * the moment the recording was stored. Only when there is no board at all does an empty one stand
+     * in, and then it is a real state rather than a guess.
+     */
+    return [{ index: 0, board: finalBoard, ply: null, turn: match.turns[0] ?? null }];
   }
   const frames: PlaybackFrame[] = [];
   const opening = emptyOpening(match);
   if (opening) {
-    frames.push({ index: 0, cells: opening, ply: null });
+    frames.push({ index: 0, board: opening, ply: null, turn: null });
   }
-  for (const ply of recorded) {
-    const cells = cellsOf(ply.board);
-    if (!cells) {
+  for (const [offset, ply] of recorded.entries()) {
+    if (!geometryOf(ply.board)) {
       // A frame the panel cannot draw is not stepped through silently: it is skipped, and the frame
       // list stays shorter than `history.length` rather than rendering a blank board.
       continue;
     }
-    frames.push({ index: frames.length, cells, ply });
-  }
-  const lastDrawn = frames[frames.length - 1];
-  if (finalCells && (!lastDrawn || !sameCells(lastDrawn.cells, finalCells))) {
     frames.push({
       index: frames.length,
-      cells: finalCells,
+      board: ply.board,
+      ply,
+      turn: match.turns[offset] ?? null,
+    });
+  }
+  const lastDrawn = frames[frames.length - 1];
+  if (!lastDrawn || fingerprint(lastDrawn.board) !== fingerprint(finalBoard)) {
+    frames.push({
+      index: frames.length,
+      board: finalBoard,
       ply: lastDrawn?.ply ?? null,
+      turn: match.turns[match.turns.length - 1] ?? null,
     });
   }
   return frames.map((frame, index) => ({ ...frame, index }));
 }
 
-function sameCells(left: readonly GameCell[], right: readonly GameCell[]): boolean {
-  return left.length === right.length && left.every((cell, index) => cell === right[index]);
-}
-
-/** The recorded board's cells, or `null` when it is not a board this build can draw. */
-function cellsOf(board: PlyView["board"]): GameCell[] | null {
-  if (!board || board.game !== "tic_tac_toe") {
-    return null;
-  }
-  const cells = (board as { state?: { cells?: unknown } }).state?.cells;
-  return Array.isArray(cells) && cells.length === 9 ? (cells as GameCell[]) : null;
-}
-
 /**
  * The opening position, rebuilt from the first recorded ply.
  *
- * The engine records the board *after* each move, so the position before any move was played has to
- * come from somewhere. It is derived by clearing the cells the first ply filled, which is only sound
- * because that ply's move names the cell it changed. If it does not, no opening frame is produced
- * and the viewer starts at the first recorded position rather than inventing a board.
+ * Tic-tac-toe: clear the cell the move named. Connect four: clear the top disc of the column the move
+ * named, which is where a drop comes to rest — the same rule the engine's gravity applies, read from
+ * `boards.ts` so the two cannot disagree.
  */
-function emptyOpening(match: ArenaMatchView): GameCell[] | null {
+function emptyOpening(match: ArenaMatchView): GameBoardView | null {
   const first = match.history[0];
   if (!first) {
-    return cellsOf(match.finalBoard);
+    return emptyBoard(match.game);
   }
-  const cells = cellsOf(first.board);
-  if (!cells) {
+  if (!geometryOf(first.board)) {
     return null;
   }
   const move = (first.played as { move?: unknown } | null)?.move;
-  if (typeof move !== "number" || move < 0 || move > 8) {
+  if (typeof move !== "number") {
     return null;
   }
-  const opening = [...cells];
-  opening[move] = "empty";
-  return opening;
+  if (match.game === "connect_four") {
+    // The landing row is the one above the column's current stack. The board already holds the drop, so
+    // "the stack" is the height including that disc.
+    const height = columnHeight(first.board, move);
+    if (height === 0) {
+      return null;
+    }
+    return withCellCleared(first.board, move, height - 1);
+  }
+  if (move < 0 || move > 8) {
+    return null;
+  }
+  const geometry = geometryOf(first.board);
+  if (!geometry) {
+    return null;
+  }
+  const column = move % geometry.columns;
+  const row = Math.floor(move / geometry.columns);
+  return withCellCleared(first.board, column, row);
+}
+
+/** The cell a move played into, or `null` when the move names no cell this board can draw. */
+export function movedCell(
+  board: GameBoardView | null,
+  played: PlyView["played"],
+): { column: number; row: number } | null {
+  const move = (played as { move?: unknown } | null)?.move;
+  if (typeof move !== "number") {
+    return null;
+  }
+  const geometry = geometryOf(board);
+  if (!geometry) {
+    return null;
+  }
+  if (board?.game === "connect_four") {
+    const row = columnHeight(board, move) - 1;
+    return row >= 0 ? { column: move, row } : null;
+  }
+  if (move < 0 || move >= geometry.cells) {
+    return null;
+  }
+  return { column: move % geometry.columns, row: Math.floor(move / geometry.columns) };
+}
+
+/** The last cell played on a board, read from the frame's own move rather than by diffing. */
+export function lastMoveCell(
+  board: GameBoardView | null,
+  played: PlyView["played"],
+): { column: number; row: number } | null {
+  return movedCell(board, played);
 }
 
 export type PlaybackState = {
-  /** The frames available to step through. */
   frames: PlaybackFrame[];
-  /** Which frame is showing. */
   position: number;
-  /** The frame showing, or `null` when there are none. */
   current: PlaybackFrame | null;
-  /** Whether playback is advancing on its own. */
   playing: boolean;
-  /** The chosen speed. */
   speed: PlaybackSpeedLabel;
   /** Whether the shown match was produced by the configuration currently in the selectors. */
   stale: boolean;
@@ -208,8 +297,7 @@ export function usePlayback(
    *
    * Leaving the position at, say, frame 6 of a previous match and applying it to a nine-frame one
    * would show the new match's opening as though it were a late position, and leaving the timer
-   * running would keep advancing a frame index that no longer exists. This is the cleanup the panel
-   * depends on, and it is why the effect watches the recording rather than only the position.
+   * running would keep advancing a frame index that no longer exists.
    */
   useEffect(() => {
     clearTimer();
@@ -229,11 +317,10 @@ export function usePlayback(
       return;
     }
     const delay = delayFor(speed);
-    if (delay === null) {
-      return;
-    }
-    if (clamped >= lastIndex) {
-      setPlaying(false);
+    if (delay === null || clamped >= lastIndex) {
+      if (clamped >= lastIndex) {
+        setPlaying(false);
+      }
       return;
     }
     timer.current = setTimeout(() => {
@@ -318,4 +405,20 @@ export function usePlayback(
     atStart: clamped <= 0,
     atEnd: clamped >= lastIndex && frames.length > 0,
   };
+}
+
+/** Whether a frame's board shows a cell, used by the panel's own emptiness checks. */
+export function frameHasDiscs(board: GameBoardView | null): boolean {
+  const geometry = geometryOf(board);
+  if (!geometry) {
+    return false;
+  }
+  for (let row = 0; row < geometry.rows; row += 1) {
+    for (let column = 0; column < geometry.columns; column += 1) {
+      if (boardCell(board, column, row) !== "empty") {
+        return true;
+      }
+    }
+  }
+  return false;
 }

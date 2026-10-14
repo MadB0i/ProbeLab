@@ -46,6 +46,11 @@ probelab-telemetry = { path = "../../../crates/telemetry" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tauri = { version = "2", features = [] }
+# Single-instance protection. Two instances share one SQLite database in one app-data
+# directory, and the second would reconcile the first's in-flight runs as interrupted
+# while they were still executing. A half-recorded match that looks complete is the
+# worst outcome this tool could produce, so the second instance refuses to start.
+tauri-plugin-single-instance = "2.5.3"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

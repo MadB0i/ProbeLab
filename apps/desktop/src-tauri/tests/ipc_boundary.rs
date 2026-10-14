@@ -32,9 +32,9 @@
 //! only one of them is about safety.
 
 use probelab_desktop_lib::{
-    ArenaCommandError, ArenaMatchRequest, BrainCommandError, ComparisonRequest, ExperimentRequest,
-    ModelRunConfig, SecurityCommandError, SecuritySweepRequest, SettingsCommandError,
-    SettingsRequest,
+    ArenaCommandError, ArenaMatchRequest, ArenaSeatRequest, BrainCommandError, ComparisonRequest,
+    ExperimentRequest, ModelRunConfig, SecurityCommandError, SecuritySweepRequest,
+    SettingsCommandError, SettingsRequest,
 };
 use probelab_lab::{ComparisonOutcome, LabSettings, SettingsError, SqliteSettingsStore};
 
@@ -663,16 +663,62 @@ fn every_field_of_every_input_request_survives_decoding() {
             .expect("a planner-chosen seed is well-formed");
     assert_eq!(planner_chosen.root_seed, None);
 
+    // Both seats are tagged: a policy seat and a model seat are different capabilities with
+    // different failure modes, and the tag is what lets the backend refuse one and accept the other.
     let arena: ArenaMatchRequest = decode(
-        r#"{"game":"tic_tac_toe","testedAgent":"perfect_tictactoe","opponentAgent":"first_legal_tictactoe",
+        r#"{"game":"tic_tac_toe",
+             "testedAgent":{"kind":"policy","id":"perfect_tictactoe"},
+             "opponentAgent":{"kind":"policy","id":"first_legal_tictactoe"},
              "testedSide":"second","seed":7}"#,
     )
     .expect("a canonical arena request");
     assert_eq!(arena.game, "tic_tac_toe");
-    assert_eq!(arena.tested_agent, "perfect_tictactoe");
-    assert_eq!(arena.opponent_agent, "first_legal_tictactoe");
+    assert_eq!(
+        arena.tested_agent,
+        ArenaSeatRequest::Policy {
+            id: "perfect_tictactoe".to_owned()
+        }
+    );
+    assert_eq!(
+        arena.opponent_agent,
+        ArenaSeatRequest::Policy {
+            id: "first_legal_tictactoe".to_owned()
+        }
+    );
     assert_eq!(arena.tested_side, "second");
     assert_eq!(arena.seed, 7);
+
+    // A model seat carries the provider configuration and nothing secret. `deny_unknown_fields` on
+    // the inner config is what stops an `apiKey` from being smuggled in here; the decoder refuses the
+    // whole payload rather than ignoring the field.
+    let modelled: ArenaMatchRequest = decode(
+        r#"{"game":"connect_four",
+             "testedAgent":{"kind":"model","label":"qwen2.5:3b","config":{
+                "kind":"openai_compatible","schema_version":1,
+                "base_url":"http://127.0.0.1:11434/v1","api_key_env":"OPENAI_COMPATIBLE_API_KEY",
+                "model":"qwen2.5:3b","timeout_seconds":120,"temperature":0.0,"max_tokens":64}},
+             "opponentAgent":{"kind":"policy","id":"depth_bounded_connect_four"},
+             "testedSide":"first","seed":11}"#,
+    )
+    .expect("a model-versus-policy arena request");
+    let ArenaSeatRequest::Model { label, config } = &modelled.tested_agent else {
+        panic!("a model seat must decode as a model seat");
+    };
+    assert_eq!(label, "qwen2.5:3b");
+    assert_eq!(config.openai_config().model, "qwen2.5:3b");
+    let smuggled: Result<ArenaMatchRequest, _> = decode(
+        r#"{"game":"connect_four",
+             "testedAgent":{"kind":"model","label":"m","config":{
+                "kind":"openai_compatible","schema_version":1,
+                "base_url":"http://127.0.0.1:11434/v1","api_key_env":"K","api_key":"sk-leaked",
+                "model":"m","timeout_seconds":1,"temperature":0.0,"max_tokens":1}},
+             "opponentAgent":{"kind":"policy","id":"depth_bounded_connect_four"},
+             "testedSide":"first","seed":11}"#,
+    );
+    assert!(
+        smuggled.is_err(),
+        "a request carrying a literal API key must be refused, not silently ignored"
+    );
 
     let sweep: SecuritySweepRequest =
         decode(r#"{"benchmarkId":"grid-world","seed":9,"episodes":2}"#).expect("a canonical sweep");

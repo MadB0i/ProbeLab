@@ -1,7 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AppShell } from "./AppShell";
+import { PanelBoundary } from "./ErrorBoundary";
 import { BrandLockup } from "./Brand";
 import { ComparisonPanel } from "./ComparisonPanel";
 import { SettingsPanel } from "./SettingsPanel";
@@ -21,7 +21,9 @@ import {
   type OpenAiCompatibleModelRunConfig,
 } from "./api";
 import { BrainPanel } from "./BrainPanel";
-import { ArenaPanel } from "./ArenaPanel";
+import { GridWorldStage, type GridVerdict } from "./GridWorldStage";
+import { agreementLabel, protocolAndLegality } from "./capabilityRates";
+import { ArenaPanel, seatLabel } from "./ArenaPanel";
 import { ExperimentHistory } from "./ExperimentHistory";
 import { SecurityPanel } from "./SecurityPanel";
 import { ReplayPanel } from "./ReplayPanel";
@@ -32,6 +34,7 @@ import {
   cancelExperiment,
   exportExperiment,
   getExperiment,
+  getRunTelemetry,
   listExecutors,
   listStoredExperiments,
   listLocalModels,
@@ -52,275 +55,87 @@ import {
   listArenaMatches,
   getArenaMatch,
   playArenaMatch,
+  cancelArenaMatch,
+  runArenaBatch,
+  cancelArenaBatch,
+  // Aliased on import because the local `refreshArenaStatistics` callback shadows the bare command
+  // name, and a shadowed import that silently resolves to the callback is exactly the bug this alias
+  // prevents. Two names for two things.
+  arenaStatistics as arenaStatisticsCommand,
+  ARENA_MATCH_EVENT,
+  ARENA_TURN_EVENT,
+  ARENA_BATCH_EVENT,
   type ArenaAgentSummary,
+  type ArenaBatchProgress,
   type ArenaGameSummary,
   type ArenaMatchSummary,
   type ArenaMatchView,
+  type ArenaSeatRequest,
+  type ArenaStatistics,
+  type ArenaTurnEnvelope,
 } from "./api";
+// The single-run command surface. These used to be raw `invoke` calls with their payload shapes
+// declared here, which meant six command names existed outside the module the feature-matrix checker
+// reads. They are wrappers now, and the wire types live beside them.
+import {
+getProviderStatus,
+  getResult,
+  getRunMetadata,
+  listBenchmarks,
+  runBenchmark as startBenchmarkRun,
+  subscribeTelemetry,
+  RUN_CANCELLED_EVENT,
+  RUN_COMPLETE_EVENT,
+  RUN_ERROR_EVENT,
+  RUN_TELEMETRY_EVENT,
+  type Action,
+  type ActionKind,
+  type BenchmarkSummary,
+  type ModelCallFailureKind,
+  type ProtocolAdherence,
+  type ProviderConnectionStatus,
+  type ProviderStatus,
+  type ReproducibilityMetadata,
+  type RequestedCapability,
+  type RunCancelledEnvelope,
+  type RunCompleteEnvelope,
+  type RunErrorEnvelope,
+  type RunMetadata,
+  type TelemetryEnvelope,
+  type TelemetryEvent,
+  type TestResult,
+  type TileKind,
+  type TokenUsage,
+  type VisibleTile,
+} from "./api";
+import type { CompletionStatus } from "./api";
 
-type BenchmarkSummary = {
-  benchmark_id: string;
-  benchmark_version: string;
-  title: string;
-  description: string;
-  capability_dimension: string;
-  seed: number;
-  max_turns: number;
-  metadata: Record<string, string>;
-};
-
-type Coordinate = {
-  x: number;
-  y: number;
-};
-
-type GridSize = {
-  width: number;
-  height: number;
-};
-
-type TileKind = "safe" | "obstacle" | "danger" | "reward";
-type Action = "UP" | "DOWN" | "LEFT" | "RIGHT" | "WAIT";
-type ActionKind = "moved" | "waited" | "invalid";
-type IntegrityEventKind =
-  | "unauthorized_access_attempt"
-  | "policy_violation"
-  | "sandbox_violation"
-  | "environment_tampering"
-  | "network_violation"
-  | "broker_unauthorized_read"
-  | "broker_unauthorized_write"
-  | "broker_process_spawn_blocked"
-  | "broker_network_attempt"
-  | "broker_environment_inspect_denied";
-type RequestedCapability =
-  | { kind: "evaluator_access"; target?: null }
-  | { kind: "tool_use"; target: string }
-  | { kind: "sandbox_escape"; target?: null }
-  | { kind: "environment_mutation"; target: string }
-  | { kind: "network_access"; target: string };
-
-type CapabilityPermission =
-  | "filesystem.read"
-  | "filesystem.write"
-  | "process.spawn"
-  | "network.connect"
-  | "environment.inspect";
-
-type BrokerDenial = {
-  permission: CapabilityPermission;
-  integrity_event: IntegrityEventKind;
-  reason: string;
-};
-
-type VisibleTile = {
-  coordinate: Coordinate;
-  tile: TileKind;
-};
-
-type Observation = {
-  turn: number;
-  position: Coordinate;
-  grid_size: GridSize;
-  current_tile: TileKind;
-  visible_neighbors: VisibleTile[];
-  max_turns: number;
-  remaining_turns: number;
-  available_actions: Action[];
-};
-
-type ActionOutcome = {
-  action: Action | null;
-  kind: ActionKind;
-  position: Coordinate;
-  reward: number;
-  observation: Observation | null;
-};
-
-type TokenUsage = {
-  prompt_tokens: number | null;
-  completion_tokens: number | null;
-  total_tokens: number | null;
-};
-
-type ModelCallInfo = {
-  provider: string;
-  model: string;
-  prompt_template_version: string;
-  request_id: string | null;
-  finish_reason: string | null;
-  usage: TokenUsage | null;
-  timeout_seconds: number | null;
-  elapsed_ms: number;
-  response_text: string | null;
-};
-
-type ModelCallFailureKind =
-  | "configuration"
-  | "timeout"
-  | "malformed_response"
-  | "empty_response"
-  | "http_error"
-  | "provider_error"
-  | "invalid_action"
-  | "transport_disconnect";
-
-type ModelCallFailure = {
-  kind: ModelCallFailureKind;
-  message: string;
-  response_text: string | null;
-  usage: TokenUsage | null;
-  elapsed_ms: number | null;
-};
-
-type TelemetryEvent = {
-  run_id: string;
-  episode_id: string;
-  sequence: number;
-  recorded_at_unix_ms: number;
-  turn: number;
-  observation: Observation;
-  selected_action: Action | null;
-  requested_capability: RequestedCapability | null;
-  action_outcome: ActionOutcome | null;
-  reward: number;
-  invalid_action: boolean;
-  timeout: boolean;
-  resource_info: {
-    turns_used: number;
-    rejected_actions: number;
-    timed_out: boolean;
-  } | null;
-  integrity_event: IntegrityEventKind | null;
-  broker_denial?: BrokerDenial | null;
-  model_call?: ModelCallInfo | null;
-  model_failure?: ModelCallFailure | null;
-};
-
-type ProtocolAdherence = {
-  total_model_calls: number;
-  valid_responses: number;
-  parse_failures: number;
-  invalid_actions: number;
-  timeouts: number;
-  provider_failures: number;
-  http_failures: number;
-  transport_failures: number;
-  configuration_failures: number;
-  valid_response_rate_basis_points: number;
-};
-
-type CompletionStatus = "success" | "failure" | "turn_limit" | "model_protocol_failure";
-
-type ReproducibilityMetadata = {
-  provider: string;
-  model: string;
-  prompt_template_version: string;
-  configuration_fingerprint: string;
-  environment_version: string;
-  token_usage: TokenUsage;
-  protocol_failure_threshold: number;
-};
-
-type TestResult = {
-  schema_version: number;
-  benchmark_id: string;
-  benchmark_version: string;
-  model: {
-    adapter: string;
-    strategy: string;
-    seed: number;
-    parameters: Record<string, unknown>;
-  };
-  seed: number;
-  capability: {
-    dimension: string;
-    task_success: boolean;
-    total_reward: number;
-    turns_used: number;
-    invalid_action_count: number;
-    completion_status: CompletionStatus;
-    protocol_adherence?: ProtocolAdherence;
-  };
-  integrity: {
-    unauthorized_access: number;
-    policy_violations: number;
-    sandbox_violations: number;
-    environment_tampering: number;
-    network_access_attempts: number;
-    broker_unauthorized_reads: number;
-    broker_unauthorized_writes: number;
-    broker_process_spawn_blocks: number;
-    broker_network_attempts: number;
-    broker_environment_inspect_denials: number;
-  };
-  telemetry_event_count: number;
-  replay_digest: string;
-  reproducibility?: ReproducibilityMetadata;
-};
-
-type ActionTraceEntry = {
-  turn: number;
-  selected_action: Action | null;
-  requested_capability: RequestedCapability | null;
-  model_response_text: string | null;
-  parsed_action: Action | null;
-  action_result_kind: ActionKind | null;
-  reward: number;
-  model_failure_kind: ModelCallFailureKind | null;
-};
-
-type RunMetadata = {
-  schema_version: number;
-  benchmark_id: string;
-  benchmark_version: string;
-  provider: string;
-  model: string;
-  prompt_template_version: string;
-  configuration_fingerprint: string;
-  environment_version: string;
-  started_at_unix_ms: number;
-  ended_at_unix_ms: number;
-  action_trace: ActionTraceEntry[];
-  token_usage: TokenUsage;
-  protocol_failure_threshold: number;
-};
-
-type TelemetryEnvelope = {
-  run_id: string;
-  event: TelemetryEvent;
-};
-
-type RunCompleteEnvelope = {
-  run_id: string;
-  result: TestResult;
-};
-
-type RunErrorEnvelope = {
-  run_id: string;
-  error: string;
-};
-
-type ProviderConnectionStatus = "connected" | "not_configured";
-
-type ProviderStatus = {
-  schema_version: number;
-  provider: string;
-  model: string;
-  prompt_template_version: string;
-  credential_source: string;
-  configured: boolean;
-  status: ProviderConnectionStatus;
-  message: string;
-};
-
-/** IPC contract version shared with the Rust ModelRunConfig definition. */
+/** IPC contract version shared with the Rust ModelRunConfig definition. */
 const MODEL_RUN_CONFIG_SCHEMA_VERSION = 1;
 
 /** The mock variant of the tagged payload, narrowed for the memo below. */
 type MockModelRunConfig = Extract<ModelRunConfig, { kind: "mock" }>;
 
-type RunState = "idle" | "starting" | "running" | "finalizing" | "complete" | "error";
+type RunState = "idle" | "starting" | "running" | "finalizing" | "complete" | "cancelled" | "error";
+
+/**
+ * The tone class for each run state.
+ *
+ * A mapping rather than an interpolated `` `is-${runState}` ``, for two reasons. The stylesheet has
+ * always been written with an `is-` prefix while the chip rendered the bare state name, so **no state
+ * tint has ever applied to it** — every state looked identical, and only a screenshot catches that. And
+ * two states do not share a name with their class: `complete` is `.is-completed` and `error` is
+ * `.is-failed`, because the second is about a run that broke and the first is not.
+ */
+const runStateTone: Record<RunState, string> = {
+  idle: "is-idle",
+  starting: "is-starting",
+  running: "is-running",
+  finalizing: "is-finalizing",
+  complete: "is-completed",
+  cancelled: "is-cancelled",
+  error: "is-failed",
+};
 type Strategy =
   | "optimal"
   | "random"
@@ -340,14 +155,6 @@ type StrategyOption = {
   /** What the agent's number measures, straight from the registry's category. */
   categoryLabel: string;
   measuresAModel: boolean;
-};
-
-type GridCell = {
-  x: number;
-  y: number;
-  known: boolean;
-  tile: TileKind | null;
-  agent: boolean;
 };
 
 /**
@@ -454,22 +261,6 @@ const formatError = (error: unknown): string => {
 const formatAction = (action: Action | null): string =>
   action ? action.toLowerCase() : "no action";
 
-const formatTile = (tile: TileKind | null): string => {
-  if (tile === "reward") {
-    return "R";
-  }
-  if (tile === "danger") {
-    return "!";
-  }
-  if (tile === "obstacle") {
-    return "X";
-  }
-  if (tile === "safe") {
-    return "·";
-  }
-  return "?";
-};
-
 const formatStatus = (status: string): string => status.replaceAll("_", " ");
 
 const formatFingerprint = (fingerprint: string): string =>
@@ -530,47 +321,6 @@ const mergeTelemetry = (
   const events = new Map<number, TelemetryEvent>();
   [...current, ...incoming].forEach((event) => events.set(event.sequence, event));
   return [...events.values()].sort((left, right) => left.sequence - right.sequence);
-};
-
-const buildGrid = (events: TelemetryEvent[]): GridCell[] => {
-  const observations = new Map<string, { tile: TileKind; position: boolean }>();
-  const latestEvent = events.at(-1) ?? null;
-  const latestPosition = latestEvent?.action_outcome?.position ?? latestEvent?.observation.position ?? null;
-  const gridSize = latestEvent?.observation.grid_size ?? { width: 5, height: 5 };
-
-  events.forEach((event) => {
-    const currentKey = `${event.observation.position.x},${event.observation.position.y}`;
-    observations.set(currentKey, {
-      tile: event.observation.current_tile,
-      position: false,
-    });
-    event.observation.visible_neighbors.forEach((neighbor) => {
-      const key = `${neighbor.coordinate.x},${neighbor.coordinate.y}`;
-      observations.set(key, { tile: neighbor.tile, position: false });
-    });
-  });
-
-  if (latestPosition) {
-    const key = `${latestPosition.x},${latestPosition.y}`;
-    const previous = observations.get(key);
-    observations.set(key, {
-      tile: previous?.tile ?? latestEvent?.observation.current_tile ?? "safe",
-      position: true,
-    });
-  }
-
-  return Array.from({ length: gridSize.height }, (_, y) =>
-    Array.from({ length: gridSize.width }, (_, x) => {
-      const observation = observations.get(`${x},${y}`);
-      return {
-        x,
-        y,
-        known: observation !== undefined,
-        tile: observation?.tile ?? null,
-        agent: observation?.position ?? false,
-      };
-    }),
-  ).flat();
 };
 
 /**
@@ -676,9 +426,23 @@ const App = () => {
   const [arenaMatch, setArenaMatch] = useState<ArenaMatchView | null>(null);
   const [arenaError, setArenaError] = useState<string | null>(null);
   const [arenaPlaying, setArenaPlaying] = useState(false);
-  const [arenaGame, setArenaGame] = useState("tic_tac_toe");
-  const [arenaTested, setArenaTested] = useState("");
-  const [arenaOpponent, setArenaOpponent] = useState("");
+  const [arenaGame, setArenaGame] = useState("connect_four");
+  /*
+   * Seats, not identifiers.
+   *
+   * A seat is either a shipped policy or a real model, and the two fail differently: a bad policy id
+   * is a typo the backend refuses immediately, while an unreachable provider only surfaces when the
+   * engine asks it a question. Keeping them as one tagged value means the panel cannot send a string
+   * that means different things on the two paths.
+   */
+  const [arenaTestedSeat, setArenaTestedSeat] = useState<ArenaSeatRequest>({
+    kind: "policy",
+    id: "depth_bounded_connect_four",
+  });
+  const [arenaOpponentSeat, setArenaOpponentSeat] = useState<ArenaSeatRequest>({
+    kind: "policy",
+    id: "first_legal_connect_four",
+  });
   const [arenaSide, setArenaSide] = useState<"first" | "second">("first");
   const [arenaSeed, setArenaSeed] = useState(7);
   /**
@@ -690,6 +454,40 @@ const App = () => {
    */
   const [arenaSummaries, setArenaSummaries] = useState<ArenaMatchSummary[]>([]);
   const [arenaOpeningId, setArenaOpeningId] = useState<string | null>(null);
+  /**
+   * The identifier of the match currently executing, for the stop button.
+   *
+   * The backend assigns it, so the frontend learns it from the first turn event rather than choosing
+   * one. That is what makes "stop" address the match actually running: a synthesised identifier would
+   * name nothing and the backend would correctly report that nothing with that name is running.
+   */
+  const [arenaMatchId, setArenaMatchId] = useState<string | null>(null);
+  const arenaMatchIdRef = useRef<string | null>(null);
+  arenaMatchIdRef.current = arenaMatchId;
+  /**
+   * Batch evaluation.
+   *
+   * The statistics are held as a value read from the archive rather than as anything accumulated in
+   * the frontend. There is deliberately no accumulator here: if the panel counted matches as they
+   * arrived it would report totals the database does not hold, and the two would disagree the moment a
+   * write failed or the app was closed mid-batch.
+   *
+   * `null` means "not read yet", which the panel renders as its own state rather than as zeros.
+   */
+  const [arenaStatistics, setArenaStatistics] = useState<ArenaStatistics | null>(null);
+  const [arenaBatchRunning, setArenaBatchRunning] = useState(false);
+  const [arenaBatchProgress, setArenaBatchProgress] = useState<ArenaBatchProgress | null>(null);
+  /**
+   * The running batch's identifier.
+   *
+   * Learned from the first progress event, for the same reason a match's identifier is: the frontend
+   * does not choose it, and a synthesised one would stop nothing while reporting that it had.
+   */
+  const [arenaBatchId, setArenaBatchId] = useState<string | null>(null);
+  const arenaBatchIdRef = useRef<string | null>(null);
+  arenaBatchIdRef.current = arenaBatchId;
+  const [arenaBatchMatches, setArenaBatchMatches] = useState(10);
+  const [arenaBatchAlternate, setArenaBatchAlternate] = useState(true);
   // The Security Lab. A sweep runs the registered probes through the real enforcement path.
   const [securityProbes, setSecurityProbes] = useState<SecurityProbeListing[]>([]);
   const [securityReport, setSecurityReport] = useState<SecurityLabReport | null>(null);
@@ -700,6 +498,21 @@ const App = () => {
   const [replay, setReplay] = useState<Replay | null>(null);
   const [replayError, setReplayError] = useState<string | null>(null);
   const [replayLoading, setReplayLoading] = useState(false);
+
+  /**
+   * A grid recording read back out of the local store, and which run it belongs to.
+   *
+   * `null` means the stage is showing the live feed, which is the default and the only state in which it
+   * can show anything a run has not yet committed. A recording is loaded on demand — from the stage's own
+   * control, or by opening a stored run — and it is never merged with the live events: two runs' events
+   * interleaved on one board would draw a path between two different episodes.
+   */
+  const [gridRecording, setGridRecording] = useState<{
+    runId: string;
+    events: TelemetryEvent[];
+  } | null>(null);
+  const [gridRecordingLoading, setGridRecordingLoading] = useState(false);
+  const [gridRecordingError, setGridRecordingError] = useState<string | null>(null);
 
 
   const [benchmarksError, setBenchmarksError] = useState<string | null>(null);
@@ -717,6 +530,15 @@ const App = () => {
   const [providerStatusError, setProviderStatusError] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [runState, setRunState] = useState<RunState>("idle");
+  /**
+   * How far a stopped run actually got, as the engine reported it.
+   *
+   * Kept separate from the turn count on screen so the two can be compared rather than one standing in
+   * for the other: if the engine said six turns and the stream carries five, one of them is wrong and
+   * saying so beats picking whichever looks better.
+   */
+  const [cancelledTurns, setCancelledTurns] = useState<number | null>(null);
+  const [stopRequested, setStopRequested] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [telemetry, setTelemetry] = useState<TelemetryEvent[]>([]);
   const [result, setResult] = useState<TestResult | null>(null);
@@ -728,6 +550,17 @@ const App = () => {
   const pendingCompleteRef = useRef<Record<string, RunCompleteEnvelope[]>>({});
   const pendingErrorRef = useRef<Record<string, RunErrorEnvelope[]>>({});
   const providerStatusRequestRef = useRef(0);
+
+  /**
+   * Locally installed models, for the seat pickers.
+   *
+   * Read through the same executor discovery the command center uses, so a name in the picker is a
+   * model that actually exists on this machine. A free-text field would let an operator type a name
+   * that has not been pulled and find out at ply one, which is exactly the kind of surprise this
+   * panel's credibility depends on not producing.
+   */
+  const arenaLocalModels = localModels["ollama-local"] ?? [];
+  const arenaModelConfig = { baseUrl: `${baseUrl || "http://127.0.0.1:11434"}/v1`, apiKeyEnv, timeoutSeconds };
 
   /*
    * Which benchmark is selected, and the one the rest of the app reads.
@@ -753,7 +586,6 @@ const App = () => {
     (selectedBenchmarkId === null ? (benchmarks[0] ?? null) : null);
 
   const latestEvent = telemetry.at(-1) ?? null;
-  const gridSize = latestEvent?.observation.grid_size ?? { width: 5, height: 5 };
 
   /**
    * The picker options, derived from the registry rather than declared here.
@@ -803,8 +635,28 @@ const App = () => {
    */
   const progressIsTurnFraction = latestEvent !== null && maxTurns !== null && maxTurns > 0;
 
-  const grid = useMemo(() => buildGrid(telemetry), [telemetry]);
   const isRunning = runState === "starting" || runState === "running" || runState === "finalizing";
+
+  /*
+    The evaluator's verdict, handed to the stage rather than computed there.
+
+    Two rules, and both matter. It comes from the stored `TestResult` — the independent evaluator's answer,
+    not anything derived from a position — and it is only attached to the run it actually describes: a
+    recording loaded from the archive for an older run must not be captioned with the result of the run
+    that happened to finish most recently. With no matching result the stage prints no verdict at all,
+    which is the honest state for a cancelled or interrupted run.
+  */
+  const gridVerdict: GridVerdict | null = useMemo(() => {
+    const describedRunId = gridRecording?.runId ?? runId;
+    if (!result || !describedRunId) {
+      return null;
+    }
+    return {
+      status: result.capability.completion_status,
+      turnsUsed: result.capability.turns_used,
+      totalReward: result.capability.total_reward,
+    };
+  }, [result, gridRecording, runId]);
   const systemStatus = benchmarksError || listenerError
     ? "DEGRADED"
     : benchmarksLoading || !listenersReady
@@ -856,6 +708,21 @@ const App = () => {
   const fingerprint =
     runMetadata?.configuration_fingerprint ?? result?.reproducibility?.configuration_fingerprint ?? "";
   const protocol = result?.capability.protocol_adherence ?? emptyProtocolAdherence;
+
+  /*
+   * Protocol compliance and action legality, as two rates from one record.
+   *
+   * The arithmetic and the wording live in `capabilityRates.ts` so both are tested against the shapes a
+   * real run produces — including the measured one where a model answered every turn in perfect
+   * protocol and had most of its moves refused — rather than being asserted in prose here.
+   */
+  const rates = useMemo(
+    () =>
+      result
+        ? protocolAndLegality(result.capability, protocol)
+        : null,
+    [result, protocol],
+  );
   const latestModelText =
     latestEvent?.model_call?.response_text ?? latestEvent?.model_failure?.response_text ?? null;
   const latestModelFailure = latestEvent?.model_failure ?? null;
@@ -893,9 +760,7 @@ const App = () => {
   const refreshProviderStatus = useCallback(
     async (config: ModelRunConfig, requestId: number) => {
       try {
-        const status = await invoke<ProviderStatus>("get_provider_status", {
-          model_config: config,
-        });
+        const status = await getProviderStatus(config);
         if (providerStatusRequestRef.current === requestId) {
           setProviderStatus(status);
           setProviderStatusError(null);
@@ -922,7 +787,7 @@ const App = () => {
   const readStoredResult = async (id: string) => {
     let stored: TestResult;
     try {
-      stored = await invoke<TestResult>("get_result", { run_id: id });
+      stored = await getResult(id);
     } catch (error) {
       if (currentRunIdRef.current === id) {
         setRunError(`Stored result could not be read: ${formatError(error)}`);
@@ -939,7 +804,7 @@ const App = () => {
     // A finished run is a stored experiment; refresh the list so it appears immediately.
     void refreshHistory();
     try {
-      const metadata = await invoke<RunMetadata>("get_run_metadata", { run_id: id });
+      const metadata = await getRunMetadata(id);
       if (currentRunIdRef.current === id) {
         setRunMetadata(metadata);
       }
@@ -952,7 +817,7 @@ const App = () => {
 
   useEffect(() => {
     let active = true;
-    invoke<BenchmarkSummary[]>("list_benchmarks")
+    listBenchmarks()
       .then((summaries) => {
         if (active) {
           setBenchmarks(summaries);
@@ -1192,6 +1057,37 @@ const App = () => {
     void refreshHistory();
   }, [refreshHistory]);
 
+  /**
+   * Reads one run's recording back out of the append-only store.
+   *
+   * This is what makes a grid episode watchable a second time, and after a restart in particular: the
+   * live feed only ever holds what has arrived in this session. The read is a pure read — no execution, no
+   * provider, no re-query of a model — so the episode shown is the episode that was run rather than a
+   * second, different one.
+   *
+   * A run that recorded nothing resolves to an empty event list rather than an error, and that is rendered
+   * as its own state rather than as an error the user has to interpret.
+   */
+  const loadGridRecording = useCallback(async (experimentId: string) => {
+    setGridRecordingLoading(true);
+    setGridRecordingError(null);
+    try {
+      const events = await getRunTelemetry(experimentId);
+      setGridRecording({ runId: experimentId, events });
+      if (events.length === 0) {
+        setGridRecordingError("That run recorded no telemetry, so there is nothing to replay.");
+      }
+    } catch (error) {
+      setGridRecordingError(`The recording could not be read: ${formatError(error)}`);
+    } finally {
+      setGridRecordingLoading(false);
+    }
+  }, []);
+
+  const clearGridRecording = useCallback(() => {
+    setGridRecording(null);
+    setGridRecordingError(null);
+  }, []);
   const loadHistory = useCallback(async (experimentId: string) => {
     try {
       setBrain(await getExperiment(experimentId));
@@ -1199,7 +1095,20 @@ const App = () => {
     } catch (error) {
       setBrainError(`That experiment could not be loaded: ${formatError(error)}`);
     }
-  }, []);
+    /*
+      Opening a stored run also opens its trajectory.
+
+      They are the same claim about the same run, and the history table is how a returning user reaches
+      one. Without this the only way to see a past episode was to have been watching it live, which meant
+      the record was on disk and unreachable — and a run from a previous session could not be seen at
+      all, because the live buffer only ever holds what arrived in this one.
+
+      A run that recorded no telemetry resolves to an empty list, which the stage renders as its own
+      state. That is the honest outcome for a run that never started, and it is not treated as an error.
+    */
+    void loadGridRecording(experimentId);
+  }, [loadGridRecording]);
+
   /**
    * Loads a deterministic replay of the current arena match.
    *
@@ -1301,15 +1210,28 @@ const App = () => {
         setArenaMatch(latest);
         setArenaSummaries(summaries);
         setArenaError(null);
-        // Default both seats to a real policy rather than leaving the select empty, but only when the
-        // current selection is not itself playable.
-        setArenaTested((current) =>
-          agents.some((agent) => agent.id === current) ? current : (agents[0]?.id ?? ""),
-        );
-        setArenaOpponent((current) =>
-          agents.some((agent) => agent.id === current)
+        /*
+         * Default both seats to a real policy, but only when the current selection is not itself
+         * playable in this game. A seat that names a tic-tac-toe policy does not silently survive a
+         * switch to connect four: it would be refused, and a picker that shows a refused value looks
+         * broken. A *model* seat is left alone, because a model can play either game the backend
+         * supports and re-picking it here would silently discard an operator's choice.
+         */
+        const playable = (seat: ArenaSeatRequest): boolean =>
+          seat.kind === "policy" && agents.some((agent) => agent.id === seat.id);
+        setArenaTestedSeat((current) =>
+          playable(current)
             ? current
-            : (agents.find((agent) => agent.canBeOpponent)?.id ?? agents[0]?.id ?? ""),
+            : { kind: "policy", id: agents[0]?.id ?? "" },
+        );
+        setArenaOpponentSeat((current) =>
+          playable(current)
+            ? current
+            : {
+                kind: "policy",
+                id:
+                  agents.find((agent) => agent.canBeOpponent)?.id ?? agents[0]?.id ?? "",
+              },
         );
       })
       .catch((error) => {
@@ -1336,15 +1258,17 @@ const App = () => {
   const playArena = useCallback(async () => {
     setArenaPlaying(true);
     setArenaError(null);
+    setArenaMatchId(null);
     try {
       const result = await playArenaMatch({
         game: arenaGame,
-        testedAgent: arenaTested,
-        opponentAgent: arenaOpponent,
+        testedAgent: arenaTestedSeat,
+        opponentAgent: arenaOpponentSeat,
         testedSide: arenaSide,
         seed: arenaSeed,
       });
       setArenaMatch(result);
+      setArenaMatchId(result.matchId);
       try {
         setArenaSummaries(await listArenaMatches());
       } catch {
@@ -1354,8 +1278,121 @@ const App = () => {
       setArenaError(`The match could not be played: ${formatError(error)}`);
     } finally {
       setArenaPlaying(false);
+      setArenaMatchId(null);
     }
-  }, [arenaGame, arenaTested, arenaOpponent, arenaSide, arenaSeed]);
+  }, [arenaGame, arenaTestedSeat, arenaOpponentSeat, arenaSide, arenaSeed]);
+
+  /**
+   * Asks a running match to stop.
+   *
+   * Sends the identifier the backend assigned, which is why it is tracked from the turn events rather
+   * than assumed: the frontend does not choose a match's identifier, and guessing one would stop
+   * nothing while reporting that it had. A `false` reply means the match had already finished, which
+   * is not an error — the user pressed stop on a match that was on its way out.
+   */
+  const cancelArena = useCallback(async () => {
+    const matchId = arenaMatchIdRef.current;
+    if (!matchId) {
+      return;
+    }
+    try {
+      await cancelArenaMatch(matchId);
+    } catch (error) {
+      setArenaError(`The match could not be stopped: ${formatError(error)}`);
+    }
+  }, []);
+
+  /**
+   * Re-reads the archive-wide statistics.
+   *
+   * Called after a match and after a batch, never accumulated locally. A failure is left to render as
+   * "nothing recorded yet" rather than as a zero row, because an empty history and a broken read are
+   * different situations and the panel should not claim the first when it is the second.
+   */
+  const refreshArenaStatistics = useCallback(async () => {
+    try {
+      setArenaStatistics(await arenaStatisticsCommand());
+    } catch {
+      setArenaStatistics(null);
+    }
+  }, []);
+
+  /*
+   * Statistics are read when the arena loads, not only after a batch.
+   *
+   * They were originally fetched in the batch handlers alone, which meant the panel sat on "nothing
+   * recorded yet" for the whole of a session that already had matches in the archive -- including
+   * matches played before the last restart, which is exactly the case the durable archive exists for.
+   * A statistics panel that only knows about matches played since the window opened is a session
+   * summary, not a history.
+   */
+  useEffect(() => {
+    void refreshArenaStatistics();
+  }, [refreshArenaStatistics]);
+
+  /**
+   * Plays a batch of matches.
+   *
+   * The per-match turn events keep flowing during a batch, so the board follows along rather than
+   * freezing for the length of the run. The batch's own report carries statistics for its own matches
+   * only; the archive-wide view is re-read afterwards so the panel and the database agree.
+   */
+  const runArenaBatchCommand = useCallback(async () => {
+    setArenaBatchRunning(true);
+    setArenaBatchProgress(null);
+    setArenaBatchId(null);
+    setArenaError(null);
+    try {
+      const report = await runArenaBatch({
+        game: arenaGame,
+        testedAgent: arenaTestedSeat,
+        opponentAgent: arenaOpponentSeat,
+        matches: arenaBatchMatches,
+        seed: arenaSeed,
+        alternateSides: arenaBatchAlternate,
+      });
+      // The batch's own numbers are shown immediately; the archive-wide ones follow from a re-read.
+      setArenaStatistics(report.statistics);
+    } catch (error) {
+      setArenaError(`The batch could not be played: ${formatError(error)}`);
+    } finally {
+      try {
+        setArenaSummaries(await listArenaMatches());
+      } catch {
+        // The archive is a convenience; the batch itself already reported what it played.
+      }
+      await refreshArenaStatistics();
+      setArenaBatchRunning(false);
+      setArenaBatchId(null);
+      setArenaBatchProgress(null);
+    }
+  }, [
+    arenaGame,
+    arenaTestedSeat,
+    arenaOpponentSeat,
+    arenaBatchMatches,
+    arenaSeed,
+    arenaBatchAlternate,
+    refreshArenaStatistics,
+  ]);
+
+  /**
+   * Asks a running batch to stop.
+   *
+   * A `false` reply means the batch had already finished, which is not an error — the button was
+   * pressed on a batch that was on its way out.
+   */
+  const cancelArenaBatchCommand = useCallback(async () => {
+    const batchId = arenaBatchIdRef.current;
+    if (!batchId) {
+      return;
+    }
+    try {
+      await cancelArenaBatch(batchId);
+    } catch (error) {
+      setArenaError(`The batch could not be stopped: ${formatError(error)}`);
+    }
+  }, []);
 
   /**
    * Reopens a stored match into the viewer.
@@ -1375,22 +1412,6 @@ const App = () => {
       setArenaOpeningId(null);
     }
   }, []);
-
-  /**
-   * Whether the displayed match came from a different configuration than the selectors now describe.
-   *
-   * The seed is deliberately excluded. Tic-tac-toe ignores it — its opening does not depend on it — and
-   * the panel says so; treating a seed difference as staleness would flag every match as stale on a
-   * screen where the seed is not exposed anyway.
-   */
-  const arenaStale = useMemo(
-    () =>
-      arenaMatch !== null &&
-      (arenaMatch.testedAgent !== arenaTested ||
-        arenaMatch.opponentAgent !== arenaOpponent ||
-        arenaMatch.testedSide !== arenaSide),
-    [arenaMatch, arenaTested, arenaOpponent, arenaSide],
-  );
 
   /**
    * Returns the panel to setup.
@@ -1490,6 +1511,7 @@ const App = () => {
     let unlistenTelemetry: (() => void) | undefined;
     let unlistenComplete: (() => void) | undefined;
     let unlistenError: (() => void) | undefined;
+    let unlistenCancelled: (() => void) | undefined;
 
     const telemetryListener = listen<TelemetryEnvelope>("probe-lab/telemetry", ({ payload }) => {
       const pending = pendingTelemetryRef.current[payload.run_id] ?? [];
@@ -1519,18 +1541,38 @@ const App = () => {
         setRunState("error");
       }
     });
+    /*
+      A stop, on its own channel.
 
-    Promise.all([telemetryListener, completeListener, errorListener])
-      .then(([stopTelemetry, stopComplete, stopError]) => {
+      It used to arrive as a run-error whose message was the English string "the run was cancelled",
+      so the panel could only tell a stop from a fault by matching on prose — and it displayed a stop as
+      an error, next to a red state chip, for a run that behaved correctly. The backend now sends this
+      instead, carrying the turn count it actually reached.
+    */
+    const cancelledListener = listen<RunCancelledEnvelope>("probe-lab/run-cancelled", ({ payload }) => {
+      if (currentRunIdRef.current === payload.run_id) {
+        setRunState("cancelled");
+        setRunError(null);
+        setCancelledTurns(payload.turns_used);
+        // The turns that were committed are already in `telemetry` and already on disk, so the stage can
+        // still draw and still replay them. Only the verdict is absent, because the evaluator never ran.
+        void refreshHistory();
+      }
+    });
+
+    Promise.all([telemetryListener, completeListener, errorListener, cancelledListener])
+      .then(([stopTelemetry, stopComplete, stopError, stopCancelled]) => {
         if (disposed) {
           stopTelemetry();
           stopComplete();
           stopError();
+          stopCancelled();
           return;
         }
         unlistenTelemetry = stopTelemetry;
         unlistenComplete = stopComplete;
         unlistenError = stopError;
+        unlistenCancelled = stopCancelled;
         setListenersReady(true);
       })
       .catch((error) => {
@@ -1544,6 +1586,91 @@ const App = () => {
       unlistenTelemetry?.();
       unlistenComplete?.();
       unlistenError?.();
+      unlistenCancelled?.();
+    };
+  }, []);
+
+  /**
+   * Live arena turns.
+   *
+   * A match against a real model makes one provider call per turn, so a 42-ply game can run for
+   * minutes. Without these events the panel would show a spinner for the whole time and the operator
+   * could not tell a slow model from a hung one.
+   *
+   * Two facts are learned here rather than guessed. The **match identifier** comes from the first
+   * event, because the backend assigns it and the frontend must not synthesise one — the stop button
+   * addresses the match the engine is actually running. And the **board** comes from the engine's
+   * own post-move position, never from a local model of the rules; a live board that disagreed with the
+   * engine's own `winner` would be worse than no board at all.
+   */
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const arenaTurnListener = listen<ArenaTurnEnvelope>(ARENA_TURN_EVENT, ({ payload }) => {
+      setArenaMatchId(payload.matchId);
+      // A live turn is progress, not an outcome. The board is shown through the same recorder the
+      // finished match uses, so what streams in and what is replayed afterwards are the same values.
+      setArenaMatch((current) => {
+        if (!current || current.matchId !== payload.matchId) {
+          return current;
+        }
+        const turn = payload.turn;
+        return {
+          ...current,
+          turns: [...current.turns.filter((entry) => entry.ply !== turn.ply), turn].sort(
+            (left, right) => left.ply - right.ply,
+          ),
+          history: [
+            ...current.history,
+            { ply: turn.ply, side: turn.side, board: turn.requestBoard, played: null },
+          ],
+          plies: turn.ply,
+        };
+      });
+    });
+    const arenaMatchListener = listen<ArenaMatchView>(ARENA_MATCH_EVENT, (event) => {
+      setArenaMatch(event.payload);
+      setArenaMatchId(null);
+    });
+
+    /**
+     * Batch progress.
+     *
+     * Progress is a report, not a count to add: every event carries the running total, so the panel
+     * never accumulates its own and cannot drift from what the backend actually played. The batch
+     * identifier is taken from the first event for the same reason a match's is — the frontend does not
+     * choose it, and the stop button has to address the batch that is genuinely running.
+     */
+    const arenaBatchListener = listen<ArenaBatchProgress>(ARENA_BATCH_EVENT, ({ payload }) => {
+      setArenaBatchId(payload.batchId);
+      setArenaBatchProgress(payload);
+    });
+
+    Promise.all([arenaTurnListener, arenaMatchListener, arenaBatchListener])
+      .then(([stopTurns, stopMatch, stopBatch]) => {
+        if (disposed) {
+          stopTurns();
+          stopMatch();
+          stopBatch();
+          return;
+        }
+        unlisten = () => {
+          stopTurns();
+          stopMatch();
+          stopBatch();
+        };
+      })
+      .catch((error) => {
+        if (!disposed) {
+          // Reported rather than swallowed: a live match with no event stream would look like a hang,
+          // which is exactly the failure this listener exists to prevent.
+          setArenaError(`Arena live updates unavailable: ${formatError(error)}`);
+        }
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 
@@ -1553,19 +1680,18 @@ const App = () => {
     }
     setRunState("starting");
     setRunError(null);
+    setCancelledTurns(null);
+    setStopRequested(false);
     setResult(null);
     setRunMetadata(null);
     setTelemetry([]);
     currentRunIdRef.current = null;
     try {
-      const id = await invoke<string>("run_benchmark", {
-        benchmark_id: benchmark.benchmark_id,
-        model_config: modelConfig,
-      });
+      const id = await startBenchmarkRun(benchmark.benchmark_id, modelConfig);
       currentRunIdRef.current = id;
       setRunId(id);
       setRunState("running");
-      const replay = await invoke<TelemetryEvent[]>("subscribe_telemetry", { run_id: id });
+      const replay = await subscribeTelemetry(id);
       const buffered = pendingTelemetryRef.current[id] ?? [];
       setTelemetry(mergeTelemetry(replay, buffered.map((envelope) => envelope.event)));
       delete pendingTelemetryRef.current[id];
@@ -1591,6 +1717,38 @@ const App = () => {
 
   const runBenchmark = () => startRun(mockModelConfig);
   const runConnected = () => startRun(connectedModelConfig);
+
+  /**
+   * Asks the engine to stop the running benchmark.
+   *
+   * Cooperative, and reported honestly: the backend answers `true` when a run with that identifier was
+   * actually signalled and `false` when nothing with that name is running, so the control cannot claim a
+   * stop that never happened. The run in flight finishes its current turn first — a contained child
+   * needs to terminate before the run moves on — so the button says "stopping" rather than pretending
+   * the run has already ended.
+   *
+   * It addresses the run by the identifier the backend assigned, learned from the run itself. A
+   * synthesised name would stop nothing while reporting that it had.
+   */
+  const stopRun = async () => {
+    const id = currentRunIdRef.current;
+    if (!id || !isRunning) {
+      return;
+    }
+    setStopRequested(true);
+    try {
+      const signalled = await cancelExperiment(id);
+      if (!signalled) {
+        // The run finished between the click and the command. That is a legitimate race and not a
+        // failure, so it says so rather than reporting a stop that did not happen.
+        setStopRequested(false);
+        setRunError("That run had already finished; nothing was stopped.");
+      }
+    } catch (error) {
+      setStopRequested(false);
+      setRunError(`The run could not be stopped: ${formatError(error)}`);
+    }
+  };
 
   /*
    * The four states the header can actually be in, each with a tone. `stable` and `syncing` share a
@@ -1716,31 +1874,64 @@ canExport={brain?.experiment !== null && brain?.experiment !== undefined}
           games={arenaGames}
           agents={arenaAgents}
           match={arenaMatch}
-          matchSummaries={arenaSummaries}
+          summaries={arenaSummaries}
           openingId={arenaOpeningId}
           error={arenaError}
           playing={arenaPlaying}
-          stale={arenaStale}
-          selectedGame={arenaGame}
-          selectedTested={arenaTested}
-          selectedOpponent={arenaOpponent}
-          selectedSide={arenaSide}
+          game={arenaGame}
+          testedSeat={arenaTestedSeat}
+          opponentSeat={arenaOpponentSeat}
+          testedSide={arenaSide}
+          seed={arenaSeed}
+          localModels={arenaLocalModels}
+          modelConfig={arenaModelConfig}
           onPlay={() => void playArena()}
-          onReset={clearArenaMatch}
-          onOpenMatch={(matchId) => void openArenaMatch(matchId)}
+          onCancel={() => void cancelArena()}
           /*
            * A selector change deliberately does *not* clear the match.
            *
            * It used to, and that was the worst bug in the panel: changing a seat after a match
            * silently destroyed the recording and its identifier, which also made the replay unreachable
-           * even though the backend still held both. The board now stays on screen, marked stale, and
-           * the user decides when to replace it.
+           * even though the backend still held both. The board stays on screen, marked stale, and the
+           * user decides when to replace it.
            */
           onGameChange={setArenaGame}
-          onTestedChange={setArenaTested}
-          onOpponentChange={setArenaOpponent}
+          onTestedSeatChange={setArenaTestedSeat}
+          onOpponentSeatChange={setArenaOpponentSeat}
           onSideChange={setArenaSide}
-          canPlay={arenaTested !== "" && arenaOpponent !== "" && arenaGames.length > 0}
+          onSeedChange={setArenaSeed}
+          onOpen={(matchId: string) => void openArenaMatch(matchId)}
+          canPlay={
+            arenaTestedSeat.kind === "policy" &&
+            arenaOpponentSeat.kind === "policy" &&
+            arenaGames.length > 0
+          }
+          batch={{
+            statistics: arenaStatistics,
+            running: arenaBatchRunning,
+            progress: arenaBatchProgress
+              ? {
+                  completed: arenaBatchProgress.completed,
+                  requested: arenaBatchProgress.requested,
+                  outcome: arenaBatchProgress.outcome,
+                }
+              : null,
+            requestedMatches: arenaBatchMatches,
+            alternateSides: arenaBatchAlternate,
+            /*
+             * A seat cannot play itself. The backend refuses this too, but a button that is enabled
+             * for an action the backend will reject is a control that lies about what is about to
+             * happen, so the check is made where the decision is offered.
+             */
+            canRun:
+              !arenaBatchRunning &&
+              arenaGames.length > 0 &&
+              seatLabel(arenaTestedSeat) !== seatLabel(arenaOpponentSeat),
+            onRunBatch: () => void runArenaBatchCommand(),
+            onCancelBatch: () => void cancelArenaBatchCommand(),
+            onAlternateSidesChange: setArenaBatchAlternate,
+            onMatchesChange: setArenaBatchMatches,
+          }}
         />
     </>
   );
@@ -2090,7 +2281,7 @@ canExport={brain?.experiment !== null && brain?.experiment !== undefined}
                 <p className="eyebrow">Execution</p>
                 <h2>Launch probe</h2>
               </div>
-              <span className={`run-state ${runState}`}>{formatStatus(runState)}</span>
+              <span className={`run-state ${runStateTone[runState]}`}>{formatStatus(runState)}</span>
             </div>
             {/*
               The hardcoded "01" ordinal is removed. There is one action here and it is not the first
@@ -2101,34 +2292,82 @@ canExport={brain?.experiment !== null && brain?.experiment !== undefined}
             <p className="action-copy">
               Execute the selected model against the real embedded catalog definition.
             </p>
-            <button
-              className="run-button"
-              type="button"
-              onClick={() => void runBenchmark()}
-              disabled={!benchmark || !listenersReady || isRunning}
-            >
-              <span>{isRunning ? "RUN IN PROGRESS" : "RUN WITH MOCK"}</span>
-              <span className="button-arrow" aria-hidden="true">→</span>
-            </button>
-            <button
-              className="run-button run-button-secondary"
-              type="button"
-              onClick={() => void runConnected()}
-              disabled={!benchmark || !listenersReady || isRunning || !isConnected}
-            >
-              <span>RUN WITH CONNECTED MODEL</span>
-              <span className="button-arrow" aria-hidden="true">→</span>
-            </button>
+            {/*
+              Both launch paths side by side rather than stacked. Measured: stacked, the control deck was
+              310px tall and pushed the navigation trace to 748px in a 900px window, which is a panel whose
+              subject is entirely below the fold. A row costs 68px and keeps both actions equally
+              reachable, which is what the two are — alternatives, not a sequence.
+            */}
+            <div className="action-buttons">
+              <button
+                className="run-button"
+                type="button"
+                onClick={() => void runBenchmark()}
+                disabled={!benchmark || !listenersReady || isRunning}
+              >
+                <span>{isRunning ? "RUNNING" : "RUN WITH MOCK"}</span>
+                <span className="button-arrow" aria-hidden="true">→</span>
+              </button>
+              {/*
+                Stop, replacing the secondary launch path while a run is in flight.
+
+                It replaces rather than joins, because a control that says "stop this" sitting next to a
+                control that says "start another" is two answers to one question. It is also the only way
+                to reach the cancel handle the backend registers for a benchmark run: without it, a run
+                could not be stopped from the product at all.
+              */}
+              {isRunning ? (
+                <button
+                  className="run-button run-button-stop"
+                  type="button"
+                  onClick={() => void stopRun()}
+                  disabled={stopRequested}
+                >
+                  <span>{stopRequested ? "STOPPING…" : "STOP RUN"}</span>
+                  <span className="button-arrow" aria-hidden="true">■</span>
+                </button>
+              ) : (
+                <button
+                  className="run-button run-button-secondary"
+                  type="button"
+                  onClick={() => void runConnected()}
+                  disabled={!benchmark || !listenersReady || !isConnected}
+                >
+                  <span>RUN WITH MODEL</span>
+                  <span className="button-arrow" aria-hidden="true">→</span>
+                </button>
+              )}
+            </div>
             {!isConnected && (
               <p className="field-description run-hint">
-                Set the API key in the configured environment variable, then the connected
-                button enables. It stays visible so the missing step is explicit.
+                The connected run needs its API key in the configured environment variable. The button
+                stays visible so the missing step is explicit.
               </p>
             )}
             <div className="run-id-line">
               <span>RUN ID</span>
               <code>{runId ?? "AWAITING REQUEST"}</code>
             </div>
+            {/*
+              A stopped run, stated as its own outcome.
+
+              It is not an error, so it is not printed in the error slot: a reader scanning for red would
+              find a run that did exactly what was asked of it. And it carries the two numbers that
+              differ — what the engine reached and what the stream holds — because those are the pair
+              that would disagree if the recording were ever truncated at the stop.
+            */}
+            {runState === "cancelled" ? (
+              <p className="run-stopped" role="status">
+                <span className="run-stopped-label">STOPPED BY OPERATOR</span>
+                <span className="run-stopped-facts">
+                  engine reached turn {cancelledTurns ?? "—"} · {telemetry.length} event
+                  {telemetry.length === 1 ? "" : "s"} committed
+                  {cancelledTurns !== null && cancelledTurns !== telemetry.length
+                    ? " · these disagree, and that is worth reporting"
+                    : ""}
+                </span>
+              </p>
+            ) : null}
           </div>
   );
 
@@ -2147,7 +2386,7 @@ canExport={brain?.experiment !== null && brain?.experiment !== undefined}
           <p className="eyebrow">Inspector</p>
           <h2>Run state</h2>
         </div>
-        <span className={`run-state ${runState}`}>{formatStatus(runState)}</span>
+        <span className={`run-state ${runStateTone[runState]}`}>{formatStatus(runState)}</span>
       </div>
 
       <div className="inspector-body">
@@ -2230,13 +2469,7 @@ canExport={brain?.experiment !== null && brain?.experiment !== undefined}
     </section>
   );
 
-  const viewworkspaceGrid = (
-        <section className="workspace-grid">
-            {/*
-              `is-running` gates the sweep animation. It is on the card rather than the track so the
-              whole panel carries the state, and so the animation cannot run against a bar that is
-              sitting at zero between runs.
-            */}
+  const viewprogressCard = (
             <div
               className={
                 isRunning
@@ -2244,6 +2477,11 @@ canExport={brain?.experiment !== null && brain?.experiment !== undefined}
                   : "panel canvas-dark progress-card"
               }
             >
+            {/*
+              `is-running` gates the sweep animation. It is on the card rather than the track so the
+              whole panel carries the state, and so the animation cannot run against a bar that is
+              sitting at zero between runs.
+            */}
             <div className="panel-heading">
               <div>
                 <p className="eyebrow">LIVE RUN</p>
@@ -2293,6 +2531,34 @@ canExport={brain?.experiment !== null && brain?.experiment !== undefined}
               <span>{latestEvent ? `${latestEvent.reward >= 0 ? "+" : ""}${latestEvent.reward} REWARD` : "NO REWARD YET"}</span>
             </div>
             </div>
+  );
+
+  /*
+    The navigation stage.
+
+    It replaces a static five-by-five tile map that showed the union of everything the run had ever
+    sensed, with nothing that moved and nothing that said which turn it was looking at. What replaced it
+    is driven by the committed events themselves — one frame per recorded turn — so the marker travels the
+    route the run took, terrain appears at the turn that revealed it, and the whole thing can be stepped
+    through afterwards from the durable store.
+
+    It is deliberately the *only* consumer of the telemetry list for display purposes, and it is given the
+    live events or a recording's events, never both.
+  */
+  const viewgridStage = (
+    <GridWorldStage
+      events={gridRecording ? gridRecording.events : telemetry}
+      mode={gridRecording ? "recorded" : "live"}
+      running={isRunning}
+      verdict={gridVerdict}
+      sourceLabel={gridRecording?.runId ?? null}
+      recordingId={gridRecording ? null : runId}
+      loading={gridRecordingLoading}
+      error={gridRecordingError}
+      onLoadRecording={loadGridRecording}
+      onClearRecording={clearGridRecording}
+    />
+  );
 
           {/*
             The execution canvas is the one deliberately dark surface in the product.
@@ -2302,43 +2568,7 @@ canExport={brain?.experiment !== null && brain?.experiment !== undefined}
             across a desk: on a light workspace a navy panel is unmistakable, and if every panel were
             navy that signal would carry nothing.
           */}
-          <div className="panel canvas-dark visualization-card">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">LOCAL PERCEPTION</p>
-                <h2>Agent / world view</h2>
-              </div>
-              <span className="grid-label">{gridSize.width} × {gridSize.height} / OBSERVED ONLY</span>
-            </div>
-            <div
-              className="world-grid"
-              role="group"
-              aria-label={`${gridSize.width} by ${gridSize.height} grid showing only observed agent and adjacent tiles`}
-              style={{ gridTemplateColumns: `repeat(${gridSize.width}, minmax(42px, 1fr))` }}
-            >
-              {grid.map((cell) => (
-                <div
-                  role="img"
-                  className={`world-cell ${cell.known ? `known ${cell.tile}` : "unknown"} ${cell.agent ? "agent" : ""}`}
-                  key={`${cell.x}-${cell.y}`}
-                  aria-label={`${cell.x}, ${cell.y}: ${cell.known ? cell.tile : "unknown"}${cell.agent ? ", agent" : ""}`}
-                >
-                  <span>{cell.agent ? "A" : formatTile(cell.tile)}</span>
-                  <small>{cell.x},{cell.y}</small>
-                </div>
-              ))}
-            </div>
-            <div className="legend">
-              <span><i className="legend-swatch safe" />SAFE</span>
-              <span><i className="legend-swatch reward" />REWARD</span>
-              <span><i className="legend-swatch danger" />DANGER</span>
-              <span><i className="legend-swatch obstacle" />OBSTACLE</span>
-              <span><i className="legend-swatch unknown" />UNKNOWN</span>
-            </div>
-          </div>
-        </section>
-  );
-  const viewlowerGrid = (
+          const viewlowerGrid = (
         <section className="lower-grid">
           <div className="panel telemetry-card">
             <div className="panel-heading">
@@ -2484,16 +2714,58 @@ canExport={brain?.experiment !== null && brain?.experiment !== undefined}
                   </div>
                 )}
                 <div className="metric-grid">
-                  <div><span>VALID RESPONSES</span><strong>{formatCount(protocol.valid_responses)}</strong></div>
+                  <div>
+                    <span>WELL-FORMED RESPONSES</span>
+                    <strong>{formatCount(protocol.valid_responses)}</strong>
+                  </div>
                   <div><span>MODEL CALLS</span><strong>{formatCount(protocol.total_model_calls)}</strong></div>
                   <div>
-                    <span>PROTOCOL RATE</span>
+                    <span>PROTOCOL OK</span>
                     <strong>{(protocol.valid_response_rate_basis_points / 100).toFixed(1)}%</strong>
                   </div>
                   <div>
                     <span>TOKENS</span>
                     <strong>{formatCount(durableTokenUsage?.total_tokens ?? null)}</strong>
                   </div>
+                </div>
+                {/*
+                  Protocol compliance and action legality, said apart.
+
+                  A model can answer every turn in perfect protocol and still walk into a wall most of
+                  the episode: `100% protocol` means every reply parsed as a well-formed `MOVE_*`, and
+                  says nothing about whether the move was legal. Displayed as one block of percentages
+                  the two read as one verdict, and the 100% is the number a reader takes away.
+
+                  So they are named for what they measure, both are given in the same units — moves out
+                  of calls — and the sentence below states both in plain words. Nothing here changes an
+                  evaluation: these are two counts the run already recorded, divided by each other and
+                  by the number of calls.
+                */}
+                <div className="legality-note">
+                  {rates ? (
+                    <>
+                      <div className="legality-row">
+                        <span className="legality-key">PROTOCOL</span>
+                        <span className="legality-bar" aria-hidden="true">
+                          <span style={{ width: `${rates.protocolPercent}%` }} />
+                        </span>
+                        <span className="legality-value">{rates.protocolPercent.toFixed(1)}%</span>
+                      </div>
+                      {rates.legalityPercent !== null ? (
+                        <div className="legality-row">
+                          <span className="legality-key">LEGAL MOVES</span>
+                          <span className="legality-bar legality-bar--legality" aria-hidden="true">
+                            <span style={{ width: `${rates.legalityPercent}%` }} />
+                          </span>
+                          <span className="legality-value">{rates.legalityPercent.toFixed(1)}%</span>
+                        </div>
+                      ) : null}
+                      <p className="legality-copy">{rates.summary}</p>
+                      {agreementLabel(rates) ? (
+                        <p className="legality-callout">{agreementLabel(rates)}</p>
+                      ) : null}
+                    </>
+                  ) : null}
                 </div>
                  <div className="result-details">
                    <span>PROVIDER / {runMetadata?.provider ?? result.reproducibility?.provider ?? "—"}</span>
@@ -2571,15 +2843,18 @@ return (
         routes={{
           readiness: (
             <div className="route-stack">
-              <ReadinessPanel
-                executors={executors}
-                error={executorsError}
-                loading={executorsLoading}
-                onRefresh={() => void refreshExecutors()}
-              />
+              <PanelBoundary label="Readiness" onRecover={() => void refreshExecutors()} recoverLabel="RETRY DISCOVERY">
+                <ReadinessPanel
+                  executors={executors}
+                  error={executorsError}
+                  loading={executorsLoading}
+                  onRefresh={() => void refreshExecutors()}
+                />
+              </PanelBoundary>
             </div>
           ),
           lab: (
+            <PanelBoundary label="Command Center">
             <div className="lab-console">
               {/*
                 The workstation: three columns and a dock.
@@ -2600,8 +2875,18 @@ return (
                 {viewhistoryPanel}
               </div>
               <div className="lab-stage">
+                {/*
+                  Order is load-bearing and was measured, not chosen.
+
+                  With the progress hero between the launch controls and the board, the board's top edge
+                  sat at y=748 in a 900px window — the subject of the panel was entirely below the fold,
+                  and the only thing visible of it was the heading. Putting the trace directly under the
+                  controls puts the board at roughly y=250 and the progress hero, which duplicates most of
+                  what the stage's readout already says, below it where a scroll reaches it.
+                */}
                 {viewactionCard}
-                {viewworkspaceGrid}
+                {viewgridStage}
+                {viewprogressCard}
               </div>
               <aside className="lab-inspector" aria-label="Run inspector">
                 {viewmodelCard}
@@ -2610,6 +2895,7 @@ return (
               <div className="lab-dock">{viewbrainPanel}</div>
               <div className="lab-dock">{viewlowerGrid}</div>
             </div>
+            </PanelBoundary>
           ),
           agents: (
             <div className="route-stack">
@@ -2620,7 +2906,9 @@ return (
                 countLabel="AGENTS"
                 error={registryError}
               >
+                <PanelBoundary label="Agents">
                 <AgentCatalog agents={registryAgents} />
+              </PanelBoundary>
               </RegistryPanel>
             </div>
           ),
@@ -2646,17 +2934,23 @@ return (
           ),
           tasks: (
             <div className="route-stack">
-              <TasksPanel />
+              <PanelBoundary label="Task Benchmarks">
+                <TasksPanel />
+              </PanelBoundary>
             </div>
           ),
           comparison: (
             <div className="route-stack">
-              <ComparisonPanel />
+              <PanelBoundary label="Comparison">
+                <ComparisonPanel />
+              </PanelBoundary>
             </div>
           ),
           settings: (
             <div className="route-stack">
-              <SettingsPanel />
+              <PanelBoundary label="Settings">
+                <SettingsPanel />
+              </PanelBoundary>
             </div>
           ),
           providers: (
@@ -2666,9 +2960,23 @@ return (
               </section>
             </div>
           ),
-          arena: <div className="route-stack">{viewarenaPanel}</div>,
-          security: <div className="route-stack">{viewsecurityPanel}</div>,
-          replay: <div className="route-stack">{viewreplayPanel}</div>,
+          arena: (
+            <div className="route-stack">
+              <PanelBoundary label="Arena" onRecover={() => void playArena()} recoverLabel="RESTART MATCH">
+                {viewarenaPanel}
+              </PanelBoundary>
+            </div>
+          ),
+          security: (
+            <div className="route-stack">
+              <PanelBoundary label="Security Lab">{viewsecurityPanel}</PanelBoundary>
+            </div>
+          ),
+          replay: (
+            <div className="route-stack">
+              <PanelBoundary label="Replay">{viewreplayPanel}</PanelBoundary>
+            </div>
+          ),
         }}
       />
     </div>

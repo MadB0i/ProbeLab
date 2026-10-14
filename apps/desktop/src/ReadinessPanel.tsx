@@ -104,29 +104,12 @@ export function ReadinessPanel({
   loading: boolean;
   onRefresh: () => void;
 }) {
-  const [reports, setReports] = useState<Record<string, PreflightReport>>({});
+const [reports, setReports] = useState<Record<string, PreflightReport>>({});
   const [checking, setChecking] = useState<string | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [guest, setGuest] = useState<GuestIsolation | null>(null);
   const [guestChecking, setGuestChecking] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
-
-  if (error) {
-    return (
-      <section className="panel readiness-panel" aria-labelledby="readiness-heading">
-        <div className="panel-heading">
-          <h2 id="readiness-heading">READINESS</h2>
-          <span className="tone-error">DISCOVERY FAILED</span>
-        </div>
-        <p className="brain-error" role="alert">
-          {error}
-        </p>
-        <button type="button" className="button-quiet" onClick={onRefresh} disabled={loading}>
-          RETRY DISCOVERY
-        </button>
-      </section>
-    );
-  }
 
   const groups = groupByMode(executors);
   const ready = executors.filter((executor) => executor.availability.state === "available").length;
@@ -138,6 +121,13 @@ export function ReadinessPanel({
     * Chosen by how many cards carry the same remedy, so a single missing credential is surfaced once
     * with its real reach rather than nine times in nine cards. An environment-variable remedy names
     * the variable so it can be copied rather than transcribed.
+    *
+    * This is a hook, so it runs unconditionally. It used to sit *after* an early return for the
+    * discovery-error case, which meant the hook count changed the moment `error` cleared — and React
+    * throws "Rendered more hooks than during the previous render" rather than reconciling. That turned
+    * a recoverable discovery failure into a permanently broken panel: retrying successfully, the one
+    * thing the retry button exists to do, crashed the view. Every hook in this component is now above
+    * every early return, and the panel's own test pins that ordering.
     */
   const nextStep = useMemo(() => {
     const byRemedy = new Map<
@@ -145,8 +135,8 @@ export function ReadinessPanel({
       { remedy: string; envVar: string | null; count: number }
     >();
     for (const executor of executors) {
-      // `remedy` only exists on the unavailable variant; narrowing rather than reading it off the
-      // union keeps this from silently treating `null` on an available executor as a blocker.
+      // `remedy` only exists on the unavailable variant; narrowing rather than reading it off
+      // the union keeps this from silently treating `null` on an available executor as a blocker.
       const availability = executor.availability;
       if (availability.state !== "unavailable") {
         continue;
@@ -186,6 +176,23 @@ export function ReadinessPanel({
       setCopied(null);
     }
   };
+
+  if (error) {
+    return (
+      <section className="panel readiness-panel" aria-labelledby="readiness-heading">
+        <div className="panel-heading">
+          <h2 id="readiness-heading">READINESS</h2>
+          <span className="tone-error">DISCOVERY FAILED</span>
+        </div>
+        <p className="brain-error" role="alert">
+          {error}
+        </p>
+        <button type="button" className="button-quiet" onClick={onRefresh} disabled={loading}>
+          RETRY DISCOVERY
+        </button>
+      </section>
+    );
+  }
 
   const runPreflight = async (id: string) => {
     setChecking(id);
