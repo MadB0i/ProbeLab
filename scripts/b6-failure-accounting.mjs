@@ -97,18 +97,18 @@ async function waitForProvider() {
 /**
  * A private application-data directory per run.
  *
- * The real binary keeps its archive under the user profile, so a script that used it would write into
- * the developer's own history and would not start from a known state. Redirecting the data directory
- * is what makes the run reproducible without touching anything already on the machine.
+ * `app.path().app_data_dir()` resolves through the Windows known-folder APIs and ignores `APPDATA`, so
+ * an earlier version of this script that "redirected" storage that way silently opened the developer's
+ * real archive and wrote matches into it. The binary here is built with the `test-harness` feature,
+ * which refuses to start unless `PROBELAB_TEST_DATA_DIR` names an absolute directory that is not the
+ * platform's — there is no fallback, so this script cannot reach real user data even if it is wrong.
  */
 function launch(appDir) {
   return spawn(exe, [], {
     env: {
       ...process.env,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${debugPort}`,
-      APPDATA: appDir,
-      LOCALAPPDATA: appDir,
-      PROBELAB_DATA_DIR: join(appDir, "probelab"),
+PROBELAB_TEST_DATA_DIR: appDir,
     },
     stdio: "ignore",
   });
@@ -182,7 +182,7 @@ const modelConfig = {
 };
 
 const seat = { kind: "model", label: "controlled-model", config: modelConfig };
-const opponent = { kind: "policy", id: "perfect_tictactoe" };
+const opponent = { kind: "policy", id: "depth_bounded_connect_four" };
 
 /*
  * Runs a batch, with a hard bound on how long it may take.
@@ -207,7 +207,7 @@ const runBatch = (ui, matches, seed, timeoutMs = 60_000) => {
         ok: true,
         report: await invoke("run_arena_batch", {
           request: {
-            game: "tic_tac_toe",
+            game: "connect_four",
             testedAgent: ${JSON.stringify(seat)},
             opponentAgent: ${JSON.stringify(opponent)},
             matches: ${matches},
@@ -274,7 +274,7 @@ await wait(2500);
 const summaries = [];
 const populationAfter = async (label) => {
   const statistics = await readStatistics(ui);
-  const group = statistics.groups.find((g) => g.game === "tic_tac_toe");
+  const group = statistics.groups.find((g) => g.game === "connect_four");
   return { statistics, group };
 };
 

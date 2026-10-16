@@ -142,7 +142,33 @@ pub async fn run_arena_batch(
     state: State<'_, AppState>,
     request: ArenaBatchRequest,
 ) -> Result<ArenaBatchReport, ArenaCommandError> {
+    /*
+     * Entry tracing, before anything else in the body.
+     *
+     * The batch boundaries only start after seat construction, which turns out to be exactly where a
+     * model-seat batch stops producing evidence: with a model seat, no boundary line printed at all, so
+     * the command was never observed reaching its own instrumentation. This pair of lines answers
+     * whether the handler is entered and, if it is, which of the four checks below it dies in.
+     *
+     * Correlated by match count and seed rather than by batch id, because the batch id does not exist
+     * until after these checks and inventing one here is what made an earlier version of this
+     * instrumentation disagree with itself.
+     */
+    let requested_for_trace = request.matches;
+    let entry_start = std::time::Instant::now();
+    let entry_trace = move |boundary: &'static str| {
+        tracing::info!(
+            requested = requested_for_trace,
+            seed = request.seed,
+            elapsed_ms = entry_start.elapsed().as_millis() as u64,
+            boundary,
+            "arena batch entry boundary"
+        );
+    };
+
+    entry_trace("command-entered");
     let game = parse_game(&request.game)?;
+    entry_trace("game-parsed");
     if !(MIN_BATCH_MATCHES..=MAX_BATCH_MATCHES).contains(&request.matches) {
         return Err(ArenaCommandError {
             code: "batch_too_large".to_owned(),
@@ -168,10 +194,79 @@ pub async fn run_arena_batch(
 
     // Validate both seat kinds before anything runs, so a bad provider configuration is refused up
     // front rather than half-way through a batch that has already archived real matches.
-    build_seat(&request.tested_agent)?;
-    build_seat(&request.opponent_agent)?;
+    /*
+     * Seat construction happens on a blocking thread, not on an async runtime worker.
+     *
+     * This is the fix for the defect this command exhibited, and it is worth stating what the symptom was:
+     * a batch with a **model** seat never returned. Entry tracing pinned it precisely — `about-to-build-
+     * tested-seat` was the last boundary printed, for every attempt, while a policy seat sailed through
+     * `tested-seat-built` in microseconds.
+     *
+     * Building a model seat constructs a `reqwest` client and, more importantly, a **second Tokio runtime**
+     * inside `AsyncProviderAgent`. Doing that on an async runtime worker is the classic way to deadlock: the
+     * nested runtime is created inside a context that already owns a runtime, and anything that resolves
+     * `Handle::current()` during construction binds to the wrong one. A policy seat builds nothing of the
+     * kind, which is exactly why the bug looked seat-dependent rather than runtime-dependent.
+     *
+     * Fail-fast is preserved. Both seats are still built and validated *before* a single match runs — a bad
+     * provider configuration is still refused up front rather than half-way through a batch that has already
+     * archived real matches. Only the thread changed.
+     *
+     * The handles are discarded here and rebuilt inside the worker, which is what the worker already did;
+     * reusing them across the two sites would mean sharing one seat's per-episode state between matches.
+     */
+    entry_trace("about-to-build-seats");
+    tauri::async_runtime::spawn_blocking({
+        // Cloned so the worker's own `build_seat` calls still have the originals. Cloning two small
+        // request structs is cheaper than restructuring the closure to borrow.
+        let tested_request = request.tested_agent.clone();
+        let opponent_request = request.opponent_agent.clone();
+        move || {
+            let tested = build_seat(&tested_request)?;
+            let opponent = build_seat(&opponent_request)?;
+            /*
+             * Dropped **here**, on the blocking thread, and that is the whole point.
+             *
+             * A model seat owns a Tokio runtime inside `AsyncProviderAgent`. Dropping one from an async
+             * runtime worker blocks: the runtime's destructor waits for its own blocking pool to drain,
+             * and waiting from inside another runtime's worker does not complete. The first version of
+             * this fix built the seats on a blocking thread and then dropped them on the async one, and
+             * the batch still hung — one statement later, at `batch-id-created`, with no logging in
+             * between to say why.
+             *
+             * So nothing runtime-related crosses the thread boundary in either direction: constructed
+             * on the blocking thread, released on the blocking thread. The worker builds its own seats
+             * per match regardless, which is what stops per-episode state leaking between matches.
+             */
+            drop(tested);
+            drop(opponent);
+            Ok::<_, ArenaCommandError>(())
+        }
+    })
+    .await
+    .map_err(|error| ArenaCommandError {
+        code: "seat_validation_failed".to_owned(),
+        message: format!("the arena seat check could not be completed: {error}"),
+    })??;
+    entry_trace("both-seats-built");
 
     let batch_id = new_match_id(game, request.seed);
+    entry_trace("batch-id-created");
+
+    /*
+     * Traced one statement at a time because the first version of this fix moved the block and the
+     * batch then stopped immediately afterwards, in a region with no logging at all. Narrowing that by
+     * bisection would have meant one rebuild per guess; one boundary per statement localises it in a
+     * single build.
+     */
+    let cancel = state.arena.begin(&batch_id)?;
+    entry_trace("registry-registered");
+    let recorder: Arc<dyn TelemetryRecorder> = state.recorder.clone();
+    entry_trace("recorder-cloned");
+    let archive = state.arena_matches.clone();
+    entry_trace("archive-cloned");
+    let runner = ArenaRunner::new();
+    entry_trace("runner-created");
 
     /*
      * Diagnostic boundary tracing.
@@ -203,10 +298,6 @@ pub async fn run_arena_batch(
         );
     };
 
-    let cancel = state.arena.begin(&batch_id)?;
-    let recorder: Arc<dyn TelemetryRecorder> = state.recorder.clone();
-    let archive = state.arena_matches.clone();
-    let runner = ArenaRunner::new();
     let requested = request.matches;
     let alternate = request.alternate_sides;
     let base_seed = request.seed;

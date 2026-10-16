@@ -32,6 +32,16 @@ probelab-engine = { path = "../../../crates/engine" }
 probelab-evaluator = { path = "../../../crates/evaluator" }
 probelab-lab = { path = "../../../crates/lab" }
 
+[features]
+# Permits an explicitly provided scratch directory for the database, and nothing else.
+#
+# Off by default and absent from a shipped build, so the production storage path contains no branch that
+# an environment variable alone could reach. With it on, the application refuses to start unless
+# PROBELAB_TEST_DATA_DIR names an absolute directory that is not the platform's application-data
+# directory - there is no fallback, because falling back is how a test harness ends up writing into
+# someone's real archive.
+test-harness = []
+
 [dependencies]
 probelab-agent = { path = "../../../crates/agent" }
 probelab-benchmarks = { path = "../../../crates/benchmarks" }

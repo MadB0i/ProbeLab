@@ -59,6 +59,7 @@ pub use commands::{
 // payload is refused, and an untestable boundary is one whose behaviour is asserted only by whoever
 // wrote it. `tests/ipc_boundary.rs` is that test.
 mod comparison;
+mod data_dir;
 pub use comparison::{
     compare_experiments, list_comparable_experiments, ComparisonRequest, ComparisonResponse,
 };
@@ -337,7 +338,31 @@ pub fn run() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("probelab=info"));
             let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 
-            let app_data_dir = app.path().app_data_dir()?;
+            let platform_directory = app.path().app_data_dir()?;
+
+            /*
+             * Resolved before anything is created or opened, and refused outright on a test build that
+             * cannot prove it is isolated. The ordering matters: the check that protects real user data
+             * has to run before the first write, not after it.
+             *
+             * A production build resolves the platform directory and never reads the environment, so
+             * nothing here can redirect a shipped installation.
+             */
+            let storage = data_dir::resolve_for_process(&platform_directory).map_err(|refusal| {
+                format!(
+                    "refusing to open storage: {refusal} (platform directory would have been {})",
+                    platform_directory.display()
+                )
+            })?;
+            tracing::info!(
+                storage_directory = %storage.directory.display(),
+                isolated = %matches!(storage.mode, data_dir::StorageMode::IsolatedTest),
+                "resolved application storage directory"
+            );
+            if matches!(storage.mode, data_dir::StorageMode::IsolatedTest) {
+                std::fs::create_dir_all(&storage.directory)?;
+            }
+            let app_data_dir = storage.directory;
             std::fs::create_dir_all(&app_data_dir)?;
             let database_path = app_data_dir.join(DATABASE_FILE_NAME);
             let recent_events = RecentEventBuffer::default();

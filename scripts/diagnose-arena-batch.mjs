@@ -59,6 +59,13 @@ const providerStats = async () => (await fetch(`http://127.0.0.1:${controlPort}/
 /* Application                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/*
+ * The isolated directory this build is allowed to use.
+ *
+ * Set because the binary is built with the `test-harness` feature. Without it the binary refuses to
+ * start at all rather than falling back to the platform directory, which is the whole point and the
+ * reason this cannot quietly reach real user data.
+ */
 const appDir = mkdtempSync(join(tmpdir(), "probelab-diag-"));
 /*
  * The application's stdio is piped, not ignored.
@@ -71,6 +78,7 @@ const child = spawn("D:\\Projects\\ProbeLab\\target\\release\\probelab-desktop.e
   env: {
     ...process.env,
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${debugPort}`,
+    PROBELAB_TEST_DATA_DIR: appDir,
     RUST_LOG: process.env.RUST_LOG ?? "info",
   },
   stdio: ["ignore", "pipe", "pipe"],
@@ -233,6 +241,71 @@ if (settled?.value) {
 }
 if (settled?.error) {
   console.log(`         ${settled.error}`);
+}
+
+/*
+ * The payload comparison that the diagnosis actually needs.
+ *
+ * Two batches, one command, one policy seat and one model seat. The policy batch returns; the model
+ * batch does not. So the difference between the two payloads is the only remaining variable, and it is
+ * cheaper to diff them than to keep theorising about delivery.
+ */
+const policyReport = await evaluate(`(async () => {
+  const invoke = window.__TAURI_INTERNALS__.invoke;
+  try {
+    return JSON.stringify(await invoke("run_arena_batch", {
+      request: {
+        game: "connect_four",
+        testedAgent: { kind: "policy", id: "first_legal_tictactoe" },
+        opponentAgent: { kind: "policy", id: "depth_bounded_connect_four" },
+        matches: 2,
+        seed: 900,
+        alternateSides: true,
+      },
+    }));
+  } catch (error) {
+    return JSON.stringify({ error: String(error) });
+  }
+})()`);
+
+console.log(`[${since()}] policy-seat report: ${policyReport.slice(0, 700)}`);
+
+/*
+ * The shapes that could differ between the two payloads.
+ *
+ * Compared structurally rather than by eye: a diff of two 6 KB JSON blobs says less than a list of the
+ * paths that differ and the type at each of them.
+ */
+const shape = (raw) => {
+  const paths = new Set();
+  const walk = (value, path) => {
+    if (Array.isArray(value)) {
+      paths.add(`${path}[] (${value.length})`);
+      if (value.length > 0) walk(value[0], `${path}[0]`);
+      return;
+    }
+    if (value && typeof value === "object") {
+      for (const [key, inner] of Object.entries(value)) {
+        const next = path ? `${path}.${key}` : key;
+        paths.add(`${next}: ${inner === null ? "null" : typeof inner}`);
+        if (inner && typeof inner === "object") walk(inner, next);
+      }
+    }
+  };
+  walk(JSON.parse(raw), "");
+  return [...paths].sort();
+};
+
+if (settled?.value) {
+  const modelPaths = shape(JSON.stringify(settled.value));
+  const policyPaths = shape(policyReport);
+  const onlyModel = modelPaths.filter((p) => !policyPaths.includes(p));
+  const onlyPolicy = policyPaths.filter((p) => !modelPaths.includes(p));
+  console.log(`[${since()}] paths only in the MODEL payload: ${JSON.stringify(onlyModel)}`);
+  console.log(`[${since()}] paths only in the POLICY payload: ${JSON.stringify(onlyPolicy)}`);
+} else {
+  console.log(`[${since()}] no model payload to compare; policy payload shape follows`);
+  console.log(`[${since()}] ${JSON.stringify(shape(policyReport).slice(0, 30))}`);
 }
 
 /*

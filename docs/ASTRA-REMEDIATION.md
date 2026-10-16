@@ -30,10 +30,86 @@ Two things must not be misread from this commit:
 2. **`run_arena_batch` is unresolved.** It completes all of its work and never returns to the caller.
    The last successful boundary is `worker-joined`; the fault is after the await, in report assembly.
 
-Also still missing: **test-storage isolation**. `app.path().app_data_dir()` resolves through the Windows
-known-folder APIs and ignores `APPDATA`/`LOCALAPPDATA`, so scripted runs open the developer's real
-archive. Until that is fixed with a test-only override, no scripted product test here is reproducible or
-non-destructive.
+### Test-storage isolation — CLOSED
+
+`app.path().app_data_dir()` resolves through the Windows known-folder APIs and ignores
+`APPDATA`/`LOCALAPPDATA`, so an earlier diagnostic that "redirected" storage that way silently opened the
+developer's real archive, found 41 genuine arena recordings in it, and wrote more matches into it.
+
+`apps/desktop/src-tauri/src/data_dir.rs` plus a `test-harness` cargo feature:
+
+* A **production build never reads the variable at all** — not "ignores it", does not read it. The
+  branch is compiled out, so a shipped binary contains no code an environment variable can reach.
+* A **test build fails closed**. With the variable absent, relative, or equal to the platform
+  directory, start-up is refused. There is no fallback, because a fallback is how a harness ends up
+  writing into someone's real archive.
+* Six unit tests cover the production guarantee, both refusals, and the accepted case.
+
+Verified against the real binary:
+
+```
+# refuses with no variable
+ERROR probelab_desktop_lib: refusing to open storage: this build requires PROBELAB_TEST_DATA_DIR to
+name a scratch directory, and it was not set. It will not fall back to the real application-data
+directory... (platform directory would have been ...\AppData\Roaming\com.probelab.desktop)
+
+# with a scratch directory
+INFO probelab_desktop_lib: resolved application storage directory
+  storage_directory=...\Temp\probelab-isolation-probe isolated=true
+
+REAL archive sha256 before: CEC0BD77...DA28FC77
+REAL archive sha256 after : CEC0BD77...DA28FC77   (unchanged)
+```
+
+**Note on prior data.** Diagnostics run before this feature existed did write to the real archive. That
+data is left exactly as found — no migration, no deletion, no repair. The baseline hash above is recorded
+so any future change to it is visible.
+
+### Native batch blocker — ROOT CAUSE FOUND AND FIXED
+
+A batch with a **model** seat never returned. Entry tracing, one boundary per statement, located it to
+two separate deadlocks in the same region:
+
+1. `build_seat` for a model seat constructs a `reqwest` client and a **second Tokio runtime**, on an
+   async runtime worker. Last boundary printed: `about-to-build-tested-seat`, every attempt, while a
+   policy seat passed through in microseconds — a policy seat builds no runtime, which is why the
+   symptom looked seat-dependent rather than runtime-dependent.
+2. Moving construction onto a blocking thread was **not sufficient on its own**: the seats were still
+   *dropped* on the async worker, and dropping a Tokio runtime from inside another runtime's worker
+   blocks. The last boundary printed moved to `both-seats-built`, with `batch-id-created` never
+   reached — two `drop()`s and nothing else between them.
+
+**Fix:** seat validation runs entirely inside `spawn_blocking`, and the seats are constructed *and*
+released on that thread, so nothing runtime-related crosses the thread boundary in either direction.
+Fail-fast is preserved — both seats are still validated before a single match runs.
+
+**Verified:**
+
+```
+boundary="both-seats-built"  "batch-id-created"  "registry-registered"
+boundary="recorder-cloned"   "archive-cloned"    "runner-created"
+invocation RESOLVED after 2s — batchId arena-connect_four-4242-..., completed 2
+```
+
+### B6 through the real application — partial
+
+`scripts/b6-failure-accounting.mjs` now runs against the isolated archive. The batch command returns,
+matches are archived, and the population accounts exactly:
+
+```
+PASS  the batch command returned — returned
+PASS  the provider was actually called and refused — 34 calls, all invalid
+PASS  four matches were recorded — attempted 4
+PASS  all four are conditional game outcomes — conditional 4
+PASS  the three unreachable-provider matches are infrastructure failures — infrastructure 3
+PASS  reliability fell to 4 of 7 — conditional 4 of 7
+PASS  the population buckets account for every attempted match — 10 accounted for 10 attempted
+```
+
+**Not yet demonstrated: the forfeit case.** The controlled provider reports every call as invalid, yet
+the matches played to completion with a 0.5 win rate rather than forfeiting — the adapter is tolerating
+`NOT_A_MOVE` instead of rejecting it. That is a defect in the **harness provider**, not yet shown to be
+a product defect, and it must be resolved before B6 can be closed on the forfeit case.
 
 ---
 
