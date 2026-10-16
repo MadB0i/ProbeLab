@@ -163,43 +163,77 @@ console.log(`[${since()}] ${tap}`);
 console.log(`[${since()}] provider mode -> ${mode}`);
 await fetch(`http://127.0.0.1:${controlPort}/mode?as=${mode}`);
 
-const invocation = evaluate(`(async () => {
+/*
+ * The invocation is started WITHOUT awaiting it in the page, and its result is parked on `window`.
+ *
+ * This decouples the observation from the harness. Every earlier attempt used `awaitPromise: true` on
+ * the whole call, so "unresolved" could have meant either that the native command never replied or that
+ * something in the evaluation channel swallowed the reply — and those two have completely different
+ * fixes. Parking the result and polling for it with separate round trips answers the question the
+ * harness cannot otherwise answer about itself.
+ */
+await evaluate(`(() => {
+  window.__invocation = { state: "pending", at: Date.now(), value: null, error: null };
   const invoke = window.__TAURI_INTERNALS__.invoke;
-  const started = Date.now();
-  try {
-    const report = await invoke("run_arena_batch", {
-      request: {
-        game: "connect_four",
-        testedAgent: {
-          kind: "model",
-          label: "controlled-model",
-          config: {
-            kind: "openai_compatible",
-            schema_version: 1,
-            base_url: "http://127.0.0.1:${providerPort}/v1",
-            api_key_env: "PROBELAB_UNUSED_KEY",
-            model: "${model}",
-            timeout_seconds: 8,
-            temperature: 0,
-            max_tokens: 64,
-          },
+  window.__invocation.state = "started";
+  invoke("run_arena_batch", {
+    request: {
+      game: "connect_four",
+      testedAgent: {
+        kind: "model",
+        label: "controlled-model",
+        config: {
+          kind: "openai_compatible",
+          schema_version: 1,
+          base_url: "http://127.0.0.1:${providerPort}/v1",
+          api_key_env: "PROBELAB_UNUSED_KEY",
+          model: "${model}",
+          timeout_seconds: 8,
+          temperature: 0,
+          max_tokens: 64,
         },
-        opponentAgent: { kind: "policy", id: "depth_bounded_connect_four" },
-        matches: ${matches},
-        seed: 4242,
-        alternateSides: true,
       },
+      opponentAgent: { kind: "policy", id: "depth_bounded_connect_four" },
+      matches: ${matches},
+      seed: 4242,
+      alternateSides: true,
+    },
+  })
+    .then((value) => {
+      window.__invocation.state = "resolved";
+      window.__invocation.value = value;
+    })
+    .catch((error) => {
+      window.__invocation.state = "rejected";
+      window.__invocation.error = JSON.stringify(error).slice(0, 300);
     });
-    return JSON.stringify({ resolved: true, elapsedMs: Date.now() - started, report });
-  } catch (error) {
-    return JSON.stringify({ resolved: false, elapsedMs: Date.now() - started, error: String(error) });
-  }
+  return true;
 })()`);
+console.log(`[${since()}] invocation started (not awaited in-page)`);
 
-const settled = await Promise.race([
-  invocation.then((raw) => JSON.parse(raw)),
-  wait_(20_000).then(() => null),
-]);
+let settled = null;
+for (let tick = 0; tick < 45; tick += 1) {
+  await wait_(1000);
+  const state = JSON.parse(await evaluate(`JSON.stringify(window.__invocation)`));
+  if (state.state !== "pending" && state.state !== "started") {
+    settled = state;
+    console.log(`[${since()}] invocation ${state.state} after ${tick + 1}s`);
+    break;
+  }
+  if (tick === 9 || tick === 29) {
+    console.log(`[${since()}] still ${state.state} after ${tick + 1}s`);
+  }
+}
+
+console.log(
+  `[${since()}] invocation ${settled ? settled.state.toUpperCase() : "STILL PENDING after 45s"}`,
+);
+if (settled?.value) {
+  console.log(`         batchId ${settled.value.batchId}, completed ${settled.value.completed}`);
+}
+if (settled?.error) {
+  console.log(`         ${settled.error}`);
+}
 
 /*
  * Is the whole async runtime wedged, or only this command?
@@ -315,7 +349,7 @@ for (const probe of probes) {
   console.log(`[${since()}] probe ${probe.label}: ${JSON.stringify(probe).slice(0, 220)}`);
 }
 
-console.log(`[${since()}] invocation ${settled ? "RESOLVED" : "UNRESOLVED after 45s"}`);
+
 if (settled) {
   console.log(`         ${JSON.stringify(settled).slice(0, 400)}`);
 }

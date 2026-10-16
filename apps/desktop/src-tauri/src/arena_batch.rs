@@ -355,17 +355,20 @@ pub async fn run_arena_batch(
     // The handle is released whichever way the batch ended, so a finished batch can never stop
     // whatever starts next under the same identifier.
     state.arena.finish(&batch_id);
+    trace("registry-released");
 
     let (played_ids, stopped) = outcome.map_err(|error| ArenaCommandError {
         code: "engine_failed".to_owned(),
         message: format!("the arena worker thread could not be joined: {error}"),
     })?;
+    trace("worker-outcome-taken");
 
     // Read back from the archive rather than taken from the values this batch still holds, so what is
     // reported is provably what the database holds. See the module comment.
     let statistics = statistics_for(&archive, &played_ids);
+    trace("statistics-computed");
 
-    Ok(ArenaBatchReport {
+    let report = ArenaBatchReport {
         batch_id,
         completed: played_ids.len(),
         requested,
@@ -373,7 +376,22 @@ pub async fn run_arena_batch(
         alternate_sides: alternate,
         match_ids: played_ids,
         statistics,
-    })
+    };
+    trace("report-built");
+
+    // Serialised eagerly rather than at the boundary, so a payload this cannot encode fails here with a
+    // named phase instead of leaving the caller's promise pending with nothing to point at.
+    let encoded = serde_json::to_string(&report).map_err(|error| ArenaCommandError {
+        code: "report_not_serialisable".to_owned(),
+        message: format!("the batch report could not be encoded for delivery: {error}"),
+    })?;
+    tracing::info!(
+        batch_id = %report.batch_id,
+        encoded_bytes = encoded.len(),
+        "arena batch report encoded"
+    );
+
+    Ok(report)
 }
 
 /// Stops a running batch.

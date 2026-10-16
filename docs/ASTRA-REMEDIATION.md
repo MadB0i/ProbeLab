@@ -19,7 +19,7 @@ progress, **not** a completed B6 fix, and the NO-GO verdict below is unchanged b
 | **B11** saved settings do not govern subsequent runs | **CLOSED** — fixed because it blocked B3 |
 | **B1, B2, B5** Arena eligibility, `/v1` duplication, live init and early cancellation | **CLOSED** |
 | **B9, B10** bounded provider reads, redaction before truncation | **CLOSED** |
-| **B6** failure accounting | **BLOCKED** — implemented and unit-tested; **no product-level proof** |
+| **B6** failure accounting | **BLOCKED** — implemented and unit-tested; **no product-level proof** (response delivery unresolved) |
 | **B4, B7, B8, B12–B15** | **OPEN** |
 
 Two things must not be misread from this commit:
@@ -719,10 +719,34 @@ provider chat calls: 10     progress events observed: 2
 invocation UNRESOLVED after 45s
 ```
 
-**The last successful boundary is `worker-joined`.** Every match played, the provider answered ten
-times, the recordings were archived and two progress events reached the WebView — and the command never
-returned. The await completed and the fault lies strictly **after** `spawn_blocking(...).await` and
-`state.arena.finish(&batch_id)`, in the report-assembly path.
+**The command body completes entirely.** Instrumenting every step after the await shows the
+full sequence running to completion:
+
+```
+boundary="worker-joined"          elapsed_ms=1200
+boundary="registry-released"      elapsed_ms=1200
+boundary="worker-outcome-taken"   elapsed_ms=1200
+boundary="statistics-computed"    elapsed_ms=1201
+boundary="report-built"           elapsed_ms=1201
+arena batch report encoded        encoded_bytes=1297
+```
+
+Two suspects were ruled out by measurement rather than by argument:
+
+* `statistics_for` is **not** the cause. It reads only the batch's own match identifiers rather than the
+  archive window, so it is O(batch size) and cannot stall on historical records.
+* `wilson_interval` is zero-trial safe, so no NaN reaches the payload.
+
+**So the fault is no longer inside the command body.** The command returns and the response encodes
+successfully, yet the caller's promise never settles. Re-running with the invocation started *without*
+awaiting it in the page — parking the result on `window` and polling from separate round trips, so the
+harness cannot itself be the thing that is broken — reports `state: "started"` at 10s, at 30s and at
+45s. `resolve` and `reject` are simply never called.
+
+A concurrent `list_arena_games` answers in 0ms throughout, and a **policy-versus-policy batch returns a
+complete report through the same command**, so the runtime, the IPC layer, the command handler and the
+report type are all healthy. What remains is the response *delivery* path for this command with a model
+seat — not its execution, and not its serialisation.
 
 That path is the same one the archive errors come from: `read_recordings` (`arena_batch.rs:365`) lists
 summaries and then deserializes each full recording. On this machine that archive contains **dozens of
