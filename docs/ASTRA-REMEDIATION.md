@@ -182,7 +182,7 @@ by unit and store tests but are **not** yet exercised through the real applicati
 | **B9** provider response bodies unbounded before allocation | HIGH | **CLOSED** — bounded streaming read, 8 tests |
 | **B10** truncation before redaction leaks credential prefixes | MEDIUM | **CLOSED** — redacted before truncation, boundary sweep |
 | **B3** multi-episode experiments cannot be reconstructed | HIGH | **CLOSED** — persistence tested; 4-episode run survives process restart, compared per-episode over IPC |
-| **B4** historical Arena recordings fail to deserialize | HIGH | OPEN |
+| **B4** historical Arena recordings fail to deserialize | HIGH | **CLOSED** — real archive: 24 unreadable of 59 -> 0 |
 | **B6** invalid model actions escape loss accounting | HIGH | **PARTIAL** — engine/lab/store fixed and tested; IPC + panel surface added and tested; **product-level proof BLOCKED** (see below) |
 | **B7** batch statistics replaced by archive-wide statistics | MEDIUM | OPEN |
 | **B8** recording digest does not commit to the evidence | MEDIUM | OPEN |
@@ -924,3 +924,49 @@ is **evidence integrity**: B4 (unreadable history), B6 (failures leaving the den
 statistics replaced by archive-wide statistics) and B8 (a digest that does not commit to the evidence it
 is supposed to protect). Until those are closed, the numbers the product reports cannot be fully
 trusted — including the ones this report cites.
+
+---
+
+### B4 — historical recording compatibility — **CLOSED**
+
+Reproduced on the **real user archive**, opened read-only (`mode=ro`; it never writes).
+
+**Before:** `59 recordings listed, 35 readable, 24 unreadable`
+**After:** `59 recordings listed, 59 readable, 0 unreadable`
+
+Two independent schema gaps, found one after the other — the first fix simply moved the error to the
+next field, which is how the second was found rather than guessed at.
+
+**1. `winningLine`.** Recordings written before the coordinate widening store a flat list of cell
+indices (`[2,4,6]`); current ones store coordinate pairs (`[[2,0],[4,0],[6,0]]`). Serde reported
+`invalid type: integer 2, expected an array of length 2` — the literal error from the audit. A custom
+deserializer accepts either shape. The rule is exact, not approximate: the second component of a
+coordinate is `0` for every game this build plays, so a legacy index `i` maps onto `[i, 0]` and nothing
+is lost. **Corruption is still refused** — a mixed list, a non-integer, an out-of-range index, or a
+non-list are rejected rather than repaired.
+
+**2. Five fields absent from legacy rows.** `testedSeat`, `opponentSeat`, `turns`, `cancelled` (and
+`termination`, already optional). A required field with no sensible default cannot be defaulted without
+inventing evidence, so:
+
+* `tested_seat` / `opponent_seat` → `Option<SeatKind>`. `None` means **not recorded**, not "was a model".
+* `cancelled` → `Option<bool>`. The statistics fold counts a cancellation only when it is
+  `Some(true)`; an unknown is not counted as a known negative, because that would put historical rows on
+  one side of a statement about who stopped what.
+* `turns` → defaults to empty, which the cost statistics already report as *unmeasured* rather than
+  *zero*, so the difference between an unmeasured call and a free call survives.
+
+**Nothing is rewritten.** The reader widens for the caller; the stored row keeps the bytes it had. A
+test asserts the source value is unchanged after reading, and that a current recording round-trips
+byte-identically.
+
+**Tests** — `crates/lab/tests/b4_historical_compatibility.rs` (8) and
+`crates/lab/tests/b4_real_archive.rs` (1, skipped unless `PROBELAB_REAL_ARCHIVE` is set).
+
+An earlier version of the compatibility test parsed a **local struct** with a plain `Vec<[u8; 2]>`,
+which by construction had none of the compatibility behaviour. It failed five tests while appearing to
+test the right thing. Every test now deserialises a real `ArenaMatchView`.
+
+**Limitation:** the TypeScript `ArenaMatchView` type still declares `testedSeat` as non-nullable, so a
+legacy recording surfaces `null` there. It does not fail today, and the Rust side is correct, but the
+frontend type should be made optional to match.

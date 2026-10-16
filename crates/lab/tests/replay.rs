@@ -25,8 +25,8 @@ fn drawn_match() -> ArenaMatchView {
         game_name: "Tic-Tac-Toe".to_owned(),
         outcome: ArenaOutcome::Draw,
         termination: Some(ArenaTermination::Decided),
-        tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
-        opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
+        tested_seat: Some(probelab_engine::arena::SeatKind::ReferencePolicy),
+        opponent_seat: Some(probelab_engine::arena::SeatKind::ReferencePolicy),
         tested_agent: "perfect_tictactoe".to_owned(),
         opponent_agent: "perfect_tictactoe".to_owned(),
         tested_side: GameSide::First,
@@ -43,7 +43,7 @@ fn drawn_match() -> ArenaMatchView {
         turns: Vec::new(),
         timeline: Vec::new(),
         failure: None,
-        cancelled: false,
+        cancelled: Some(false),
     }
 }
 

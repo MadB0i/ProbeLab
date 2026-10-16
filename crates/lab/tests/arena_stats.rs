@@ -58,8 +58,8 @@ fn recorded_with(
         termination,
         tested_agent: TESTED.to_owned(),
         opponent_agent: OPPONENT.to_owned(),
-        tested_seat: SeatKind::Model,
-        opponent_seat: SeatKind::ReferencePolicy,
+        tested_seat: Some(SeatKind::Model),
+        opponent_seat: Some(SeatKind::ReferencePolicy),
         tested_side: GameSide::First,
         seed: 7,
         plies: u32::try_from(turns.len()).unwrap_or(0),
@@ -71,7 +71,7 @@ fn recorded_with(
         turns,
         timeline: Vec::new(),
         failure: None,
-        cancelled: false,
+        cancelled: Some(false),
     }
 }
 
@@ -431,7 +431,7 @@ fn a_cancelled_match_is_reported_apart_from_another_failure() {
     // "You stopped this" and "the provider died" are different events, and only one is about the
     // operator. Both are `no_result`; only one is a cancellation.
     let mut cancelled = recorded("a", "connect_four", ArenaOutcome::NoResult, Vec::new());
-    cancelled.cancelled = true;
+    cancelled.cancelled = Some(true);
     let mut failed = recorded("b", "connect_four", ArenaOutcome::NoResult, Vec::new());
     failed.failure = Some("the provider refused the connection".to_owned());
 

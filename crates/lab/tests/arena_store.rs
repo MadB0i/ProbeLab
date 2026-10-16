@@ -17,8 +17,8 @@ fn a_match(match_id: &str, outcome: ArenaOutcome) -> ArenaMatchView {
         game_name: "Tic-Tac-Toe".to_owned(),
         outcome,
         termination: Some(ArenaTermination::Decided),
-        tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
-        opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
+        tested_seat: Some(probelab_engine::arena::SeatKind::ReferencePolicy),
+        opponent_seat: Some(probelab_engine::arena::SeatKind::ReferencePolicy),
         tested_agent: "first_legal_tictactoe".to_owned(),
         opponent_agent: "perfect_tictactoe".to_owned(),
         tested_side: GameSide::First,
@@ -41,7 +41,7 @@ fn a_match(match_id: &str, outcome: ArenaOutcome) -> ArenaMatchView {
         turns: Vec::new(),
         timeline: Vec::new(),
         failure: None,
-        cancelled: false,
+        cancelled: Some(false),
     }
 }
 
@@ -52,8 +52,8 @@ fn a_failed_match(match_id: &str) -> ArenaMatchView {
         game_name: "Tic-Tac-Toe".to_owned(),
         outcome: ArenaOutcome::NoResult,
         termination: Some(ArenaTermination::Decided),
-        tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
-        opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
+        tested_seat: Some(probelab_engine::arena::SeatKind::ReferencePolicy),
+        opponent_seat: Some(probelab_engine::arena::SeatKind::ReferencePolicy),
         tested_agent: "first_legal_tictactoe".to_owned(),
         opponent_agent: "perfect_tictactoe".to_owned(),
         tested_side: GameSide::Second,
@@ -79,7 +79,7 @@ fn a_failed_match(match_id: &str) -> ArenaMatchView {
             "the engine refused the move",
         )],
         failure: Some("illegal move".to_owned()),
-        cancelled: false,
+        cancelled: Some(false),
     }
 }
 

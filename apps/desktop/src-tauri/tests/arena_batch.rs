@@ -75,8 +75,8 @@ fn recorded_matches_survive_the_archive_being_reopened() {
         termination: Some(ArenaTermination::Decided),
         tested_agent: "first_legal_tictactoe".to_owned(),
         opponent_agent: "perfect_tictactoe".to_owned(),
-        tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
-        opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
+        tested_seat: Some(probelab_engine::arena::SeatKind::ReferencePolicy),
+        opponent_seat: Some(probelab_engine::arena::SeatKind::ReferencePolicy),
         tested_side: probelab_core::GameSide::First,
         seed: 7,
         plies: 5,
@@ -90,7 +90,7 @@ fn recorded_matches_survive_the_archive_being_reopened() {
         turns: Vec::new(),
         timeline: Vec::new(),
         failure: None,
-        cancelled: false,
+        cancelled: Some(false),
     };
 
     {
@@ -125,8 +125,8 @@ fn a_recording_written_twice_is_stored_once() {
         termination: Some(ArenaTermination::Decided),
         tested_agent: "a".to_owned(),
         opponent_agent: "b".to_owned(),
-        tested_seat: probelab_engine::arena::SeatKind::Model,
-        opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
+        tested_seat: Some(probelab_engine::arena::SeatKind::Model),
+        opponent_seat: Some(probelab_engine::arena::SeatKind::ReferencePolicy),
         tested_side: probelab_core::GameSide::First,
         seed: 1,
         plies: 7,
@@ -142,7 +142,7 @@ fn a_recording_written_twice_is_stored_once() {
         turns: Vec::new(),
         timeline: Vec::new(),
         failure: None,
-        cancelled: false,
+        cancelled: Some(false),
     };
 
     store.put(&view, 1).expect("first put");
@@ -266,8 +266,8 @@ fn tictactoe_view(match_id: &str, outcome: ArenaOutcome) -> probelab_lab::ArenaM
         termination: Some(ArenaTermination::Decided),
         tested_agent: "first_legal_tictactoe".to_owned(),
         opponent_agent: "perfect_tictactoe".to_owned(),
-        tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
-        opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
+        tested_seat: Some(probelab_engine::arena::SeatKind::ReferencePolicy),
+        opponent_seat: Some(probelab_engine::arena::SeatKind::ReferencePolicy),
         tested_side: probelab_core::GameSide::First,
         seed: 7,
         plies: 5,
@@ -281,6 +281,6 @@ fn tictactoe_view(match_id: &str, outcome: ArenaOutcome) -> probelab_lab::ArenaM
         turns: Vec::new(),
         timeline: Vec::new(),
         failure: None,
-        cancelled: false,
+        cancelled: Some(false),
     }
 }

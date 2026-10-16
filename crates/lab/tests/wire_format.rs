@@ -944,8 +944,8 @@ fn the_arena_statistics_types_keep_their_field_names() {
         termination: Some(ArenaTermination::Decided),
         tested_agent: "qwen2.5:3b".to_owned(),
         opponent_agent: "depth_bounded_connect_four".to_owned(),
-        tested_seat: probelab_engine::arena::SeatKind::Model,
-        opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
+        tested_seat: Some(probelab_engine::arena::SeatKind::Model),
+        opponent_seat: Some(probelab_engine::arena::SeatKind::ReferencePolicy),
         tested_side: probelab_core::GameSide::First,
         seed: 7,
         plies: 8,
@@ -961,7 +961,7 @@ fn the_arena_statistics_types_keep_their_field_names() {
         turns: Vec::new(),
         timeline: Vec::new(),
         failure: None,
-        cancelled: false,
+        cancelled: Some(false),
     };
 
     let statistics = arena_statistics(&[view]);

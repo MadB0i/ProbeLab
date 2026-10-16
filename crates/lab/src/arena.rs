@@ -350,9 +350,17 @@ pub struct ArenaMatchView {
     /// The opponent's identifier.
     pub opponent_agent: String,
     /// What kind of seat the tested side was.
-    pub tested_seat: SeatKind,
+    /// Which seat kind the tested policy occupied.
+    ///
+    /// None for recordings written before the seat was recorded. That is **unknown**, and is left
+    /// unknown: defaulting to a concrete kind would assert something about how a historical match was
+    /// played, which is exactly the kind of invention this finding exists to stop.
+    #[serde(default)]
+    pub tested_seat: Option<SeatKind>,
     /// What kind of seat the opponent was.
-    pub opponent_seat: SeatKind,
+    /// See [Self::tested_seat] for why this is optional.
+    #[serde(default)]
+    pub opponent_seat: Option<SeatKind>,
     /// Which side the tested agent played.
     pub tested_side: GameSide,
     /// The seed the opening was derived from, so the match replays.
@@ -372,12 +380,36 @@ pub struct ArenaMatchView {
     /// Four cells for connect four and three for tic-tac-toe, so it is a flat list of coordinates
     /// rather than a fixed triple: a fixed `[u8; 3]` cannot express a four-in-a-row without either
     /// truncating it — which would highlight the wrong cells — or being a different type per game.
+    ///
+    /// # Two shapes have been written to the archive
+    ///
+    /// Recordings from before the coordinate change store a **flat list of cell indices** —
+    /// `"winningLine":[2,4,6]` — while current ones store **coordinate pairs** —
+    /// `"winningLine":[[2,0],[4,0],[6,0]]`. The second component of a pair is `0` for every game this
+    /// build plays, so a legacy flat index `i` maps exactly onto the pair `[i, 0]` and the conversion
+    /// loses nothing.
+    ///
+    /// Reading only the current shape makes every legacy recording unreadable, which is audit finding
+    /// B4: the archive listed 24 tic-tac-toe recordings that could not be opened, replayed or counted.
+    /// The custom deserializer below accepts both and **never rewrites the stored row** — a legacy
+    /// recording still reads as legacy on disk after it has been opened, so the original evidence is
+    /// preserved exactly as it was written.
+    ///
+    /// A flat list is accepted only as whole non-negative integers. Anything else is refused rather
+    /// than guessed at, because a partially-numeric winning line is corruption, not a version.
+    #[serde(default, deserialize_with = "deserialize_winning_line")]
     pub winning_line: Option<Vec<[u8; 2]>>,
     /// Illegal moves the tested side returned.
     pub illegal_moves: Vec<IllegalMoveView>,
     /// The recorded ply history, in order.
     pub history: Vec<PlyView>,
     /// Per-turn cost and identity, in order.
+    /// Per-turn cost and identity.
+    ///
+    /// Recordings written before per-turn telemetry existed have none. An empty list means **nothing was
+    /// recorded**, which the cost statistics already report as unmeasured rather than as zero — so the
+    /// distinction between an unmeasured call and a free one survives.
+    #[serde(default)]
     pub turns: Vec<TurnTelemetry>,
     /// The match's own event stream.
     pub timeline: Vec<LabEvent>,
@@ -387,7 +419,12 @@ pub struct ArenaMatchView {
     ///
     /// Distinct from `failure`: a cancelled match is not broken, and reporting it as a failure would
     /// put a deliberate stop into the same bucket as a provider that refused a connection.
-    pub cancelled: bool,
+    /// Whether an operator stopped this match.
+    ///
+    /// None when the recording predates the flag. Reported as unknown rather than assumed false,
+    /// because a legacy row cannot say whether it ended or was stopped.
+    #[serde(default)]
+    pub cancelled: Option<bool>,
 }
 
 impl ArenaMatchView {
@@ -965,8 +1002,8 @@ impl ArenaRunner {
                         }),
                         tested_agent: spec.tested_agent.clone(),
                         opponent_agent: spec.opponent_agent.clone(),
-                        tested_seat: tested_seat_kind,
-                        opponent_seat: opponent_seat_kind,
+                        tested_seat: Some(tested_seat_kind),
+                        opponent_seat: Some(opponent_seat_kind),
                         tested_side: spec.tested_side,
                         seed: spec.seed,
                         plies: result.plies,
@@ -986,7 +1023,7 @@ impl ArenaRunner {
                         turns,
                         timeline: timeline.events().to_vec(),
                         failure: None,
-                        cancelled: false,
+                        cancelled: Some(false),
                     },
                     result: Some(result),
                 })
@@ -1053,8 +1090,8 @@ impl ArenaRunner {
                         }),
                         tested_agent: spec.tested_agent.clone(),
                         opponent_agent: spec.opponent_agent.clone(),
-                        tested_seat: tested_seat_kind,
-                        opponent_seat: opponent_seat_kind,
+                        tested_seat: Some(tested_seat_kind),
+                        opponent_seat: Some(opponent_seat_kind),
                         tested_side: spec.tested_side,
                         seed: spec.seed,
                         plies: u32::try_from(plies.len()).unwrap_or(u32::MAX),
@@ -1070,7 +1107,7 @@ impl ArenaRunner {
                         turns,
                         timeline: timeline.events().to_vec(),
                         failure: Some(error.to_string()),
-                        cancelled,
+                        cancelled: Some(cancelled),
                     },
                     result: None,
                 })
@@ -1121,6 +1158,56 @@ pub fn empty_board(kind: GameKind) -> GameBoard {
 ///
 /// `None` for a draw, for a loss, and for any game without lines — a board nobody won on has no
 /// winning line, and inventing one from the final position would be a claim the engine never made.
+/// Reads a winning line written in either the legacy flat form or the current coordinate form.
+///
+/// Accepts:
+/// * `null` / absent — no line,
+/// * `[[c, d], ...]` — the current form, passed through unchanged,
+/// * `[c, c, c, ...]` — the legacy flat form, each index widened to `[c, 0]`.
+///
+/// Refuses anything else. A list mixing integers and pairs, or carrying a value that is not a
+/// non-negative integer, is corruption rather than a schema version, and the distinction matters: a
+/// legacy recording is evidence this build can read, and a corrupt one is evidence the archive should
+/// report as unreadable rather than silently repair. Widening `i` to `[i, 0]` is exact because the
+/// second component is `0` in every coordinate the current writer emits.
+fn deserialize_winning_line<'de, D>(deserializer: D) -> Result<Option<Vec<[u8; 2]>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    /// Either a coordinate pair or a bare cell index, decided per element.
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Element {
+        Pair([u8; 2]),
+        Index(u64),
+    }
+
+    let raw = Option::<Vec<Element>>::deserialize(deserializer)?;
+    let Some(elements) = raw else {
+        return Ok(None);
+    };
+
+    let mut line = Vec::with_capacity(elements.len());
+    for (position, element) in elements.into_iter().enumerate() {
+        let pair = match element {
+            Element::Pair(pair) => pair,
+            Element::Index(index) => {
+                let widened = u8::try_from(index).map_err(|_| {
+                    D::Error::custom(format!(
+                        "winningLine element {position} is {index}, which is not a cell index this \
+                         game can hold"
+                    ))
+                })?;
+                [widened, 0]
+            }
+        };
+        line.push(pair);
+    }
+    Ok(Some(line))
+}
+
 fn winning_line_for(
     board: &GameBoard,
     outcome: MatchOutcome,

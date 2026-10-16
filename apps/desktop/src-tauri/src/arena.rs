@@ -1002,8 +1002,8 @@ mod tests {
             termination: Some(probelab_lab::ArenaTermination::Decided),
             tested_agent: "perfect_tictactoe".to_owned(),
             opponent_agent: "perfect_tictactoe".to_owned(),
-            tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
-            opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
+            tested_seat: Some(probelab_engine::arena::SeatKind::ReferencePolicy),
+            opponent_seat: Some(probelab_engine::arena::SeatKind::ReferencePolicy),
             tested_side: GameSide::First,
             seed: 1,
             plies: 9,
@@ -1017,7 +1017,7 @@ mod tests {
             turns: Vec::new(),
             timeline: Vec::new(),
             failure: None,
-            cancelled: false,
+            cancelled: Some(false),
         }
     }
 

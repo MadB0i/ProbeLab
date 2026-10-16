@@ -399,7 +399,15 @@ fn summarise(key: &GroupKey, views: &[&ArenaMatchView]) -> MatchStatistics {
     for view in views {
         outcomes.record(view.outcome);
         population.absorb(view);
-        if view.cancelled {
+        /*
+         * `None` means the recording predates the flag, and is **not** counted as "not cancelled".
+         *
+         * Counting an unknown as a known negative would place historical rows on one side of a
+         * statement about who stopped what, which is precisely the invention B4 exists to prevent. The
+         * population's `unclassified` bucket already reports rows whose reason is not recorded; this
+         * keeps the cancellation count honest for the rows that do record it.
+         */
+        if view.cancelled == Some(true) {
             cancelled += 1;
         }
         if view.failure.is_some() {
