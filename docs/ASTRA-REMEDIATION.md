@@ -19,7 +19,7 @@ progress, **not** a completed B6 fix, and the NO-GO verdict below is unchanged b
 | **B11** saved settings do not govern subsequent runs | **CLOSED** — fixed because it blocked B3 |
 | **B1, B2, B5** Arena eligibility, `/v1` duplication, live init and early cancellation | **CLOSED** |
 | **B9, B10** bounded provider reads, redaction before truncation | **CLOSED** |
-| **B6** failure accounting | **BLOCKED** — implemented and unit-tested; **no product-level proof** (response delivery unresolved) |
+| **B6** failure accounting | **CLOSED** — 31 product-level checks; forfeits, infrastructure failures and denominators verified through the real application and across a restart |
 | **B4, B7, B8, B12–B15** | **OPEN** |
 
 Two things must not be misread from this commit:
@@ -106,10 +106,69 @@ PASS  reliability fell to 4 of 7 — conditional 4 of 7
 PASS  the population buckets account for every attempted match — 10 accounted for 10 attempted
 ```
 
-**Not yet demonstrated: the forfeit case.** The controlled provider reports every call as invalid, yet
-the matches played to completion with a 0.5 win rate rather than forfeiting — the adapter is tolerating
-`NOT_A_MOVE` instead of rejecting it. That is a defect in the **harness provider**, not yet shown to be
-a product defect, and it must be resolved before B6 can be closed on the forfeit case.
+
+### The forfeit case — and a harness that lied about it
+
+The controlled server logged `invalid: true` on every call while returning a perfectly legal move on
+every call. `decide()` checked only `answerNextInvalidly`, while the request log recorded
+`answerNextInvalidly || mode === "alwaysInvalidly"` — two different expressions for one fact. The
+assertion read the log, so it passed, while four matches played out normally to a 0.5 win rate.
+
+**The product was never at fault.** `parse_game_move_response` (`crates/model-adapters/src/game.rs`)
+maps `NOT_A_MOVE` to `ActionProtocolError::UnknownAction`: it matches no canonical name, is not a bare
+one-based index, and does not carry the game's prefix (`COLUMN_`/`CELL_`). There is no fallback that
+repairs an unknown action into a legal one, and the documented tolerance — accepting `{"move":"3"}` as a
+bare index for Connect Four — is deliberately narrow and untouched.
+
+Both the response and the log now derive from one function, and the server records the payload it
+actually sent. The assertion reads that payload, not a flag about itself.
+
+### B6 — CLOSED
+
+`scripts/b6-failure-accounting.mjs`, against the isolated archive, **31 checks, all passing**:
+
+```
+=== 1. All-forfeit (provider answers NOT_A_MOVE on every call) ===
+PASS the provider really answered with an unparseable action — 4 of 4 payloads were NOT_A_MOVE
+PASS four matches were recorded — attempted 4
+PASS all four are forfeits, not absences — forfeited 4
+PASS the win rate is 0% over four decided matches, not an empty denominator — win rate 0
+PASS every forfeit is recorded as a loss — loss 4
+PASS no infrastructure failure or cancellation was invented — infra 0, cancelled 0, unknown 0
+
+=== 2. Provider 503 on every call ===
+PASS the three unreachable-provider matches are infrastructure failures — infrastructure 3
+PASS none of them became a forfeit — forfeited still 4
+PASS none of them became a loss — loss 4 — unchanged by the three provider failures
+
+=== 3. Mixed ===
+PASS ten matches attempted in total — attempted 10
+PASS the population buckets account for every attempted match — 10 accounted for 10 attempted
+PASS conditional equals wins + draws + losses
+
+=== 4. Restart against the same database ===
+PASS the population is identical — attempted 10, conditional 7, forfeited 4,
+    infrastructureFailures 3, cancelled 0, unclassified 0
+PASS the win rate is identical — 0.2857142857142857 -> 0.2857142857142857
+PASS a per-match recording reopens with its termination intact — model_rule_violation, outcome loss
+PASS the four forfeits are still forfeits after the restart — 4 forfeited recordings
+
+=== 5. The panel ===
+PASS the reliability block is on the page — Execution reliability heading
+PASS it states the denominator — 70.0% 7 of 10 attempted
+PASS it draws every bucket — all six buckets
+```
+
+The decisive property: **a model that forfeits every match reports a 0% win rate over four decided
+matches**, and provider failures never become losses. Both are what B6 was about.
+
+Three assertions in this script were themselves wrong and were fixed rather than loosened: two read a
+`decided` field that does not exist on `outcomes`, and one compared mixed-case labels against
+`innerText`, which returns the CSS-`text-transform`ed form. A fourth double-counted decided matches when
+checking reliability. None of these were product failures.
+
+**Still open within B6's area:** cancellation during a batch and legacy unclassified records are covered
+by unit and store tests but are **not** yet exercised through the real application.
 
 ---
 

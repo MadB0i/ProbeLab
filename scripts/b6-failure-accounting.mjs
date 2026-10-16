@@ -272,6 +272,19 @@ await ui.evaluate('location.hash = "#/arena"; true');
 await wait(2500);
 
 const summaries = [];
+/*
+ * The decided count, derived the way the backend derives it.
+ *
+ * There is no decided field on outcomes - it is a sum. Two earlier assertions in this script read
+ * a field that does not exist, got undefined, compared undefined === 4, failed, and were then
+ * at risk of being 'fixed' by loosening the comparison. Deriving it keeps the assertion about the
+ * number rather than about a property of this file.
+ */
+const decided = (group) =>
+  group?.decisions.outcomes.win +
+  group?.decisions.outcomes.draw +
+  group?.decisions.outcomes.loss;
+
 const populationAfter = async (label) => {
   const statistics = await readStatistics(ui);
   const group = statistics.groups.find((g) => g.game === "connect_four");
@@ -289,12 +302,22 @@ check(
   forfeitReport?.timedOut ? `no response within ${forfeitReport.timeoutMs}ms` : "returned",
 );
 {
-  const { group } = await populationAfter("forfeit");
+const { group } = await populationAfter("forfeit");
   const population = group?.population;
+  /*
+   * Asserted on the payload the server actually sent, not on a mode flag it recorded about itself.
+   *
+   * This distinction is the whole reason this check reads `answered` rather than `invalid`. The server
+   * once logged `invalid: true` on every call while returning a legal move on every call, and the
+   * assertion that read the log passed while four matches played normally to a 0.5 win rate. A harness
+   * whose bookkeeping can disagree with its behaviour will always report the behaviour it wishes for.
+   */
+  const callsSoFar = (await providerStats()).log;
+  const answeredInvalidly = callsSoFar.filter((c) => c.answered === '{"move":"NOT_A_MOVE"}');
   check(
-    "the provider was actually called and refused",
-    (await providerStats()).calls > 0,
-    `${(await providerStats()).calls} calls, all invalid`,
+    "the provider really answered with an unparseable action",
+    callsSoFar.length > 0 && answeredInvalidly.length === callsSoFar.length,
+    `${answeredInvalidly.length} of ${callsSoFar.length} payloads were NOT_A_MOVE`,
   );
   check(
     "four matches were recorded",
@@ -313,7 +336,8 @@ check(
   );
   check(
     "the win rate is 0% over four decided matches, not an empty denominator",
-    group?.decisions.winRate.point === 0 && group?.decisions.outcomes.decided === 4,
+    group?.decisions.winRate.point === 0 &&
+      group?.decisions.outcomes.win + group?.decisions.outcomes.draw + group?.decisions.outcomes.loss === 4,
     `win rate ${group?.decisions.winRate.point}, decided ${group?.decisions.outcomes.decided}`,
   );
   check(
@@ -422,8 +446,8 @@ const beforeRestart = await populationAfter("mixed");
   );
   check(
     "reliability is the conditional share of all ten attempted",
-    population?.conditional === 4 + (group?.decisions.outcomes.decided ?? 0) - 4,
-    `conditional ${population?.conditional}, attempted ${population?.attempted}`,
+population?.conditional === decided(group) && population?.attempted === 10,
+    `conditional ${population?.conditional}, decided ${decided(group)}, attempted ${population?.attempted}`,
   );
   /*
    * The decisive identity: every attempted match is in exactly one bucket.
@@ -439,7 +463,7 @@ const beforeRestart = await populationAfter("mixed");
   );
   check(
     "conditional equals wins + draws + losses",
-    population.conditional === group.decisions.outcomes.decided,
+    population.conditional === decided(group),
     `conditional ${population.conditional}, decided ${group.decisions.outcomes.decided}`,
   );
 }
@@ -501,7 +525,7 @@ await wait(2000);
       const pop = document.querySelector(".stats-population");
       return JSON.stringify({
         present: !!pop,
-        text: pop ? pop.innerText.replace(/\\s+/g, " ").slice(0, 400) : null,
+        text: pop ? pop.innerText.replace(/\\s+/g, " ") : null,
         hasReliabilityLabel: /Execution reliability/i.test(text),
       });
     })()`),
@@ -515,8 +539,16 @@ await wait(2000);
     );
     check(
       "it draws every bucket",
+      /*
+       * Compared case-insensitively, and deliberately so.
+       *
+       * `innerText` is the *rendered* text, so it reflects CSS `text-transform`. The bucket labels are
+       * styled uppercase, and an earlier version of this assertion compared them against the mixed-case
+       * strings in the component and failed on five of six — reporting a missing bucket that was on the
+       * screen the whole time. Matching the rendered form is what the check actually means.
+       */
       ["Attempted", "Reached a game outcome", "Forfeited", "Provider or harness failure", "Stopped by the operator", "Reason not recorded"].every((label) =>
-        (rendered.text ?? "").includes(label),
+        (rendered.text ?? "").toLowerCase().includes(label.toLowerCase()),
       ),
       "all six buckets",
     );

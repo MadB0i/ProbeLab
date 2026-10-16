@@ -86,7 +86,20 @@ let mode = "valid";
  * this always plays a real game to its real end.
  */
 function decide(body) {
-  if (answerNextInvalidly) return '{"move":"NOT_A_MOVE"}';
+  /*
+   * The invalid answer, keyed on the same condition that is logged.
+   *
+   * These two were once different expressions. `decide` checked only `answerNextInvalidly` while the
+   * request log recorded `answerNextInvalidly || mode === "alwaysInvalidly"` — so in `alwaysInvalidly`
+   * mode the server **wrote `invalid: true` to its own log on every call and answered with a perfectly
+   * legal move on every call**. The test that used it asserted "every call was invalid" and passed,
+   * because it read the log, while four matches played out normally and produced a 0.5 win rate.
+   *
+   * That is the whole failure mode this server exists to avoid: a harness whose bookkeeping disagrees
+   * with its behaviour reports the behaviour it wishes for. Deriving both from one function means a
+   * future mode cannot make them diverge again.
+   */
+  if (answerNextInvalidly || mode === "alwaysInvalidly") return '{"move":"NOT_A_MOVE"}';
 
   /*
    * Where the legal vocabulary actually is.
@@ -177,6 +190,7 @@ const server = createServer((request, response) => {
       }
 
       const content = decide(body);
+      calls[calls.length - 1].answered = content;
       setTimeout(() => {
         if (response.writableEnded) {
           return;
