@@ -13,8 +13,8 @@
 
 use probelab_core::{GameBoard, GameSide, TicTacToeCell};
 use probelab_lab::{
-    frame_at, replay_experiment, replay_match, ArenaOutcome, IllegalMoveView, PlyView,
-    ReplayCapability, ReplaySource,
+    frame_at, replay_experiment, replay_match, ArenaOutcome, ArenaTermination, IllegalMoveView,
+    PlyView, ReplayCapability, ReplaySource,
 };
 use probelab_lab::{ArenaMatchView, EventSource, LabEvent, Severity};
 
@@ -24,6 +24,7 @@ fn drawn_match() -> ArenaMatchView {
         game: "tic_tac_toe".to_owned(),
         game_name: "Tic-Tac-Toe".to_owned(),
         outcome: ArenaOutcome::Draw,
+        termination: Some(ArenaTermination::Decided),
         tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
         opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
         tested_agent: "perfect_tictactoe".to_owned(),

@@ -444,14 +444,24 @@ impl GeminiProvider {
             })?;
 
         let status = response.status();
-        let raw = response.text().await.map_err(|error| ModelCallFailure {
-            kind: ModelCallFailureKind::TransportDisconnect,
-            message: "the Gemini response body could not be read".to_owned(),
-            response_text: Some(sanitize_response_text(&error.to_string(), &credential)),
-            usage: None,
-            elapsed_ms: Some(elapsed_ms(started)),
-            http_status: None,
-        })?;
+        /*
+         * Bounded while reading, for the same reason and with the same limit as the OpenAI-compatible and
+         * Anthropic adapters (audit finding B9). This adapter had the identical unbounded
+         * `text().await`, so fixing only the first one would have left the finding half-answered.
+         */
+        let raw = match crate::transport::read_bounded_response(response).await {
+            Ok(bounded) => bounded.text,
+            Err(error) => {
+                return Err(ModelCallFailure {
+                    kind: ModelCallFailureKind::TransportDisconnect,
+                    message: "the Gemini response body could not be read".to_owned(),
+                    response_text: Some(sanitize_response_text(&error.to_string(), &credential)),
+                    usage: None,
+                    elapsed_ms: Some(elapsed_ms(started)),
+                    http_status: None,
+                });
+            }
+        };
 
         if !status.is_success() {
             // Classified through the shared rules, for the same reason the Anthropic adapter does:

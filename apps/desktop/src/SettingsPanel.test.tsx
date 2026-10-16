@@ -18,6 +18,9 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsPanel } from "./SettingsPanel";
+import {
+  subscribeToSettingsChanges,
+} from "./settingsSync";
 import * as api from "./api";
 import type { LabSettings, SettingsView } from "./api";
 
@@ -490,5 +493,71 @@ describe("persistence across a reload", () => {
     render(<SettingsPanel />);
     expect(await screen.findByLabelText("EPISODES")).toHaveValue(9);
     expect(screen.getByLabelText("MODEL")).toHaveValue("persisted-model");
+  });
+});
+
+describe("a saved document reaches the execution state", () => {
+  /*
+   * Audit finding B11.
+   *
+   * The episode count a person sets here used to be copied into the application once, when it mounted,
+   * and never re-read. A save was durable, the panel confirmed "They will be used for future experiments
+   * and runs", and the next run used the value the application had started with. The confirmation was
+   * false, which is worse than having no confirmation at all.
+   *
+   * These two tests are the whole of the fix's contract: announce after a write that landed, and stay
+   * silent after one that did not. Announcing a failed save would re-read the unchanged document and make
+   * a rejection look like it had taken effect.
+   */
+  it("announces a save the backend accepted", async () => {
+    render(<SettingsPanel />);
+    fireEvent.change(await screen.findByLabelText("EPISODES"), { target: { value: "4" } });
+
+    let announcements = 0;
+    const unsubscribe = subscribeToSettingsChanges(() => {
+      announcements += 1;
+    });
+    try {
+      fireEvent.click(saveButton());
+      await waitFor(() => expect(announcements).toBeGreaterThan(0));
+      expect(stored.settings.experimentDefaults.episodes).toBe(4);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("stays silent when the backend refuses the save", async () => {
+    vi.spyOn(api, "applySettings").mockRejectedValueOnce(new Error("refused by the backend"));
+    render(<SettingsPanel />);
+    fireEvent.change(await screen.findByLabelText("EPISODES"), { target: { value: "4" } });
+
+    let announcements = 0;
+    const unsubscribe = subscribeToSettingsChanges(() => {
+      announcements += 1;
+    });
+    try {
+      fireEvent.click(saveButton());
+      await screen.findByRole("alert");
+      expect(announcements).toBe(0);
+      // The stored document is untouched, so the execution state would still be right to keep.
+      expect(stored.settings.experimentDefaults.episodes).toBe(5);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("re-reads rather than trusting the submitted document", async () => {
+    // The backend adjusted the value on the way in. An execution state built from the *submitted*
+    // document would run 4 episodes; one built from what is stored runs 6.
+    vi.spyOn(api, "applySettings").mockImplementation(async (settings: LabSettings) => {
+      stored = { ...view({ ...settings, experimentDefaults: { ...settings.experimentDefaults, episodes: 6 } }), isDefault: false };
+      return stored;
+    });
+    render(<SettingsPanel />);
+    fireEvent.change(await screen.findByLabelText("EPISODES"), { target: { value: "4" } });
+    fireEvent.click(saveButton());
+    await screen.findByRole("status");
+    expect(stored.settings.experimentDefaults.episodes).toBe(6);
+    expect((await screen.findByLabelText("EPISODES"))).toHaveValue(6);
   });
 });

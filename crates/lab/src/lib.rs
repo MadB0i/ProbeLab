@@ -41,8 +41,9 @@ pub use agents::{
     AgentSpec,
 };
 pub use arena::{
-    available_games, provenance_digest, ArenaGame, ArenaMatch, ArenaMatchSpec, ArenaMatchView,
-    ArenaOutcome, ArenaRunError, ArenaRunner, IllegalMoveView, PlyView, TurnTelemetry,
+    available_games, empty_board, provenance_digest, ArenaGame, ArenaMatch, ArenaMatchSpec,
+    ArenaMatchView, ArenaOutcome, ArenaRunError, ArenaRunner, ArenaTermination, IllegalMoveView,
+    PlyView, TurnTelemetry,
 };
 pub use arena_stats::{
     arena_statistics, ArenaStatistics, CostStatistics, DecisionStatistics, MatchStatistics,
@@ -93,5 +94,6 @@ pub use settings_view::{
 };
 pub use view::{
     BrainReadModel, DecisionView, EpisodeFailureView, EpisodeView, ExperimentView, SecuritySummary,
-    SignalInterpretation, SignalView, TimelineEntryView,
+    SignalInterpretation, SignalView, StoredExperimentDocument, StoredExperimentShape,
+    TimelineEntryView, STORED_EXPERIMENT_VERSION,
 };

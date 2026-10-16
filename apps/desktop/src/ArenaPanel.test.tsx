@@ -161,6 +161,13 @@ function renderPanel(overrides: Partial<React.ComponentProps<typeof ArenaPanel>>
     openingId: null,
     error: null,
     canPlay: true,
+    /*
+     * Supplied explicitly, as `canPlay` itself always was. This is the gap audit finding B1 identified:
+     * the panel was tested with an eligibility it was never actually given, so the parent's faulty
+     * condition was invisible to it. The rule is now tested directly in `arenaEligibility.test.ts`;
+     * what matters here is that the panel renders the reasons it is handed.
+     */
+    eligibilityReasons: [],
     batch: {
       statistics: null,
       running: false,

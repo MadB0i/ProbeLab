@@ -13,8 +13,8 @@ use probelab_core::{GameBoard, GameKind, GameSide, TicTacToeCell, TokenUsage};
 use probelab_engine::arena::SeatKind;
 use probelab_lab::arena_stats::{arena_statistics, DEFAULT_CONFIDENCE, SMALL_SAMPLE_MATCHES};
 use probelab_lab::{
-    ArenaMatchSpec, ArenaMatchView, ArenaOutcome, ArenaRunner, IllegalMoveView, PlyView,
-    TurnTelemetry,
+    ArenaMatchSpec, ArenaMatchView, ArenaOutcome, ArenaRunner, ArenaTermination, IllegalMoveView,
+    PlyView, TurnTelemetry,
 };
 
 /// The default pairing used by the distribution fixtures.
@@ -34,6 +34,18 @@ fn recorded(
     outcome: ArenaOutcome,
     turns: Vec<TurnTelemetry>,
 ) -> ArenaMatchView {
+    recorded_with(match_id, game, outcome, None, turns)
+}
+
+/// As [`recorded`], with an explicit termination, so the non-conditional terminations can be exercised
+/// without a hand-built engine match that fails to reach a provider.
+fn recorded_with(
+    match_id: &str,
+    game: &str,
+    outcome: ArenaOutcome,
+    termination: Option<ArenaTermination>,
+    turns: Vec<TurnTelemetry>,
+) -> ArenaMatchView {
     ArenaMatchView {
         match_id: match_id.to_owned(),
         game: game.to_owned(),
@@ -43,6 +55,7 @@ fn recorded(
             other => other.to_owned(),
         },
         outcome,
+        termination,
         tested_agent: TESTED.to_owned(),
         opponent_agent: OPPONENT.to_owned(),
         tested_seat: SeatKind::Model,
@@ -606,4 +619,232 @@ fn statistics_computed_from_real_engine_matches() {
             group.match_ids
         );
     }
+}
+
+// ============================================================================
+// Audit finding B6 — failure accounting.
+//
+// The defect these cover: a seat that was reached, answered, and named something no legal move can be
+// read from produced `NoResult`, which is excluded from every rate denominator. A model that failed
+// every single match therefore reported *no results* rather than *zero wins out of every match*, and a
+// batch with three clean matches and seven fortresses showed a 100% win rate over a population of
+// three.
+// ============================================================================
+
+fn no_turns() -> Vec<TurnTelemetry> {
+    Vec::new()
+}
+
+#[test]
+fn a_forfeit_is_a_loss_and_stays_in_the_denominator() {
+    let views = vec![
+        recorded_with(
+            "won-1",
+            "tic_tac_toe",
+            ArenaOutcome::Win,
+            Some(ArenaTermination::Decided),
+            no_turns(),
+        ),
+        recorded_with(
+            "forfeit-1",
+            "tic_tac_toe",
+            ArenaOutcome::Loss,
+            Some(ArenaTermination::ModelRuleViolation),
+            no_turns(),
+        ),
+    ];
+    let group = &arena_statistics(&views).groups[0];
+
+    // The forfeit is a loss, and losses are in the decided denominator. One win and one loss.
+    assert_eq!(group.decisions.outcomes.loss, 1);
+    assert_eq!(group.decisions.outcomes.win, 1);
+    assert_eq!(group.decisions.outcomes.decided(), 2);
+    assert_eq!(
+        group.decisions.win_rate.point, 0.5,
+        "a forfeited match must count against the win rate, not vanish from it"
+    );
+    assert_eq!(group.population.conditional, 2);
+    assert_eq!(group.population.forfeited, 1);
+}
+
+#[test]
+fn zero_success_reports_a_zero_win_rate_rather_than_no_results() {
+    // The exact failure B6 describes: every match forfeited. Nothing was ever won.
+    let views: Vec<ArenaMatchView> = (0..5)
+        .map(|index| {
+            recorded_with(
+                &format!("forfeit-{index}"),
+                "tic_tac_toe",
+                ArenaOutcome::Loss,
+                Some(ArenaTermination::ModelRuleViolation),
+                no_turns(),
+            )
+        })
+        .collect();
+    let group = &arena_statistics(&views).groups[0];
+
+    assert_eq!(group.decisions.outcomes.win, 0);
+    assert_eq!(group.decisions.outcomes.decided(), 5);
+    assert_eq!(
+        group.decisions.win_rate.point, 0.0,
+        "five forfeits must read as a 0% win rate, not as an absence of results"
+    );
+    assert_eq!(group.population.conditional, 5);
+    assert_eq!(group.population.forfeited, 5);
+    assert_eq!(group.population.excluded(), 0);
+}
+
+#[test]
+fn infrastructure_failures_are_excluded_from_the_rate_but_counted_beside_it() {
+    // Three decided matches and seven the harness never managed. The rate is about the three; the
+    // population has to say so out loud, which is the whole point of B6.
+    let mut views: Vec<ArenaMatchView> = (0..3)
+        .map(|index| {
+            recorded_with(
+                &format!("clean-{index}"),
+                "tic_tac_toe",
+                ArenaOutcome::Win,
+                Some(ArenaTermination::Decided),
+                no_turns(),
+            )
+        })
+        .collect();
+    for index in 0..7 {
+        views.push(recorded_with(
+            &format!("provider-down-{index}"),
+            "tic_tac_toe",
+            ArenaOutcome::NoResult,
+            Some(ArenaTermination::InfrastructureFailure),
+            no_turns(),
+        ));
+    }
+    let group = &arena_statistics(&views).groups[0];
+
+    assert_eq!(group.decisions.outcomes.win, 3);
+    assert_eq!(group.decisions.outcomes.decided(), 3);
+    assert_eq!(group.population.attempted, 10);
+    assert_eq!(group.population.conditional, 3);
+    assert_eq!(group.population.infrastructure_failures, 7);
+    assert_eq!(group.population.excluded(), 7);
+    assert_eq!(
+        group.population.reliability(),
+        Some(0.3),
+        "three of ten attempted matches produced a conditional outcome"
+    );
+}
+
+#[test]
+fn a_cancellation_is_not_an_infrastructure_failure_and_not_a_loss() {
+    let views = vec![
+        recorded_with(
+            "decided-1",
+            "tic_tac_toe",
+            ArenaOutcome::Win,
+            Some(ArenaTermination::Decided),
+            no_turns(),
+        ),
+        recorded_with(
+            "cancelled-1",
+            "tic_tac_toe",
+            ArenaOutcome::NoResult,
+            Some(ArenaTermination::Cancelled),
+            no_turns(),
+        ),
+        recorded_with(
+            "provider-down-1",
+            "tic_tac_toe",
+            ArenaOutcome::NoResult,
+            Some(ArenaTermination::InfrastructureFailure),
+            no_turns(),
+        ),
+    ];
+    let group = &arena_statistics(&views).groups[0];
+
+    assert_eq!(group.population.cancelled, 1);
+    assert_eq!(group.population.infrastructure_failures, 1);
+    assert_eq!(group.population.conditional, 1);
+    assert_eq!(group.population.attempted, 3);
+    // An operator pressing stop has not made the seat lose, so nothing moved into the loss bucket.
+    assert_eq!(group.decisions.outcomes.loss, 0);
+    assert_eq!(group.decisions.outcomes.win, 1);
+}
+
+#[test]
+fn a_historical_recording_without_a_termination_is_unclassified_never_assumed_decided() {
+    // A row written before the termination existed. Guessing `decided` would move infrastructure
+    // failures into the outcome population and inflate the conditional denominator.
+    let views = vec![
+        recorded_with(
+            "legacy-1",
+            "tic_tac_toe",
+            ArenaOutcome::NoResult,
+            None,
+            no_turns(),
+        ),
+        recorded_with(
+            "legacy-2",
+            "tic_tac_toe",
+            ArenaOutcome::Win,
+            None,
+            no_turns(),
+        ),
+    ];
+    let group = &arena_statistics(&views).groups[0];
+
+    assert_eq!(group.population.unclassified, 2);
+    assert_eq!(group.population.conditional, 0);
+    assert_eq!(group.population.attempted, 2);
+}
+
+#[test]
+fn the_two_populations_are_reported_together_and_sum_to_the_attempted_count() {
+    let mut views: Vec<ArenaMatchView> = Vec::new();
+    for (index, (outcome, termination)) in [
+        (ArenaOutcome::Win, Some(ArenaTermination::Decided)),
+        (ArenaOutcome::Loss, Some(ArenaTermination::Decided)),
+        (ArenaOutcome::Draw, Some(ArenaTermination::Decided)),
+        (
+            ArenaOutcome::Loss,
+            Some(ArenaTermination::ModelRuleViolation),
+        ),
+        (
+            ArenaOutcome::NoResult,
+            Some(ArenaTermination::InfrastructureFailure),
+        ),
+        (ArenaOutcome::NoResult, Some(ArenaTermination::Cancelled)),
+        (ArenaOutcome::NoResult, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        views.push(recorded_with(
+            &format!("mix-{index}"),
+            "tic_tac_toe",
+            outcome,
+            termination,
+            no_turns(),
+        ));
+    }
+    let group = &arena_statistics(&views).groups[0];
+    let population = group.population;
+
+    // Every attempted match is accounted for exactly once. A statistic that drops a bucket is the
+    // failure this whole finding is about.
+    assert_eq!(population.attempted, 7);
+    assert_eq!(
+        population.conditional
+            + population.infrastructure_failures
+            + population.cancelled
+            + population.unclassified,
+        population.attempted,
+        "a match went missing between the buckets"
+    );
+    assert_eq!(population.conditional, 4);
+    assert_eq!(population.forfeited, 1);
+    assert_eq!(population.infrastructure_failures, 1);
+    assert_eq!(population.cancelled, 1);
+    assert_eq!(population.unclassified, 1);
+    // Conditional win rate: 1 win of 4 conditional matches, forfeits included.
+    assert_eq!(group.decisions.outcomes.decided(), 4);
+    assert_eq!(group.decisions.win_rate.point, 0.25);
 }

@@ -426,14 +426,19 @@ impl AnthropicProvider {
             .get("request-id")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        let raw = response.text().await.map_err(|error| ModelCallFailure {
-            kind: ModelCallFailureKind::TransportDisconnect,
-            message: "the Anthropic response body could not be read".to_owned(),
-            response_text: Some(sanitize_response_text(&error.to_string(), &credential)),
-            usage: None,
-            elapsed_ms: Some(elapsed_ms(started)),
-            http_status: None,
-        })?;
+        let raw = match crate::transport::read_bounded_response(response).await {
+            Ok(bounded) => bounded.text,
+            Err(error) => {
+                return Err(ModelCallFailure {
+                    kind: ModelCallFailureKind::TransportDisconnect,
+                    message: "the Anthropic response body could not be read".to_owned(),
+                    response_text: Some(sanitize_response_text(&error.to_string(), &credential)),
+                    usage: None,
+                    elapsed_ms: Some(elapsed_ms(started)),
+                    http_status: None,
+                });
+            }
+        };
 
         if !status.is_success() {
             // Classified through the shared rules rather than a local `HttpError`, so a 404 naming a

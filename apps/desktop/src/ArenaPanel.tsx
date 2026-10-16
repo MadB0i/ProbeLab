@@ -698,6 +698,13 @@ export type ArenaPanelProps = {
   openingId: string | null;
   error: string | null;
   canPlay: boolean;
+  /**
+   * Why a single match cannot start, rendered beside the disabled control.
+   *
+   * Required rather than optional: an empty array would hide the explanation, and the whole point of
+   * carrying the reasons out of `arenaMatchEligibility` is that a refusal is never silent.
+   */
+  eligibilityReasons: string[];
   /** Everything the batch statistics panel needs, passed through so this panel stays one component. */
   batch: BatchStatisticsProps;
 };
@@ -727,6 +734,7 @@ export function ArenaPanel(props: ArenaPanelProps) {
     openingId,
     error,
     canPlay,
+    eligibilityReasons,
     batch,
   } = props;
 
@@ -936,6 +944,7 @@ export function ArenaPanel(props: ArenaPanelProps) {
             </label>
             <SeatPicker
               label="Under test"
+              role="tested"
               agents={agents}
               seat={testedSeat}
               localModels={localModels}
@@ -945,6 +954,7 @@ export function ArenaPanel(props: ArenaPanelProps) {
             />
             <SeatPicker
               label="Opponent"
+              role="opponent"
               agents={agents}
               seat={opponentSeat}
               localModels={localModels}
@@ -1002,6 +1012,20 @@ export function ArenaPanel(props: ArenaPanelProps) {
               </button>
             ) : null}
           </div>
+          {/*
+            Why Play is unavailable, beside the control that is unavailable.
+
+            A disabled button with no stated reason is a control the operator has to reverse-engineer.
+            `arenaEligibility` supplies a sentence for every refusal, including the one that made the
+            model workflow unreachable in the first place.
+          */}
+          {!canPlay && eligibilityReasons.length > 0 ? (
+            <ul className="arena-setup__blockers" role="status">
+              {eligibilityReasons.map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+          ) : null}
           {playing ? (
             <p className="arena-setup__note" role="status">
               A match against a real model runs one provider call per turn, so it takes real time.
@@ -1072,6 +1096,7 @@ export function staleFor(
  */
 function SeatPicker({
   label,
+  role,
   agents,
   seat,
   localModels,
@@ -1080,6 +1105,13 @@ function SeatPicker({
   onChange,
 }: {
   label: string;
+  /**
+   * Which seat this picker fills — `tested` or `opponent`.
+   *
+   * Passed rather than derived from `label`, because the visible label is copy that may be reworded and a
+   * test hook derived from copy breaks the moment it is. This is the stable name.
+   */
+  role: "tested" | "opponent";
   agents: ArenaAgentSummary[];
   seat: ArenaSeatRequest;
   localModels: string[];
@@ -1089,11 +1121,20 @@ function SeatPicker({
 }) {
   const value = seat.kind === "policy" ? `policy:${seat.id}` : `model:${seat.label}`;
   return (
-    <label className="field">
+    /*
+     * `data-seat` names which picker this is.
+     *
+     * The two pickers are visually and semantically identical — same label shape, same option groups —
+     * so an end-to-end script driving the real panel had no way to address "the tested seat" as opposed
+     * to whichever came first in the document. That is a testability gap caused by a missing label, not
+     * a product defect, and it is cheaper to label the control than to have the script guess by index.
+     */
+    <label className="field" data-seat={role}>
       <span>{label}</span>
       <select
         value={value}
         disabled={disabled}
+        aria-label={`${label} participant`}
         onChange={(event) => {
           const chosen = event.target.value;
           if (chosen.startsWith("policy:")) {

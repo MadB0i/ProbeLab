@@ -460,6 +460,34 @@ pub async fn play_arena_match(
     let id_for_turns = match_id.clone();
     let archive = state.arena_matches.clone();
 
+    /*
+     * The match has a stable identity from this point, before any turn is played.
+     *
+     * Audit finding B5. The identifier used to be learned from the first completed turn, which was too
+     * late twice over: a match against a real model spends real time on its opening provider call before
+     * that event exists, so STOP had nothing to address and silently did nothing; and the panel builds
+     * the live board by folding turns into an existing match, so every turn arriving before the terminal
+     * event had nowhere to land and was dropped.
+     *
+     * Emitted on its own channel rather than on `ARENA_MATCH_EVENT`, because that one carries the
+     * terminal recording and a batch also plays matches: a shared channel would let a batch's match
+     * install itself as the live single-match view.
+     */
+    if let Err(error) = app.emit(
+        ARENA_MATCH_STARTED_EVENT,
+        &ArenaMatchStartedEnvelope {
+            match_id: match_id.clone(),
+            game: game.as_str().to_owned(),
+            opening_board: probelab_lab::empty_board(game),
+        },
+    ) {
+        tracing::warn!(
+            error = %error,
+            "the arena could not publish its match identity; the match will still run, but the panel \
+             may not be able to show it live or stop it before the first turn"
+        );
+    }
+
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut on_turn = move |turn: &TurnTelemetry| {
             // The engine's own authoritative board, plus that turn's cost and identity. Emitted from
@@ -538,6 +566,45 @@ pub(crate) struct TurnEnvelope {
     pub(crate) match_id: String,
     pub(crate) turn: TurnTelemetry,
 }
+
+/// That a match has been accepted, before it has played a single turn.
+///
+/// # Why the frontend needs this before the first turn
+///
+/// The match identifier used to be learned from the first completed turn event. That is too late for two
+/// separate reasons:
+///
+/// * **Cancellation has no target.** A match against a real model spends real time on its opening
+///   provider call before a turn event exists, so pressing STOP during that window had no identifier to
+///   send and silently did nothing — the operator pressed stop and the match kept playing.
+/// * **The live view never initialises.** `App.tsx` builds the live board by folding turn events into an
+///   existing match, and with nothing to fold into, every turn arriving before the terminal event was
+///   discarded. The panel could sit empty, or keep the previous match's board, for the whole of a real
+///   match.
+///
+/// So the identifier is minted by the command that will own the match, published before execution
+/// begins, and every later event is filtered against it. The frontend never chooses it; it is told.
+///
+/// Separate from [`ARENA_MATCH_EVENT`], which carries the terminal recording. Emitting this on the same
+/// channel as the terminal view would let a batch's per-match start events install themselves as the
+/// live single-match view, which is exactly the overlap the audit identified.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ArenaMatchStartedEnvelope {
+    /// The identifier this match will be recorded and stopped under.
+    pub(crate) match_id: String,
+    /// Which game is being played, so the panel can title an empty board correctly.
+    pub(crate) game: String,
+    /// The opening board, before any turn has been played.
+    ///
+    /// The engine's own starting position rather than a frontend guess, for the same reason the live
+    /// board is never invented: a stage that opens on the wrong shape would misstate the game for the
+    /// whole of a slow opening call.
+    pub(crate) opening_board: probelab_core::GameBoard,
+}
+
+/// The event name for a match being accepted.
+pub(crate) const ARENA_MATCH_STARTED_EVENT: &str = "probe-lab/arena-match-started";
 
 /// Checks that both seats are legal for `game`, then builds them.
 ///
@@ -932,6 +999,7 @@ mod tests {
             game: "tic_tac_toe".to_owned(),
             game_name: "Tic-Tac-Toe".to_owned(),
             outcome: probelab_lab::ArenaOutcome::Draw,
+            termination: Some(probelab_lab::ArenaTermination::Decided),
             tested_agent: "perfect_tictactoe".to_owned(),
             opponent_agent: "perfect_tictactoe".to_owned(),
             tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,

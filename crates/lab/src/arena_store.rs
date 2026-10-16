@@ -68,6 +68,15 @@ pub struct ArenaMatchSummary {
     pub game: String,
     /// The outcome, as the engine recorded it.
     pub outcome: crate::arena::ArenaOutcome,
+    /// Why the match ended.
+    ///
+    /// Carried on the index row rather than only on the full view so a statistics fold can state its
+    /// population — conditional outcomes against everything attempted — without loading every recording
+    /// in the archive. `None` means the recording predates the field; it is never defaulted to
+    /// `Decided`, because a historical `NoResult` row says nothing about whether it was cancelled or the
+    /// provider was down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination: Option<crate::arena::ArenaTermination>,
     /// The tested policy.
     pub tested_agent: String,
     /// The opposing policy.
@@ -169,6 +178,17 @@ impl SqliteArenaMatchStore {
                     match_id: row.get(0)?,
                     game: row.get(1)?,
                     outcome: outcome_from_label(&row.get::<_, String>(2)?),
+                    /*
+                     * `None`, because the index table has no termination column.
+                     *
+                     * Adding one means a schema migration over the historical archive, and this pass is
+                     * explicitly not permitted to rewrite existing experimental evidence just to make a
+                     * query convenient. Population classification therefore reads the full recording,
+                     * where the reason was actually stored, rather than guessing it from the outcome
+                     * label — an outcome of `NoResult` does not say whether it was cancelled or the
+                     * provider was down.
+                     */
+                    termination: None,
                     tested_agent: row.get(3)?,
                     opponent_agent: row.get(4)?,
                     tested_side: side_from_label(&row.get::<_, String>(5)?),

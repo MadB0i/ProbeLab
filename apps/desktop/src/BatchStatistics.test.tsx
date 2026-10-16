@@ -55,6 +55,14 @@ function group(overrides: Partial<MatchStatistics> = {}): MatchStatistics {
       hasDecided: true,
     },
     plies: { total: 96, mean: 8, min: 5, max: 14 },
+    population: {
+      attempted: 12,
+      conditional: 10,
+      forfeited: 2,
+      infrastructureFailures: 1,
+      cancelled: 1,
+      unclassified: 0,
+    },
     illegalMoves: 3,
     matchesWithIllegalMoves: 2,
     costs: {
@@ -358,8 +366,22 @@ describe("cost reporting", () => {
         })}
       />,
     );
+    /*
+     * Scoped to the cost figures rather than asserted document-wide.
+     *
+     * This used to be `queryByText(/^0$/)` over the whole panel, on the reasoning that a zero anywhere
+     * would suggest something unreported had been turned into a number. The population block then
+     * introduced genuine zeros — a run with no cancelled matches really did have zero cancelled matches
+     * — and the broad assertion failed on a correct figure.
+     *
+     * The claim worth making is the original one: the *token* figures say "not reported" instead of 0.
+     * So it is asserted against the token rows directly, which tests the intent rather than a proxy
+     * that happened to be true when the panel was smaller.
+     */
+    const costFacts = screen.getByText("Total tokens").closest(".stats-stat") as HTMLElement;
+    expect(costFacts).toHaveTextContent("not reported");
+    expect(costFacts.textContent).not.toMatch(/\b0\b/);
     expect(screen.getAllByText("not reported").length).toBeGreaterThanOrEqual(3);
-    expect(screen.queryByText(/^0$/)).not.toBeInTheDocument();
   });
 
   it("reports illegal moves as their own count", () => {
@@ -465,5 +487,116 @@ describe("accessibility", () => {
     // accompanies figures the reader has already chosen to read — but it must exist in the tree.
     expect(within(screen.getByRole("region", { name: /batch statistics/i })).getAllByRole("note").length)
       .toBeGreaterThan(0);
+  });
+});
+
+/*
+ * Audit finding B6 — the population must be visible.
+ *
+ * The backend change is worthless if the panel still shows only a win rate: a reader would be looking
+ * at "100%" over three matches while seven failures sat invisibly outside the denominator. These assert
+ * that every bucket is drawn, with its denominator stated, and that the three figures cannot be
+ * confused for one another.
+ */
+describe("execution reliability (audit B6)", () => {
+  it("states the denominator beside every rate", () => {
+    render(<BatchStatistics {...props()} />);
+    expect(screen.getByText("Execution reliability")).toBeInTheDocument();
+    // 10 of 12 attempted, from the fixture's population.
+    expect(screen.getByText("10 of 12 attempted")).toBeInTheDocument();
+  });
+
+  it("draws every population bucket including the ones that are zero", () => {
+    render(<BatchStatistics {...props()} />);
+    for (const label of [
+      "Attempted",
+      "Reached a game outcome",
+      "Forfeited by the tested seat",
+      "Provider or harness failure",
+      "Stopped by the operator",
+      "Reason not recorded",
+    ]) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+  });
+
+  it("names the excluded matches so they cannot be read as a game outcome", () => {
+    render(<BatchStatistics {...props()} />);
+    expect(
+      screen.getByText(/2 matches are outside the game outcomes and do not appear as a win, a loss or a forfeit/),
+    ).toBeInTheDocument();
+  });
+
+  it("says a forfeit is counted as a loss rather than a fault", () => {
+    render(<BatchStatistics {...props()} />);
+const forfeited = screen.getByLabelText(/Counted as a loss/) as HTMLElement;
+    expect(forfeited.textContent).toContain("2");
+  });
+
+  it("says an infrastructure failure is not a game outcome", () => {
+    render(<BatchStatistics {...props()} />);
+const failure = screen.getByLabelText(
+      /^Provider or harness failure: 1\. Not a game outcome\./,
+    ) as HTMLElement;
+    expect(failure.textContent).toBe("1");
+  });
+
+  it("shows that a legacy recording's reason is unknown rather than guessing", () => {
+    render(
+      <BatchStatistics
+        {...props({
+          statistics: statistics([
+            group({
+              matches: 6,
+              population: {
+                attempted: 6,
+                conditional: 3,
+                forfeited: 0,
+                infrastructureFailures: 0,
+                cancelled: 0,
+                unclassified: 3,
+              },
+            }),
+          ]),
+        })}
+      />,
+    );
+const unknown = screen.getByLabelText(/not known and is not guessed/) as HTMLElement;
+    expect(unknown.textContent).toContain("3");
+  });
+
+  it("reports zero reliability as 0.0% rather than hiding an absent figure", () => {
+    // Every match failed to reach the provider: nothing was measured about the seat at all.
+    render(
+      <BatchStatistics
+        {...props({
+          statistics: statistics([
+            group({
+              matches: 4,
+              decisions: {
+                outcomes: { win: 0, draw: 0, loss: 0, noResult: 4 },
+                winRate: { point: 0, lower: 0, upper: 0, confidence: 0.95 },
+                decisiveWinRate: { point: 0, lower: 0, upper: 0, confidence: 0.95 },
+                cancelled: 0,
+                withFailure: 4,
+                hasDecided: false,
+              },
+              population: {
+                attempted: 4,
+                conditional: 0,
+                forfeited: 0,
+                infrastructureFailures: 4,
+                cancelled: 0,
+                unclassified: 0,
+              },
+            }),
+          ]),
+        })}
+      />,
+    );
+    expect(screen.getByText("0 of 4 attempted")).toBeInTheDocument();
+    expect(
+      screen.getByText(/4 matches are outside the game outcomes/),
+    ).toBeInTheDocument();
   });
 });

@@ -34,7 +34,7 @@ use probelab_core::{
 };
 use probelab_engine::arena::{
     play_match, ArenaError, BoxedSeat, IllegalMove, MatchConfig, MatchOutcome, MatchResult,
-    PlyOutcome, SeatKind,
+    MatchTermination as EngineTermination, PlyOutcome, SeatKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -186,7 +186,7 @@ impl From<&IllegalMove> for IllegalMoveView {
     fn from(illegal: &IllegalMove) -> Self {
         Self {
             ply: illegal.ply,
-            attempted: Some(illegal.attempted),
+            attempted: illegal.attempted,
             reason: illegal.reason.clone(),
         }
     }
@@ -212,6 +212,48 @@ pub enum ArenaOutcome {
     /// Not a loss. Nothing was won or lost; the arena stopped, and saying "loss" would blame a policy
     /// for a harness problem.
     NoResult,
+}
+
+/// Why a match stopped producing conditional game outcomes.
+///
+/// The distinction this enum exists to protect: "the match ended" has four different meanings, and a
+/// win rate that cannot tell them apart reports failures as successes-by-absence. A forfeit belongs in
+/// the game-outcome distribution; an unreachable provider and a cancelled match do not, and both have
+/// to be counted beside the number rather than dropped from it.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArenaTermination {
+    /// The rules reached a result.
+    Decided,
+    /// The tested seat was reached and answered unusably: a forfeit, and therefore a loss.
+    ModelRuleViolation,
+    /// The harness or provider could not deliver a usable answer. The model never got to answer.
+    InfrastructureFailure,
+    /// An operator stopped the match.
+    Cancelled,
+}
+
+impl ArenaTermination {
+    /// A stable machine-readable name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ArenaTermination::Decided => "decided",
+            ArenaTermination::ModelRuleViolation => "model_rule_violation",
+            ArenaTermination::InfrastructureFailure => "infrastructure_failure",
+            ArenaTermination::Cancelled => "cancelled",
+        }
+    }
+
+    /// Whether this termination still yields a conditional game outcome.
+    ///
+    /// A forfeit does: the tested seat broke the rules, which is a game outcome. The other two do not,
+    /// and must not enter the win/draw/loss denominator.
+    pub fn is_conditional(self) -> bool {
+        matches!(
+            self,
+            ArenaTermination::Decided | ArenaTermination::ModelRuleViolation
+        )
+    }
 }
 
 impl ArenaOutcome {
@@ -295,6 +337,14 @@ pub struct ArenaMatchView {
     pub game_name: String,
     /// What the match produced, or that it produced nothing.
     pub outcome: ArenaOutcome,
+    /// Why it ended.
+    ///
+    /// `None` means the recording predates this field and the reason is **not known**. It is not
+    /// defaulted to `Decided`: a historical `NoResult` row says nothing about whether the match was
+    /// cancelled or the provider was down, and guessing "decided" would put an infrastructure failure
+    /// into the game-outcome population. Unknown stays unknown and is counted separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination: Option<ArenaTermination>,
     /// The tested policy's identifier.
     pub tested_agent: String,
     /// The opponent's identifier.
@@ -903,6 +953,16 @@ impl ArenaRunner {
                             MatchOutcome::Draw => ArenaOutcome::Draw,
                             MatchOutcome::Loss => ArenaOutcome::Loss,
                         },
+                        termination: Some(match result.termination {
+                            EngineTermination::Decided => ArenaTermination::Decided,
+                            EngineTermination::ModelRuleViolation => {
+                                ArenaTermination::ModelRuleViolation
+                            }
+                            EngineTermination::InfrastructureFailure => {
+                                ArenaTermination::InfrastructureFailure
+                            }
+                            EngineTermination::Cancelled => ArenaTermination::Cancelled,
+                        }),
                         tested_agent: spec.tested_agent.clone(),
                         opponent_agent: spec.opponent_agent.clone(),
                         tested_seat: tested_seat_kind,
@@ -976,6 +1036,21 @@ impl ArenaRunner {
                         game: spec.game.as_str().to_owned(),
                         game_name: game_name(spec.game),
                         outcome: ArenaOutcome::NoResult,
+                        termination: Some(match &error {
+                            // Operator action, not a fault and not a result.
+                            ArenaError::Cancelled { .. } => ArenaTermination::Cancelled,
+                            // The tested seat broke the move protocol. This is a forfeit — a *loss* —
+                            // and it is still routed through this error path because the seat never
+                            // produced a move, so there is no ply to finish on. Classifying it as a
+                            // cancellation or an infrastructure failure is exactly the confusion B6
+                            // describes: it would drop a genuine model failure out of the population.
+                            ArenaError::SeatRefused { .. } | ArenaError::NotAGameMove { .. } => {
+                                ArenaTermination::ModelRuleViolation
+                            }
+                            // Everything else: the provider could not be reached or could not be
+                            // parsed. The model never got to answer.
+                            _ => ArenaTermination::InfrastructureFailure,
+                        }),
                         tested_agent: spec.tested_agent.clone(),
                         opponent_agent: spec.opponent_agent.clone(),
                         tested_seat: tested_seat_kind,
@@ -1004,12 +1079,16 @@ impl ArenaRunner {
     }
 }
 
-/// The opening board, for a match that produced no plies at all.
+/// The opening board, for a match that has not played a ply yet.
 ///
 /// Nine empty cells or forty-two, never an empty vector: a zero-length board would render as nothing
-/// and look like a missing result rather than a real one. This is reached only when a match failed on
-/// its very first ply.
-fn empty_board(kind: GameKind) -> GameBoard {
+/// and look like a missing result rather than a real one. Reached when a match failed on its very first
+/// ply, and — since audit finding B5 — also published when a match is *accepted*, so the panel can draw
+/// the correct starting position while the opening provider call is still outstanding.
+///
+/// Public because the desktop command that starts a match has to publish it, and a second copy of this
+/// table in the command layer would be a second thing to keep correct.
+pub fn empty_board(kind: GameKind) -> GameBoard {
     match kind {
         GameKind::TicTacToe => GameBoard::TicTacToe {
             cells: vec![probelab_core::TicTacToeCell::Empty; 9],

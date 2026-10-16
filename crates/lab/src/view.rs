@@ -114,6 +114,42 @@ impl BrainReadModel {
             security: SecuritySummary::from_results(&results),
         }
     }
+
+    /// Rebuilds a read model from a **persisted** experiment.
+    ///
+    /// The counterpart to [`Self::from_stored`], for a run whose whole structure was written down rather
+    /// than reconstructed from one stored result.
+    ///
+    /// # What is restored, and what is honestly absent
+    ///
+    /// The experiment is returned exactly as it was persisted: every episode, the aggregate and its
+    /// interval, the decisions, the failures, the timeline and the security totals. None of that is
+    /// recomputed, because recomputing it from a partial record is how a reconstruction becomes a second,
+    /// unaudited opinion about what the run measured.
+    ///
+    /// Two things were never persisted and are therefore empty rather than invented:
+    ///
+    /// * **Findings.** The anomaly list is produced by the live monitor while a run is in progress and
+    ///   has no durable equivalent. An empty list is the honest state; a reconstructed one would be
+    ///   invented.
+    /// * **Signals.** Derived from the same in-session event stream. Reported as absent rather than
+    ///   recomputed from the summary counts, because the summary cannot distinguish a correct refusal from
+    ///   a violation.
+    ///
+    /// `observed_events` is the length of the persisted timeline, which is the only event count the stored
+    /// document actually carries.
+    pub fn from_experiment_view(experiment: ExperimentView) -> Self {
+        let observed_events = u32::try_from(experiment.timeline.len()).unwrap_or(u32::MAX);
+        Self {
+            brain_state: BrainState::Completed,
+            next_intent: "idle".to_owned(),
+            security: experiment.security.clone(),
+            experiment: Some(experiment),
+            observed_events,
+            findings: Vec::new(),
+            signals: Vec::new(),
+        }
+    }
 }
 
 /// One thing the monitor is watching, with its count.
@@ -402,6 +438,115 @@ pub struct ExperimentView {
     pub timeline: Vec<TimelineEntryView>,
     /// Security totals, refusals and violations separated.
     pub security: SecuritySummary,
+}
+
+impl ExperimentView {
+    /// Wraps this view in the versioned durable envelope.
+    ///
+    /// # Why an envelope at all
+    ///
+    /// The `experiments` table's `result_json` column previously held the scalar mean success fraction
+    /// and nothing else. Everything that makes a multi-episode result a *result* — the individual
+    /// episodes, the aggregate and its interval, the decisions, the failures, the timeline — lived only in
+    /// the running process. A completed experiment therefore disappeared when the process did, and a run
+    /// reopened from history could be rebuilt only as a fabricated single-episode result.
+    ///
+    /// The shape is versioned from the first byte rather than inferred, because the alternative is a
+    /// reader that guesses. A stored document either declares a version this build understands or is
+    /// refused with a reason. Rows written before this change hold a bare number or `null`, which parses
+    /// as neither, and are handled as the historical shape they are — see
+    /// [`ExperimentDocument::from_legacy_json`].
+    ///
+    /// Nothing historical is rewritten by this. New runs write the document; old rows keep the scalar they
+    /// always had, and are still read on the older, narrower path.
+    pub fn to_document(&self) -> StoredExperimentDocument {
+        StoredExperimentDocument {
+            version: STORED_EXPERIMENT_VERSION,
+            experiment: self.clone(),
+        }
+    }
+
+    /// The durable JSON for this experiment, or `None` if it cannot be encoded.
+    pub fn to_json(&self) -> Option<String> {
+        self.to_document().to_json()
+    }
+}
+
+/// The current durable document version.
+///
+/// Incremented only with a reader for the previous one. A build that meets a version it does not know
+/// must refuse the row rather than parse it optimistically.
+pub const STORED_EXPERIMENT_VERSION: u32 = 1;
+
+/// A stored experiment, in the shape that can be read back.
+///
+/// The read model itself is persisted rather than a bespoke subset, so there is exactly one definition of
+/// what an experiment contains and no second one to keep in step. A field added to
+/// [`ExperimentView`] becomes durable for free, and a field removed breaks the version check rather than
+/// silently disappearing from reopened runs.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredExperimentDocument {
+    /// Which shape the rest of this document is written in.
+    pub version: u32,
+    /// The complete experiment read model.
+    pub experiment: ExperimentView,
+}
+
+/// Why a stored `result_json` could not be read as a document.
+///
+/// Not `Eq`, and deliberately so: it carries `f64` through the legacy arm, and the surrounding view types
+/// already document why claiming `Eq` on a score and hiding it behind a wrapper would be worse than not
+/// claiming it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StoredExperimentShape {
+    /// A document this build understands.
+    ///
+    /// Boxed because a whole experiment is a few hundred bytes and the enum is returned by value from a
+    /// hot-ish read path. Unboxed, every classification of a *historical* row — the common case for an
+    /// existing installation — moved half a kilobyte to carry an `Option<f64>`.
+    Document(Box<StoredExperimentDocument>),
+    /// A historical row: the bare mean success fraction, or `null` for a run that scored nothing.
+    ///
+    /// Reported rather than discarded so the caller can choose to reconstruct the narrower historical
+    /// view and *say so*, instead of presenting a partial reconstruction as the run.
+    LegacyMean(Option<f64>),
+    /// Neither. The bytes are unrecognisable, and reporting that plainly beats guessing.
+    Unrecognised,
+}
+
+impl StoredExperimentDocument {
+    /// Serializes the document, or `None` if it cannot be encoded.
+    ///
+    /// A `None` here is recorded as a null `result_json` rather than being swallowed, and the read path
+    /// treats null as the historical shape. Storing nothing and claiming nothing is the correct outcome
+    /// when a document cannot be written; substituting the scalar mean would lose the episodes silently.
+    pub fn to_json(&self) -> Option<String> {
+        serde_json::to_string(self).ok()
+    }
+
+    /// Classifies a stored `result_json` without deciding what to do about it.
+    ///
+    /// Ordered deliberately: the document is tried first, because a version number is unambiguous,
+    /// and the historical scalar is tried second. Guessing from shape alone would make a future document
+    /// that happened to look numeric unreadable for no reason.
+    pub fn from_legacy_json(raw: &str) -> StoredExperimentShape {
+        match serde_json::from_str::<StoredExperimentDocument>(raw) {
+            Ok(document) if document.version == STORED_EXPERIMENT_VERSION => {
+                StoredExperimentShape::Document(Box::new(document))
+            }
+            // A known-version document this build cannot read is *not* a legacy scalar, and treating it as
+            // one would silently degrade a future format into a fabricated single-episode result.
+            Ok(document) => {
+                let _ = document;
+                StoredExperimentShape::Unrecognised
+            }
+            Err(_) => match serde_json::from_str::<Option<f64>>(raw) {
+                Ok(mean) => StoredExperimentShape::LegacyMean(mean),
+                Err(_) => StoredExperimentShape::Unrecognised,
+            },
+        }
+    }
 }
 
 impl ExperimentView {

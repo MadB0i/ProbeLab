@@ -46,6 +46,7 @@ import {
   type SettingsCommandError,
   type SettingsView,
 } from "./api";
+import { notifySettingsChanged } from "./settingsSync";
 
 /** Formats a settings error into something a person can act on. */
 function describeError(error: unknown): { field: string | null; reason: string } {
@@ -160,7 +161,18 @@ export function SettingsPanel() {
         // this is what it will now show, which is the only thing worth displaying.
         setStored(view);
         setDraft(view.settings);
-        setConfirmation("Settings saved. They will be used for future experiments and runs.");
+        /*
+         * Announced so the execution state re-reads the stored document.
+         *
+         * Without this the save is durable and the next run ignores it: `App` copies the defaults once,
+         * on mount, and has no other way to learn they changed. The panel's own confirmation claims
+         * future runs will use them, and they would not have.
+         *
+         * After the write, not before, and only on success — so a rejected save leaves the execution
+         * state agreeing with what is actually stored.
+         */
+        notifySettingsChanged();
+        setConfirmation("Settings saved. They are already in use for future experiments and runs.");
       })
       .catch((cause: unknown) => {
         const described = describeError(cause);

@@ -153,37 +153,95 @@ pub fn get_experiment(
 /// The stored bundle is the run's own projection, projected through the same view the live panel uses,
 /// so a run reopened from history is rendered identically to the run that produced it. A result the
 /// store does not hold is reported as absent rather than reconstructed from partial fields.
+/// Rebuilds a read model from stored data.
+///
+/// # Two shapes, and why both are needed
+///
+/// `result_json` in the `experiments` table now holds a versioned
+/// [`StoredExperimentDocument`](probelab_lab::StoredExperimentDocument) — the whole experiment, so every
+/// episode, the aggregate, the decisions, the failures and the timeline survive a restart. That is the
+/// path new runs take.
+///
+/// Rows written before this change hold the scalar mean and nothing else. They are **not** rewritten and
+/// **not** silently upgraded into the new shape: what they contain is not enough to fabricate the rest,
+/// and manufacturing episodes for them would be exactly the invention this finding is about. They are
+/// reported as the historical shape they are, so the caller can say so.
+///
+/// A run reconstructed from a legacy row therefore reports fewer episodes than it actually ran. That is
+/// stated, not hidden — and it is the reason the durable document exists.
 fn load_stored_experiment(
     state: &AppState,
     experiment_id: &str,
 ) -> Result<BrainReadModel, BrainCommandError> {
-    let result = state
+    let record = state
         .results
-        .get(experiment_id)
+        .get_experiment(experiment_id)
         .map_err(|error| {
-            BrainCommandError::execution(format!("the stored result could not be read: {error}"))
+            BrainCommandError::execution(format!(
+                "the stored experiment could not be read: {error}"
+            ))
         })?
         .ok_or_else(|| {
             BrainCommandError::not_found(format!("no experiment named {experiment_id:?}"))
         })?;
-    let metadata = state
-        .results
-        .get_metadata(experiment_id)
-        .map_err(|error| {
-            BrainCommandError::execution(format!(
-                "the stored run metadata could not be read: {error}"
-            ))
-        })?
-        .ok_or_else(|| {
-            BrainCommandError::not_found(format!(
-                "run {experiment_id:?} has a result but no recorded run metadata"
-            ))
-        })?;
-    Ok(BrainReadModel::from_stored(
-        experiment_id,
-        &result,
-        &metadata,
-    ))
+
+    let raw = record.result_json.as_deref().unwrap_or("null");
+
+    match probelab_lab::StoredExperimentDocument::from_legacy_json(raw) {
+        probelab_lab::StoredExperimentShape::Document(document) => {
+            Ok(BrainReadModel::from_experiment_view(document.experiment))
+        }
+        probelab_lab::StoredExperimentShape::LegacyMean(mean) => {
+            // The historical shape. Reconstructed through the older single-episode path, which reports one
+            // episode because one is all the row can support.
+            let result = state
+                .results
+                .get(experiment_id)
+                .map_err(|error| {
+                    BrainCommandError::execution(format!(
+                        "the stored result could not be read: {error}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    BrainCommandError::not_found(format!(
+                        "experiment {experiment_id:?} holds only a scalar summary, but no stored result \
+                         was written for it; the episodes cannot be reconstructed"
+                    ))
+                })?;
+            let metadata = state
+                .results
+                .get_metadata(experiment_id)
+                .map_err(|error| {
+                    BrainCommandError::execution(format!(
+                        "the stored run metadata could not be read: {error}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    BrainCommandError::not_found(format!(
+                        "run {experiment_id:?} has a summary but no recorded run metadata"
+                    ))
+                })?;
+            let mut model = BrainReadModel::from_stored(experiment_id, &result, &metadata);
+            // Say what this row is, rather than presenting a single-episode reconstruction as the run.
+            model.next_intent = format!(
+                "historical summary only: {} episode(s) of {} could be reconstructed from a scalar row",
+                model
+                    .experiment
+                    .as_ref()
+                    .map(|view| view.episodes.len())
+                    .unwrap_or(0),
+                record.episodes_requested
+            );
+            let _ = mean;
+            Ok(model)
+        }
+        probelab_lab::StoredExperimentShape::Unrecognised => Err(BrainCommandError::execution(
+            format!(
+                "experiment {experiment_id:?} is stored in a format this build does not understand; it \
+                 has not been altered"
+            ),
+        )),
+    }
 }
 
 /*
@@ -416,7 +474,21 @@ pub async fn run_experiment(
             episodes_failed: experiment.episodes_failed,
             has_score: experiment.mean_success_fraction.is_some(),
             score: experiment.mean_success_fraction,
-            result_json: serde_json::to_string(&experiment.mean_success_fraction).ok(),
+            /*
+             * The **whole experiment**, not the scalar mean.
+             *
+             * This column used to hold `serde_json::to_string(&mean_success_fraction)`, which persisted
+             * one number and discarded every episode, decision, failure, timeline entry and security
+             * total the run produced. The result then existed only as the running process's memory:
+             * `get_experiment` rebuilt it by looking for a stored result under the same identifier,
+             * found nothing for a multi-episode run, and answered "not found" — a result that appeared
+             * during execution and became unavailable afterwards.
+             *
+             * The view is stored through a versioned envelope, so a build that meets a shape it does not
+             * understand refuses the row rather than parsing it optimistically. Historical rows keep the
+             * scalar they always had and are read on the narrower path, unchanged and un-rewritten.
+             */
+            result_json: experiment.to_document().to_json(),
             updated_unix_ms: now_unix_ms(),
             // Re-stated rather than re-read: the running row wrote them, and carrying the same
             // values forward keeps the terminal write from blanking the identity the comparison

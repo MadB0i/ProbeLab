@@ -17,6 +17,7 @@
 //! or hostile, and following it would send the credential somewhere the user never named. One attempt
 //! per call, and the failure is reported rather than papered over with a retry.
 
+use std::borrow::Cow;
 use std::time::Duration;
 
 use url::{Host, Url};
@@ -65,6 +66,19 @@ pub enum TransportConfigError {
     /// A model name was blank.
     #[error("the model name must not be blank")]
     EmptyModel,
+}
+
+/// Why a provider response body could not be read.
+///
+/// Deliberately **not** a [`TransportConfigError`]. That enum is a *configuration* error and every one
+/// of its variants is raised by validating a setting before any request is made; adding a post-request
+/// failure to it would mean a UI matching on configuration codes could be handed one for something that
+/// happened minutes later, on the wire, at a different layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ResponseReadError {
+    /// The transfer failed part-way through.
+    #[error("the provider response could not be read")]
+    Unreadable,
 }
 
 impl TransportConfigError {
@@ -335,13 +349,97 @@ pub enum CredentialError {
 /// to inflate either.
 pub const SANITIZED_LIMIT: usize = 2_048;
 
+/// The byte budget for a provider response body, applied while it is being read.
+///
+/// A separate limit from [`SANITIZED_LIMIT`] because the two bound different things and the audit found
+/// them confused. [`SANITIZED_LIMIT`] bounds what is *retained*; this bounds what is ever *allocated*.
+pub const RESPONSE_BYTE_LIMIT: usize = 1 << 20; // 1 MiB
+
 /// Removes a credential from text destined for a log, a result, or a UI.
+///
+/// # Redaction happens before truncation, and the order is load-bearing
+///
+/// This used to take the first [`SANITIZED_LIMIT`] characters and *then* replace the secret. A credential
+/// that straddled the cut therefore had only its prefix inside the retained text, the whole-secret
+/// replacement no longer matched, and the prefix was stored — in a result bundle and a diagnostics
+/// surface — as though it were provider output.
+///
+/// The order is now: redact the whole input, then bound what is kept. Redacting first means a secret
+/// straddling the boundary is caught whole and replaced, and the only thing truncation can then discard
+/// is text that is already safe.
+///
+/// The function does not itself bound the *input*; [`read_bounded_response`] does that, during reading.
+/// Redacting an unbounded body would fix the leak while leaving the allocation exposure, so the two are
+/// separate and both are needed.
 pub fn sanitize_response_text(text: &str, secret: &str) -> String {
-    let mut bounded: String = text.chars().take(SANITIZED_LIMIT).collect();
-    if !secret.is_empty() {
-        bounded = bounded.replace(secret, "[REDACTED]");
+    let redacted: Cow<'_, str> = if secret.is_empty() {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(text.replace(secret, "[REDACTED]"))
+    };
+    redacted.chars().take(SANITIZED_LIMIT).collect()
+}
+
+/// A provider body, and whether it was cut short.
+///
+/// `truncated` is carried rather than inferred from the length, so a caller can tell a body that happened
+/// to be exactly the limit from one that exceeded it. Reporting a truncated body as a complete one would
+/// let a malformed-response diagnosis be attributed to a provider that answered in full.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BoundedBody {
+    /// The decoded text, at most [`RESPONSE_BYTE_LIMIT`] bytes long.
+    pub text: String,
+    /// Whether the provider sent more than the limit allowed.
+    pub truncated: bool,
+}
+
+/// Reads at most [`RESPONSE_BYTE_LIMIT`] bytes of a provider response, streaming.
+///
+/// # Why this exists (audit finding B9)
+///
+/// The adapter used `response.text().await`, which reads the body to completion and allocates all of it
+/// before any bound applies. A malfunctioning or hostile configured provider could therefore make the
+/// application allocate an arbitrarily large body, and the *retained* preview limit — a limit on what is
+/// kept — did nothing about what was allocated. A request timeout bounds how long, not how much.
+///
+/// Reading in chunks and stopping at the cap bounds the allocation. The stream is dropped as soon as the
+/// limit is reached, so the remaining bytes are never received: a provider that streams indefinitely
+/// costs a fixed amount of memory rather than an unbounded amount.
+///
+/// Chunked transfer encoding is handled because `chunk()` is the decoded body stream — it transparently
+/// de-chunks a `Transfer-Encoding: chunked` response, so a provider cannot evade the limit by choosing
+/// that framing. The byte count is on the *decoded* bytes, which is the thing that would have been
+/// allocated.
+pub async fn read_bounded_response(
+    mut response: reqwest::Response,
+) -> Result<BoundedBody, ResponseReadError> {
+    let mut collected: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    /*
+     * `chunk()` is reqwest's own decoded body iterator: one decoded chunk per call, with chunked
+     * transfer encoding already undone. Using it rather than a raw stream means a provider cannot evade
+     * the cap by choosing `Transfer-Encoding: chunked`, and the byte count is on the bytes that would
+     * have been decoded and allocated.
+     *
+     * The loop stops the moment the limit is reached, so the remaining body is never received.
+     */
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| ResponseReadError::Unreadable)?
+    {
+        if collected.len() + chunk.len() > RESPONSE_BYTE_LIMIT {
+            let room = RESPONSE_BYTE_LIMIT.saturating_sub(collected.len());
+            collected.extend_from_slice(&chunk[..room.min(chunk.len())]);
+            truncated = true;
+            break;
+        }
+        collected.extend_from_slice(&chunk);
     }
-    bounded
+    // Lossy rather than strict: a provider body is not guaranteed to be UTF-8, and failing the whole call
+    // on one bad byte would turn a diagnosable provider fault into an opaque transport error.
+    let text = String::from_utf8_lossy(&collected).into_owned();
+    Ok(BoundedBody { text, truncated })
 }
 
 /// A request timeout, validated.

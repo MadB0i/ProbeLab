@@ -6,7 +6,8 @@
 use probelab_core::{GameBoard, GameSide, TicTacToeCell};
 use probelab_lab::arena_store::{ArenaMatchStoreError, ArenaMatchSummary, SqliteArenaMatchStore};
 use probelab_lab::{
-    ArenaMatchView, ArenaOutcome, EventSource, IllegalMoveView, LabEvent, PlyView, Severity,
+    ArenaMatchView, ArenaOutcome, ArenaTermination, EventSource, IllegalMoveView, LabEvent,
+    PlyView, Severity,
 };
 
 fn a_match(match_id: &str, outcome: ArenaOutcome) -> ArenaMatchView {
@@ -15,6 +16,7 @@ fn a_match(match_id: &str, outcome: ArenaOutcome) -> ArenaMatchView {
         game: "tic_tac_toe".to_owned(),
         game_name: "Tic-Tac-Toe".to_owned(),
         outcome,
+        termination: Some(ArenaTermination::Decided),
         tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
         opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
         tested_agent: "first_legal_tictactoe".to_owned(),
@@ -49,6 +51,7 @@ fn a_failed_match(match_id: &str) -> ArenaMatchView {
         game: "tic_tac_toe".to_owned(),
         game_name: "Tic-Tac-Toe".to_owned(),
         outcome: ArenaOutcome::NoResult,
+        termination: Some(ArenaTermination::Decided),
         tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
         opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
         tested_agent: "first_legal_tictactoe".to_owned(),
@@ -85,6 +88,7 @@ fn a_summary() -> ArenaMatchSummary {
         match_id: "arena-ttt-7-1700000000000-1".to_owned(),
         game: "tic_tac_toe".to_owned(),
         outcome: ArenaOutcome::Win,
+        termination: Some(ArenaTermination::Decided),
         tested_agent: "first_legal_tictactoe".to_owned(),
         opponent_agent: "perfect_tictactoe".to_owned(),
         tested_side: GameSide::First,
@@ -334,4 +338,101 @@ fn a_corrupt_recording_is_reported_rather_than_silently_dropped() {
         }
         other => panic!("expected a corrupt-recording error, got {other:?}"),
     }
+}
+
+/// Audit finding B6 at the durability boundary.
+///
+/// A statistic that is correct in memory and wrong after a restart is worse than one that is simply
+/// wrong, because it survives the thing a reader would use to check it. The termination has to round
+/// trip through the archive for the population counts to mean anything once the process is gone.
+#[test]
+fn a_termination_survives_the_archive_and_a_restart() {
+    let (store, path) = a_store("termination");
+
+    for (match_id, outcome, termination) in [
+        ("won", ArenaOutcome::Win, ArenaTermination::Decided),
+        (
+            "forfeited",
+            ArenaOutcome::Loss,
+            ArenaTermination::ModelRuleViolation,
+        ),
+        (
+            "provider-down",
+            ArenaOutcome::NoResult,
+            ArenaTermination::InfrastructureFailure,
+        ),
+        (
+            "stopped-by-operator",
+            ArenaOutcome::NoResult,
+            ArenaTermination::Cancelled,
+        ),
+    ] {
+        let mut view = a_match(match_id, outcome);
+        view.termination = Some(termination);
+        store.put(&view, 1_700_000_000_000).expect("recorded");
+    }
+
+    // A second store over the same file is what a restart looks like.
+    let reopened = SqliteArenaMatchStore::open(&path).expect("reopens");
+    assert_eq!(
+        reopened
+            .get("forfeited")
+            .expect("reads")
+            .expect("present")
+            .termination,
+        Some(ArenaTermination::ModelRuleViolation),
+        "a forfeit must still read as a forfeit after the process that recorded it is gone"
+    );
+    assert_eq!(
+        reopened
+            .get("stopped-by-operator")
+            .expect("reads")
+            .expect("present")
+            .termination,
+        Some(ArenaTermination::Cancelled),
+        "an operator cancellation must not come back as an infrastructure failure"
+    );
+
+    // And the population computed from the reloaded recordings is the one computed in memory.
+    let views: Vec<probelab_lab::ArenaMatchView> =
+        ["won", "forfeited", "provider-down", "stopped-by-operator"]
+            .iter()
+            .map(|id| reopened.get(id).expect("reads").expect("present"))
+            .collect();
+    let stats = probelab_lab::arena_stats::arena_statistics(&views);
+    assert_eq!(stats.matches_read, 4);
+    assert_eq!(
+        stats.ungrouped, 0,
+        "every recording found a group after a restart"
+    );
+    let population = stats.groups[0].population;
+    assert_eq!(population.attempted, 4);
+    assert_eq!(population.conditional, 2);
+    assert_eq!(population.forfeited, 1);
+    assert_eq!(population.infrastructure_failures, 1);
+    assert_eq!(population.cancelled, 1);
+    assert_eq!(population.unclassified, 0);
+    assert_eq!(
+        population.reliability(),
+        Some(0.5),
+        "two of four attempted matches produced a conditional outcome"
+    );
+}
+
+/// A recording written before the termination existed must reopen as unknown, not as `decided`.
+#[test]
+fn a_recording_with_no_termination_reopens_as_unknown() {
+    let (store, path) = a_store("legacy-termination");
+    let mut view = a_match("legacy", ArenaOutcome::NoResult);
+    view.termination = None;
+    store.put(&view, 1_700_000_000_000).expect("recorded");
+
+    let reopened = SqliteArenaMatchStore::open(&path).expect("reopens");
+    let loaded = reopened.get("legacy").expect("reads").expect("present");
+    assert_eq!(
+        loaded.termination, None,
+        "an absent reason must not be filled in with a guess; a historical NoResult could have been a \
+         cancellation or a dead provider, and guessing would put it in the wrong population"
+    );
+    assert_eq!(loaded.outcome, ArenaOutcome::NoResult);
 }

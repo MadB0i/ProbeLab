@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use probelab_desktop_lib::{ArenaBatchRequest, ArenaSeatRequest};
-use probelab_lab::{ArenaOutcome, SqliteArenaMatchStore};
+use probelab_lab::{ArenaOutcome, ArenaTermination, SqliteArenaMatchStore};
 
 /// Names scratch directories uniquely, the way the lab's own store tests do.
 ///
@@ -72,6 +72,7 @@ fn recorded_matches_survive_the_archive_being_reopened() {
         game: "tic_tac_toe".to_owned(),
         game_name: "Tic-Tac-Toe".to_owned(),
         outcome: ArenaOutcome::Win,
+        termination: Some(ArenaTermination::Decided),
         tested_agent: "first_legal_tictactoe".to_owned(),
         opponent_agent: "perfect_tictactoe".to_owned(),
         tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
@@ -121,6 +122,7 @@ fn a_recording_written_twice_is_stored_once() {
         game: "connect_four".to_owned(),
         game_name: "Connect Four".to_owned(),
         outcome: ArenaOutcome::Win,
+        termination: Some(ArenaTermination::Decided),
         tested_agent: "a".to_owned(),
         opponent_agent: "b".to_owned(),
         tested_seat: probelab_engine::arena::SeatKind::Model,
@@ -261,6 +263,7 @@ fn tictactoe_view(match_id: &str, outcome: ArenaOutcome) -> probelab_lab::ArenaM
         game: "tic_tac_toe".to_owned(),
         game_name: "Tic-Tac-Toe".to_owned(),
         outcome,
+        termination: Some(ArenaTermination::Decided),
         tested_agent: "first_legal_tictactoe".to_owned(),
         opponent_agent: "perfect_tictactoe".to_owned(),
         tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,

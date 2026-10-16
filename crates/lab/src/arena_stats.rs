@@ -41,7 +41,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::arena::{ArenaMatchView, ArenaOutcome};
+use crate::arena::{ArenaMatchView, ArenaOutcome, ArenaTermination};
 use crate::runner::{wilson_interval, WilsonInterval};
 
 /// The confidence every interval in this module is reported at.
@@ -69,6 +69,71 @@ pub struct OutcomeCounts {
     pub loss: usize,
     /// Nothing was decided. Not a loss, and not counted as one anywhere in this module.
     pub no_result: usize,
+}
+
+/// Every recorded match accounted for, so a conditional rate can never hide its own population.
+///
+/// This is the answer to audit finding B6. A win rate answers "of the matches that reached a decision,
+/// how often did the tested seat win?" — which is a true question only if you also say how many matches
+/// never reached a decision and why. Reporting the rate alone lets a model that answered every ply with
+/// unusable text show up with a comfortable win rate over the handful of matches that did resolve,
+/// because the matches it lost by forfeiting were never in the denominator at all.
+///
+/// Every recorded match lands in exactly one bucket, and `unclassified` is a real bucket rather than a
+/// remainder to be ignored: a recording that predates the termination field says nothing about why it
+/// ended, and saying so is more useful than guessing `decided`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchPopulation {
+    /// Every recording counted into this block.
+    pub attempted: usize,
+    /// Matches that produced a conditional game outcome: the rules decided, or the tested seat forfeited.
+    pub conditional: usize,
+    /// Of those, the ones the tested seat forfeited by answering unusably.
+    pub forfeited: usize,
+    /// Matches the harness or provider could not deliver a usable answer for.
+    pub infrastructure_failures: usize,
+    /// Matches an operator stopped.
+    pub cancelled: usize,
+    /// Recordings whose reason is not recorded.
+    ///
+    /// Historical rows predate the termination field. They are counted here rather than being assumed
+    /// `decided`, because assuming would move infrastructure failures into the outcome population.
+    pub unclassified: usize,
+}
+
+impl MatchPopulation {
+    /// Matches excluded from the conditional win-rate denominator.
+    pub fn excluded(&self) -> usize {
+        self.infrastructure_failures + self.cancelled + self.unclassified
+    }
+
+    /// The share of attempted matches that produced a conditional outcome at all.
+    ///
+    /// Distinct from the win rate, and reported beside it. A seat can win every match it finishes and
+    /// still finish almost none of them; only these two numbers together say which happened.
+    pub fn reliability(&self) -> Option<f64> {
+        (self.attempted > 0).then(|| self.conditional as f64 / self.attempted as f64)
+    }
+
+    /// Folds one recorded match into the population.
+    ///
+    /// A `NoResult` outcome cannot be classified without the termination, because a forfeit, an
+    /// unreachable provider and a cancellation all present as "no result" at the outcome level alone.
+    /// The outcome is therefore never used to infer the reason.
+    pub fn absorb(&mut self, view: &ArenaMatchView) {
+        self.attempted += 1;
+        match view.termination {
+            Some(ArenaTermination::ModelRuleViolation) => {
+                self.conditional += 1;
+                self.forfeited += 1;
+            }
+            Some(ArenaTermination::Decided) => self.conditional += 1,
+            Some(ArenaTermination::InfrastructureFailure) => self.infrastructure_failures += 1,
+            Some(ArenaTermination::Cancelled) => self.cancelled += 1,
+            None => self.unclassified += 1,
+        }
+    }
 }
 
 impl OutcomeCounts {
@@ -198,6 +263,11 @@ pub struct MatchStatistics {
     pub provenance_digest: String,
     /// The outcome distribution and what follows from it.
     pub decisions: DecisionStatistics,
+    /// How the attempted matches divide between conditional outcomes and everything else.
+    ///
+    /// Reported next to `decisions` rather than folded into it, so the win rate can always be read
+    /// with the population behind it. See [`MatchPopulation`].
+    pub population: MatchPopulation,
     /// Match length.
     pub plies: PlyStatistics,
     /// Moves a seat attempted that the board refused, across every match.
@@ -312,6 +382,7 @@ pub fn arena_statistics(matches: &[ArenaMatchView]) -> ArenaStatistics {
 /// Folds one group of recordings into a [`MatchStatistics`].
 fn summarise(key: &GroupKey, views: &[&ArenaMatchView]) -> MatchStatistics {
     let mut outcomes = OutcomeCounts::default();
+    let mut population = MatchPopulation::default();
     let mut cancelled = 0usize;
     let mut with_failure = 0usize;
     let mut illegal_moves = 0usize;
@@ -327,6 +398,7 @@ fn summarise(key: &GroupKey, views: &[&ArenaMatchView]) -> MatchStatistics {
 
     for view in views {
         outcomes.record(view.outcome);
+        population.absorb(view);
         if view.cancelled {
             cancelled += 1;
         }
@@ -389,6 +461,7 @@ fn summarise(key: &GroupKey, views: &[&ArenaMatchView]) -> MatchStatistics {
             with_failure,
             has_decided,
         },
+        population,
         plies: PlyStatistics {
             total: plies_total,
             mean: (!views.is_empty()).then(|| plies_total as f64 / views.len() as f64),

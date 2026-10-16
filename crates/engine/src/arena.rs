@@ -56,9 +56,67 @@ pub struct IllegalMove {
     /// The ply it happened on.
     pub ply: u32,
     /// The move the model returned.
-    pub attempted: GameMove,
+    ///
+    /// `None` when the refusal happened before a move could be parsed out of the response — the
+    /// provider answered, but nothing in it was a legal move. That is the common case for a small
+    /// model, and recording a placeholder cell here would fabricate the one datum a reader actually
+    /// wants, which is what the model tried.
+    pub attempted: Option<GameMove>,
     /// Why it was refused.
     pub reason: String,
+}
+
+/// Why a match stopped producing conditional game outcomes.
+///
+/// The whole point of this enum is that "the match ended" has more than one meaning, and a statistics
+/// layer that cannot tell them apart will quietly produce a number that means something other than what
+/// it says. Four cases, in the order a reader cares about them:
+///
+/// * [`MatchTermination::Decided`] — the rules produced a result. Conditional on the match having been
+///   playable at all.
+/// * [`MatchTermination::ModelRuleViolation`] — the tested seat was reached and answered, but named
+///   something the board refuses, or answered in a shape no legal move could be read from. This is a
+///   **forfeit**: it is a game outcome, it belongs in the win/draw/loss distribution, and a model that
+///   never produces a legal move must show up as losing every match rather than as having no results.
+/// * [`MatchTermination::InfrastructureFailure`] — the harness could not reach or use the provider.
+///   The model never got to answer, so nothing about it was measured.
+/// * [`MatchTermination::Cancelled`] — an operator stopped it. Not a result and not a fault.
+///
+/// The last two are excluded from conditional win-rate denominators and *must* be counted beside them.
+/// A win rate with no population count next to it is the defect this type exists to prevent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MatchTermination {
+    /// The rules reached a result.
+    Decided,
+    /// The tested seat forfeited: it was reached and answered unusably.
+    ModelRuleViolation,
+    /// The harness or provider could not deliver a usable answer.
+    InfrastructureFailure,
+    /// An operator stopped the match.
+    Cancelled,
+}
+
+impl MatchTermination {
+    /// Whether this termination still yields a conditional game outcome.
+    ///
+    /// Only these two do. Everything else is excluded from the win/draw/loss denominator and counted
+    /// separately, so a reader can see both the conditional rate and the population behind it.
+    pub fn is_conditional(self) -> bool {
+        matches!(
+            self,
+            MatchTermination::Decided | MatchTermination::ModelRuleViolation
+        )
+    }
+
+    /// A stable machine-readable name, for storage and for the UI.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MatchTermination::Decided => "decided",
+            MatchTermination::ModelRuleViolation => "model_rule_violation",
+            MatchTermination::InfrastructureFailure => "infrastructure_failure",
+            MatchTermination::Cancelled => "cancelled",
+        }
+    }
 }
 
 /// The result of one match, as measured facts.
@@ -70,6 +128,11 @@ pub struct MatchResult {
     pub tested_side: GameSide,
     /// How the match ended for the tested model.
     pub outcome: MatchOutcome,
+    /// Why it ended, in the terms the statistics layer needs to keep apart.
+    ///
+    /// Derived from `outcome` and the error the match stopped on; it is not independently settable, so
+    /// the two cannot drift apart.
+    pub termination: MatchTermination,
     /// Plies actually played.
     pub plies: u32,
     /// Illegal moves the tested model returned.
@@ -605,12 +668,47 @@ pub fn play_match<G: Game>(
         let seat_kind = seat.kind();
         let seat_label = seat.label().to_owned();
         let started = Instant::now();
+        let seat_decision = seat.decide(request);
+        let elapsed = elapsed_ms(started);
+
         let SeatDecision {
             move_: chosen,
             call,
             failure,
-        } = seat.decide(request)?;
-        let elapsed = elapsed_ms(started);
+        } = match seat_decision {
+            Ok(decision) => decision,
+            Err(ArenaError::SeatRefused { label, failure }) if side == tested_side => {
+                /*
+                 * The tested seat was reached, answered, and named something no legal move can be read
+                 * from. That is a forfeit, not a harness fault.
+                 *
+                 * Before this, the refusal propagated as an error and the statistics layer turned every
+                 * one of them into "no result" — excluded from the win-rate denominator. A model that
+                 * answered every ply with prose the parser could not use therefore reported *no
+                 * matches* rather than *a loss every match*, which is the most flattering possible way
+                 * to be wrong and the one the arena exists to detect.
+                 *
+                 * `attempted` is `None` because the parser rejected the response before it became a
+                 * board action. There is no move to report, and inventing a placeholder cell would
+                 * fabricate the single datum a reader most wants: what the model actually tried.
+                 */
+                illegal.push(IllegalMove {
+                    ply,
+                    attempted: None,
+                    reason: format!("{label} returned a move the board refuses: {failure}"),
+                });
+                return Ok(finish_with(
+                    game,
+                    MatchOutcome::Loss,
+                    MatchTermination::ModelRuleViolation,
+                    tested_side,
+                    ply,
+                    illegal,
+                    config,
+                ));
+            }
+            Err(other) => return Err(other),
+        };
 
         let state_after = match game.apply(&state, side, chosen) {
             Ok(after) => after,
@@ -620,7 +718,7 @@ pub fn play_match<G: Game>(
                     // from a state nobody sanctioned.
                     illegal.push(IllegalMove {
                         ply,
-                        attempted: chosen,
+                        attempted: Some(chosen),
                         reason: reason.clone(),
                     });
                     record_ply(
@@ -737,10 +835,36 @@ fn finish<G: Game>(
     illegal_moves: Vec<IllegalMove>,
     config: &MatchConfig,
 ) -> MatchResult {
+    finish_with(
+        game,
+        outcome,
+        MatchTermination::Decided,
+        tested_side,
+        plies,
+        illegal_moves,
+        config,
+    )
+}
+
+/// [`finish`] with an explicit termination, for the paths that stopped for a reason other than the rules.
+///
+/// Separate rather than a defaulted argument because the two callers that need this both stop because
+/// the tested seat broke something, and giving them a convenient default would let a future path
+/// classify a forfeit as an ordinary decision by omission.
+fn finish_with<G: Game>(
+    game: &G,
+    outcome: MatchOutcome,
+    termination: MatchTermination,
+    tested_side: GameSide,
+    plies: u32,
+    illegal_moves: Vec<IllegalMove>,
+    config: &MatchConfig,
+) -> MatchResult {
     MatchResult {
         game: game.kind(),
         tested_side,
         outcome,
+        termination,
         plies,
         illegal_moves,
         tested_label: config.tested_label.clone(),

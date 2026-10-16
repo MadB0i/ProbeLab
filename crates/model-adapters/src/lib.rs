@@ -714,8 +714,19 @@ impl OpenAiCompatibleProvider {
             // model says so in the body, and a prompt that did not fit says so in the body. Before
             // this, all three arrived as an anonymous "non-success HTTP status".
             let status_code = status.as_u16();
-            let raw_body = response.text().await.unwrap_or_default();
-            let body = crate::transport::sanitize_response_text(&raw_body, &secret);
+            let body = match crate::transport::read_bounded_response(response).await {
+                Ok(bounded) => crate::transport::sanitize_response_text(&bounded.text, &secret),
+                Err(_) => {
+                    return Err(ModelCallFailure {
+                        kind: ModelCallFailureKind::TransportDisconnect,
+                        message: "provider error body could not be read".to_owned(),
+                        response_text: None,
+                        usage: None,
+                        elapsed_ms: Some(elapsed_ms(started)),
+                        http_status: Some(status_code),
+                    });
+                }
+            };
             let kind = classify_http_failure(status_code, &body);
             let detail = describe_http_failure(status_code, kind, &body);
             return Err(ModelCallFailure {
@@ -727,14 +738,50 @@ impl OpenAiCompatibleProvider {
                 http_status: Some(status_code),
             });
         }
-        let response_text = response.text().await.map_err(|_| ModelCallFailure {
-            kind: ModelCallFailureKind::TransportDisconnect,
-            message: "provider response transport failed".to_owned(),
-            response_text: None,
-            usage: None,
-            elapsed_ms: Some(elapsed_ms(started)),
-            http_status: None,
-        })?;
+        /*
+         * Bounded *while reading* (audit finding B9), not after.
+         *
+         * `text().await` read the body to completion and allocated all of it before any limit applied, so
+         * a hostile or malfunctioning provider could make this process allocate an arbitrary amount. The
+         * retained-preview limit bounded what was kept, not what was allocated.
+         */
+        let body = match crate::transport::read_bounded_response(response).await {
+            Ok(bounded) => bounded,
+            Err(_) => {
+                return Err(ModelCallFailure {
+                    kind: ModelCallFailureKind::TransportDisconnect,
+                    message: "provider response transport failed".to_owned(),
+                    response_text: None,
+                    usage: None,
+                    elapsed_ms: Some(elapsed_ms(started)),
+                    http_status: None,
+                });
+            }
+        };
+        if body.truncated {
+            /*
+             * Reported as its own diagnosis rather than left implicit. A provider whose body exceeded the
+             * cap was cut short, and diagnosing that as "malformed JSON" would send the operator hunting
+             * for a syntax error in a response that was simply too large.
+             *
+             * The retained fragment is sanitized once for the real secret and once with an empty secret:
+             * the first call may have shortened the text, and the second bounds it, and neither alone
+             * would both redact and bound.
+             */
+            let safe = crate::transport::sanitize_response_text(&body.text, &secret);
+            return Err(ModelCallFailure {
+                kind: ModelCallFailureKind::MalformedResponse,
+                message: format!(
+                    "the provider response exceeded the {} byte read limit and was truncated before parsing",
+                    crate::transport::RESPONSE_BYTE_LIMIT
+                ),
+                response_text: Some(crate::transport::sanitize_response_text(&safe, "")),
+                usage: None,
+                elapsed_ms: Some(elapsed_ms(started)),
+                http_status: Some(status.as_u16()),
+            });
+        }
+        let response_text = body.text;
         let sanitized_response = crate::transport::sanitize_response_text(&response_text, &secret);
         let elapsed = elapsed_ms(started);
         let payload = match serde_json::from_str::<ChatResponse>(&response_text) {

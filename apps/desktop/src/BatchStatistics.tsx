@@ -19,7 +19,13 @@
  */
 
 import { IconBoard, IconAlert, IconCheck, IconInfo, IconPlay, IconRefresh, IconStop } from "./Icons";
-import type { ArenaStatistics, MatchStatistics, OutcomeCounts, WilsonInterval } from "./api";
+import type {
+  ArenaStatistics,
+  MatchPopulation,
+  MatchStatistics,
+  OutcomeCounts,
+  WilsonInterval,
+} from "./api";
 
 /** Below this many decided matches a group is labelled a small sample. Mirrors the backend. */
 const SMALL_SAMPLE_MATCHES = 10;
@@ -167,11 +173,23 @@ function Rate({
 }
 
 /** One fact, label above value, in the product's existing readout shape. */
-function Stat({ label, value }: { label: string; value: string }) {
+/**
+ * One labelled figure.
+ *
+ * `hint` becomes the accessible description of the value rather than visible prose, so each bucket can
+ * say what it means without the block turning into a wall of text. The visible note under the block
+ * carries the same explanation in full for everyone who reads it.
+ */
+function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
-    <div className="stats-stat">
-      <dt className="stats-stat__label">{label}</dt>
-      <dd className="stats-stat__value mono">{value}</dd>
+    <div className="stats-stat" title={hint}>
+      <dt className="stats-stat__label">
+        {label}
+        {hint ? <span className="stats-stat__hint" aria-hidden="true" title={hint}>i</span> : null}
+      </dt>
+      <dd className="stats-stat__value mono" aria-label={hint ? `${label}: ${value}. ${hint}` : undefined}>
+        {value}
+      </dd>
     </div>
   );
 }
@@ -184,6 +202,71 @@ function millis(value: number | null): string {
 /** A token count, where absent is not zero. */
 function tokens(value: number | null): string {
   return value === null ? "not reported" : value.toLocaleString("en-US");
+}
+
+/**
+ * Execution reliability: how many attempted matches produced a conditional outcome at all.
+ *
+ * Audit finding B6, and the figure that makes the other two readable. A seat can win every match it
+ * finishes and finish almost none of them; without this number beside the win rate, "100%" and
+ * "finished 3 of 10" are indistinguishable.
+ */
+function Reliability({ population }: { population: MatchPopulation }) {
+  const reliability = population.attempted > 0 ? population.conditional / population.attempted : null;
+  const { forfeited, infrastructureFailures, cancelled, unclassified } = population;
+  const excluded = infrastructureFailures + cancelled + unclassified;
+
+  return (
+    <section className="stats-population" aria-label="Execution reliability">
+      <h4 className="stats-population__title">Execution reliability</h4>
+      <p className="stats-population__headline">
+        <span className="stats-population__figure mono">
+          {reliability === null ? "—" : percent(reliability)}
+        </span>
+        <span className="stats-population__count mono">
+          {population.conditional} of {population.attempted} attempted
+        </span>
+      </p>
+      <p className="stats-population__note">
+        The share of attempted matches that produced a game outcome at all — the rules deciding, or the
+        tested seat forfeiting. The win rate below is measured over that {population.conditional}, not
+        over the {population.attempted} attempted.
+      </p>
+      <dl className="stats-population__buckets">
+        <Stat label="Attempted" value={String(population.attempted)} />
+        <Stat label="Reached a game outcome" value={String(population.conditional)} />
+        <Stat
+          label="Forfeited by the tested seat"
+          value={String(forfeited)}
+          hint="Counted as a loss. The seat was reached and answered unusably, which is a result about the model."
+        />
+        <Stat
+          label="Provider or harness failure"
+          value={String(infrastructureFailures)}
+          hint="Not a game outcome. The model was never reached, so nothing about it was measured."
+        />
+        <Stat
+          label="Stopped by the operator"
+          value={String(cancelled)}
+          hint="Not a game outcome and not a fault."
+        />
+        <Stat
+          label="Reason not recorded"
+          value={String(unclassified)}
+          hint="Older recordings predate the termination field. What ended them is not known and is not guessed."
+        />
+      </dl>
+      {excluded > 0 ? (
+        <p className="stats-population__note stats-population__note--excluded" role="note">
+          <IconInfo size={14} />
+          <span>
+            {plural(excluded, "match", "matches")} {excluded === 1 ? "is" : "are"} outside the game
+            outcomes and {excluded === 1 ? "does" : "do"} not appear as a win, a loss or a forfeit.
+          </span>
+        </p>
+      ) : null}
+    </section>
+  );
 }
 
 /**
@@ -255,6 +338,8 @@ function Group({ group }: { group: MatchStatistics }) {
           </span>
         </p>
       ) : null}
+
+      <Reliability population={group.population} />
 
       <Distribution outcomes={outcomes} />
 

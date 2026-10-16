@@ -5,6 +5,7 @@ import { PanelBoundary } from "./ErrorBoundary";
 import { BrandLockup } from "./Brand";
 import { ComparisonPanel } from "./ComparisonPanel";
 import { SettingsPanel } from "./SettingsPanel";
+import { subscribeToSettingsChanges } from "./settingsSync";
 import { AgentCatalog } from "./AgentCatalog";
 import { BenchmarkCatalog as BenchmarkCatalogPanel } from "./BenchmarkCatalog";
 import {
@@ -23,6 +24,13 @@ import {
 import { BrainPanel } from "./BrainPanel";
 import { GridWorldStage, type GridVerdict } from "./GridWorldStage";
 import { agreementLabel, protocolAndLegality } from "./capabilityRates";
+import { resolveProviderBaseUrl } from "./providerEndpoint";
+import { arenaMatchEligibility } from "./arenaEligibility";
+import {
+  applyArenaTurn,
+  arenaStartView,
+  shouldInstallArenaResult,
+} from "./arenaLiveController";
 import { ArenaPanel, seatLabel } from "./ArenaPanel";
 import { ExperimentHistory } from "./ExperimentHistory";
 import { SecurityPanel } from "./SecurityPanel";
@@ -63,6 +71,7 @@ import {
   // prevents. Two names for two things.
   arenaStatistics as arenaStatisticsCommand,
   ARENA_MATCH_EVENT,
+  ARENA_MATCH_STARTED_EVENT,
   ARENA_TURN_EVENT,
   ARENA_BATCH_EVENT,
   type ArenaAgentSummary,
@@ -72,6 +81,7 @@ import {
   type ArenaMatchView,
   type ArenaSeatRequest,
   type ArenaStatistics,
+  type ArenaMatchStartedEnvelope,
   type ArenaTurnEnvelope,
 } from "./api";
 // The single-run command surface. These used to be raw `invoke` calls with their payload shapes
@@ -465,6 +475,35 @@ const App = () => {
   const arenaMatchIdRef = useRef<string | null>(null);
   arenaMatchIdRef.current = arenaMatchId;
   /**
+   * The identifier the *command* will own, held before the backend has told us anything.
+   *
+   * The backend mints the identifier; the frontend cannot know it in advance, so this does not guess
+   * one. It records the identifier the start command was *awaiting*, which is what lets the turn handler
+   * tell "this turn belongs to the match I launched" from "this turn belongs to some other match that
+   * happens to be running" — the overlap the audit found between single-match and batch event
+   * handlers, where both could receive each other's jobs.
+   */
+  const arenaExpectedMatchIdRef = useRef<string | null>(null);
+  const [arenaLive, setArenaLive] = useState(false);
+
+  /*
+   * The seat and seed configuration, readable from the event listener.
+   *
+   * The start event has to be turned into a drawable match, and that needs to know which game is being
+   * played, from which side, and against whom. The listener is registered once, so it cannot close over
+   * changing props without resubscribing and missing turns mid-match. These refs read the current
+   * configuration at the instant the event arrives, which is the same instant the backend used to start
+   * the match.
+   */
+  const arenaSideRef = useRef(arenaSide);
+  arenaSideRef.current = arenaSide;
+  const arenaSeedRef = useRef(arenaSeed);
+  arenaSeedRef.current = arenaSeed;
+  const arenaTestedSeatRef = useRef(arenaTestedSeat);
+  arenaTestedSeatRef.current = arenaTestedSeat;
+  const arenaOpponentSeatRef = useRef(arenaOpponentSeat);
+  arenaOpponentSeatRef.current = arenaOpponentSeat;
+  /**
    * Batch evaluation.
    *
    * The statistics are held as a value read from the archive rather than as anything accumulated in
@@ -526,6 +565,18 @@ const App = () => {
   const [connectedModel, setConnectedModel] = useState("");
   const [timeoutSeconds, setTimeoutSeconds] = useState(30);
   const [defaultEpisodes, setDefaultEpisodes] = useState(5);
+  /*
+   * The stored root seed, sent with every run instead of a hardcoded `null`.
+   *
+   * The request has always accepted a root seed; nothing was reading it from the settings, so a person
+   * who set one on the settings page got a different experiment than the one they configured. Same defect
+   * as the episode count, one field over.
+   *
+   * `seedBehaviour` has no equivalent path: `runExperiment` does not accept it, so the stored value is
+   * applied to the settings document and to new runs only once the request contract carries it. Recorded
+   * as residual scope rather than papered over with a send-the-field-anyway cast.
+   */
+  const [rootSeed, setRootSeed] = useState(0);
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
   const [providerStatusError, setProviderStatusError] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
@@ -560,7 +611,35 @@ const App = () => {
    * panel's credibility depends on not producing.
    */
   const arenaLocalModels = localModels["ollama-local"] ?? [];
-  const arenaModelConfig = { baseUrl: `${baseUrl || "http://127.0.0.1:11434"}/v1`, apiKeyEnv, timeoutSeconds };
+  const arenaModelConfig = {
+    baseUrl: resolveProviderBaseUrl(baseUrl),
+    apiKeyEnv,
+    timeoutSeconds,
+  };
+
+  /*
+   * Whether a single Arena match can start, computed in one place and explained when it cannot.
+   *
+   * This was an inline expression requiring both seats to be reference policies, which made every model
+   * configuration unreachable through the Play control. See `arenaEligibility.ts` for the full account;
+   * the rule lives there so it can be tested with real seat shapes, because the panel's own test
+   * supplies `canPlay: true` and would never have caught this.
+   */
+  const arenaEligibility = useMemo(
+    () =>
+      arenaMatchEligibility({
+        gameCount: arenaGames.length,
+        testedSeat: arenaTestedSeat,
+        opponentSeat: arenaOpponentSeat,
+        endpoint: arenaModelConfig.baseUrl,
+      }),
+    [
+      arenaGames.length,
+      arenaTestedSeat,
+      arenaOpponentSeat,
+      arenaModelConfig.baseUrl,
+    ],
+  );
 
   /*
    * Which benchmark is selected, and the one the rest of the app reads.
@@ -677,7 +756,7 @@ const App = () => {
     () => ({
       kind: "openai_compatible",
       schema_version: MODEL_RUN_CONFIG_SCHEMA_VERSION,
-      base_url: baseUrl.trim(),
+      base_url: resolveProviderBaseUrl(baseUrl),
       api_key_env: apiKeyEnv.trim(),
       model: connectedModel.trim(),
       timeout_seconds: timeoutSeconds,
@@ -908,7 +987,7 @@ const App = () => {
           // From the stored settings rather than a constant, so the episode count a person set on the
           // settings page is the one a run actually uses.
           episodes: defaultEpisodes,
-          rootSeed: null,
+          rootSeed,
           // Omitted entirely rather than sent as null: `None` on the Rust side means "the named
           // registry agent", and an explicit null would be a different thing spelled the same way.
           ...(model ? { modelConfig: model } : {}),
@@ -1259,6 +1338,12 @@ const App = () => {
     setArenaPlaying(true);
     setArenaError(null);
     setArenaMatchId(null);
+    /*
+     * Any previous live recording is cleared at the moment a new match is requested, not when it
+     * finishes. Leaving the previous board on screen while a new match runs is what the audit described
+     * as a stale view: the panel showed one match's board while a different one was in progress.
+     */
+    setArenaMatch(null);
     try {
       const result = await playArenaMatch({
         game: arenaGame,
@@ -1267,6 +1352,12 @@ const App = () => {
         testedSide: arenaSide,
         seed: arenaSeed,
       });
+      /*
+       * A turn event may already have been folded into the live view while this await was outstanding.
+       * The terminal recording is authoritative and complete, so it replaces whatever was assembled
+       * incrementally rather than merging with it — a terminal record is never missing a turn the live
+       * view saw, and merging could double-count one that arrived twice.
+       */
       setArenaMatch(result);
       setArenaMatchId(result.matchId);
       try {
@@ -1279,6 +1370,7 @@ const App = () => {
     } finally {
       setArenaPlaying(false);
       setArenaMatchId(null);
+      arenaExpectedMatchIdRef.current = null;
     }
   }, [arenaGame, arenaTestedSeat, arenaOpponentSeat, arenaSide, arenaSeed]);
 
@@ -1293,6 +1385,22 @@ const App = () => {
   const cancelArena = useCallback(async () => {
     const matchId = arenaMatchIdRef.current;
     if (!matchId) {
+      /*
+       * Stopping before the backend has published an identity is no longer a silent no-op.
+       *
+       * Previously this returned without comment, so pressing STOP during a model's opening provider
+       * call — the longest single wait in a real match — appeared to do nothing and the match played
+       * out. It now says so, because "stop did nothing" and "stop is not yet possible" are different
+       * situations and the operator cannot tell them apart from a button that stops responding.
+       *
+       * The backend already applies the flag at the next ply boundary and the handle is released when
+       * the match ends, so there is nothing to unwind here.
+       */
+      setArenaError(
+        "Stop is not available yet: the match has not reported its identity. If it is waiting on the " +
+          "provider's first response it will finish that call before any turn boundary, and can be " +
+          "stopped from then on.",
+      );
       return;
     }
     try {
@@ -1385,6 +1493,15 @@ const App = () => {
   const cancelArenaBatchCommand = useCallback(async () => {
     const batchId = arenaBatchIdRef.current;
     if (!batchId) {
+      /*
+       * A batch's identifier arrives with its first progress event, so stopping during the very first
+       * match — the one already in flight when the operator decides they have had enough — had nothing
+       * to address and returned silently. Said plainly now rather than looking like a dead control.
+       */
+      setArenaError(
+        "Stop is not available yet: the batch has not reported its identity. It becomes stoppable " +
+          "once its first match reports progress.",
+      );
       return;
     }
     try {
@@ -1444,28 +1561,43 @@ const App = () => {
    */
   useEffect(() => {
     let active = true;
-    readSettings()
-      .then((view) => {
-        if (!active) {
-          return;
-        }
-        setBaseUrl(view.settings.providerDefaults.baseUrl);
-        setApiKeyEnv(view.settings.providerDefaults.apiKeyEnv);
-        setConnectedModel(view.settings.providerDefaults.model);
-        setTimeoutSeconds(view.settings.providerDefaults.timeoutSeconds);
-        setDefaultEpisodes(view.settings.experimentDefaults.episodes);
-      })
-      .catch(() => {
-        if (active) {
-          // Deliberately no fallback values: an empty field the user can see and correct is better
-          // than a plausible-looking default that silently disagrees with the stored settings.
-          setBaseUrl("");
-          setApiKeyEnv("");
-          setConnectedModel("");
-        }
-      });
+    const read = () => {
+      readSettings()
+        .then((view) => {
+          if (!active) {
+            return;
+          }
+          setBaseUrl(view.settings.providerDefaults.baseUrl);
+          setApiKeyEnv(view.settings.providerDefaults.apiKeyEnv);
+          setConnectedModel(view.settings.providerDefaults.model);
+          setTimeoutSeconds(view.settings.providerDefaults.timeoutSeconds);
+          setDefaultEpisodes(view.settings.experimentDefaults.episodes);
+          setRootSeed(view.settings.experimentDefaults.rootSeed);
+        })
+        .catch(() => {
+          if (active) {
+            // Deliberately no fallback values: an empty field the user can see and correct is better
+            // than a plausible-looking default that silently disagrees with the stored settings.
+            setBaseUrl("");
+            setApiKeyEnv("");
+            setConnectedModel("");
+          }
+        });
+    };
+    read();
+    /*
+     * Re-read on an announced save.
+     *
+     * Audit finding B11. The effect had no dependencies, so the defaults were captured once, on mount,
+     * and a save in Settings changed nothing the next run used — while the panel confirmed "They will be
+     * used for future experiments and runs". Re-reading from the backend rather than being handed the
+     * document means the values applied here are the ones the backend actually stored, including any it
+     * adjusted on the way in.
+     */
+    const unsubscribe = subscribeToSettingsChanges(read);
     return () => {
       active = false;
+      unsubscribe();
     };
   }, []);
 
@@ -1591,46 +1723,103 @@ const App = () => {
   }, []);
 
   /**
-   * Live arena turns.
+   * Live arena turns, and the identity they belong to.
    *
    * A match against a real model makes one provider call per turn, so a 42-ply game can run for
    * minutes. Without these events the panel would show a spinner for the whole time and the operator
    * could not tell a slow model from a hung one.
    *
-   * Two facts are learned here rather than guessed. The **match identifier** comes from the first
-   * event, because the backend assigns it and the frontend must not synthesise one — the stop button
-   * addresses the match the engine is actually running. And the **board** comes from the engine's
-   * own post-move position, never from a local model of the rules; a live board that disagreed with the
-   * engine's own `winner` would be worse than no board at all.
+   * # What changed, and why (audit finding B5)
+   *
+   * The match identifier used to be learned from the first *turn*, and the live board used to be built
+   * by folding turns into a match that already existed. Both were wrong in the same way: the first turn
+   * of a real model arrives after a full provider round trip, so for that entire window there was no
+   * identity to stop and no board to draw. Every turn that arrived before the terminal event was
+   * discarded, and the panel could sit empty — or keep the previous match's board — for the whole match.
+   *
+   * Three things are now true:
+   *
+   * * A **start event** installs the match and its opening board before any turn is played, so the stage
+   *   is live from the moment the match is accepted and STOP has a target.
+   * * Turns are **correlated**. A turn whose match is not the one on screen is ignored rather than
+   *   appended to whatever happens to be displayed, which is what stops a batch's match from painting
+   *   itself into the single-match view.
+   * * A **duplicate ply** replaces its earlier entry rather than being appended again, so a redelivered
+   *   event cannot inflate the turn count.
+   *
+   * The board always comes from the engine's own position, never from a local model of the rules.
    */
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
+
+    const arenaStartedListener = listen<ArenaMatchStartedEnvelope>(
+      ARENA_MATCH_STARTED_EVENT,
+      ({ payload }) => {
+        setArenaMatchId(payload.matchId);
+        arenaExpectedMatchIdRef.current = payload.matchId;
+        setArenaLive(true);
+        /*
+         * The opening board is published rather than derived, and the match is built by
+         * `arenaStartView` so the live view and its test share one definition. A live stage that opened
+         * on a guessed shape would misstate the game for the whole of a slow opening call, which is
+         * precisely the window where the operator is most likely to be looking at it.
+         */
+        setArenaMatch(
+          arenaStartView({
+            matchId: payload.matchId,
+            game: payload.game,
+            gameName:
+              arenaGames.find((game) => game.id === payload.game)?.name ?? payload.game,
+            openingBoard: payload.openingBoard,
+            testedSide: arenaSideRef.current,
+            seed: arenaSeedRef.current,
+            testedAgent: seatLabel(arenaTestedSeatRef.current),
+            opponentAgent: seatLabel(arenaOpponentSeatRef.current),
+            testedSeat: arenaTestedSeatRef.current.kind === "model" ? "model" : "reference_policy",
+            opponentSeat:
+              arenaOpponentSeatRef.current.kind === "model" ? "model" : "reference_policy",
+          }),
+        );
+      },
+    );
+
     const arenaTurnListener = listen<ArenaTurnEnvelope>(ARENA_TURN_EVENT, ({ payload }) => {
+      /*
+       * Correlation first.
+       *
+       * A turn is folded in only when it belongs to the match this panel is following. The batch path
+       * plays matches through the same engine and publishes on the same channel, so without this a
+       * batch's turn could be appended to the single-match board — two games drawn on one stage, with
+       * the turn count belonging to neither.
+       *
+       * The fold itself is `applyArenaTurn`, shared with `arenaLiveController.test.ts`. It is a separate
+       * function precisely so this rule is testable where it is not buried in a 3,000-line component.
+       */
+      if (!shouldInstallArenaResult(arenaExpectedMatchIdRef.current, payload.matchId)) {
+        return;
+      }
       setArenaMatchId(payload.matchId);
       // A live turn is progress, not an outcome. The board is shown through the same recorder the
       // finished match uses, so what streams in and what is replayed afterwards are the same values.
-      setArenaMatch((current) => {
-        if (!current || current.matchId !== payload.matchId) {
-          return current;
-        }
-        const turn = payload.turn;
-        return {
-          ...current,
-          turns: [...current.turns.filter((entry) => entry.ply !== turn.ply), turn].sort(
-            (left, right) => left.ply - right.ply,
-          ),
-          history: [
-            ...current.history,
-            { ply: turn.ply, side: turn.side, board: turn.requestBoard, played: null },
-          ],
-          plies: turn.ply,
-        };
-      });
+      setArenaMatch((current) => applyArenaTurn(current, payload.matchId, payload.turn));
     });
     const arenaMatchListener = listen<ArenaMatchView>(ARENA_MATCH_EVENT, (event) => {
+      /*
+       * Terminal recordings are correlated too.
+       *
+       * A batch plays matches through the same engine and used to publish on this same channel, so a
+       * batch's match could install itself as the live single-match view mid-batch. When a specific
+       * match is expected, only that match's terminal recording is accepted; the batch's matches are
+       * reported through the batch channel and have their own archive.
+       */
+      const expected = arenaExpectedMatchIdRef.current;
+      if (!shouldInstallArenaResult(expected, event.payload.matchId)) {
+        return;
+      }
       setArenaMatch(event.payload);
       setArenaMatchId(null);
+      setArenaLive(false);
     });
 
     /**
@@ -1646,15 +1835,22 @@ const App = () => {
       setArenaBatchProgress(payload);
     });
 
-    Promise.all([arenaTurnListener, arenaMatchListener, arenaBatchListener])
-      .then(([stopTurns, stopMatch, stopBatch]) => {
+    Promise.all([
+      arenaStartedListener,
+      arenaTurnListener,
+      arenaMatchListener,
+      arenaBatchListener,
+    ])
+      .then(([stopStarted, stopTurns, stopMatch, stopBatch]) => {
         if (disposed) {
+          stopStarted();
           stopTurns();
           stopMatch();
           stopBatch();
           return;
         }
         unlisten = () => {
+          stopStarted();
           stopTurns();
           stopMatch();
           stopBatch();
@@ -1901,11 +2097,8 @@ canExport={brain?.experiment !== null && brain?.experiment !== undefined}
           onSideChange={setArenaSide}
           onSeedChange={setArenaSeed}
           onOpen={(matchId: string) => void openArenaMatch(matchId)}
-          canPlay={
-            arenaTestedSeat.kind === "policy" &&
-            arenaOpponentSeat.kind === "policy" &&
-            arenaGames.length > 0
-          }
+          canPlay={arenaEligibility.canPlay}
+          eligibilityReasons={arenaEligibility.reasons}
           batch={{
             statistics: arenaStatistics,
             running: arenaBatchRunning,

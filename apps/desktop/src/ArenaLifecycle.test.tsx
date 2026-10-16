@@ -115,6 +115,7 @@ function renderPanel(overrides: Partial<React.ComponentProps<typeof ArenaPanel>>
     openingId: null,
     error: null,
     canPlay: true,
+    eligibilityReasons: [],
     batch: {
       statistics: null,
       running: false,

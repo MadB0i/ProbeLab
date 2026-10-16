@@ -1182,6 +1182,30 @@ export const ARENA_TURN_EVENT = "probe-lab/arena-turn";
 export const ARENA_MATCH_EVENT = "probe-lab/arena-match";
 
 /**
+ * That a single Arena match has been accepted, before it has played a turn.
+ *
+ * Audit finding B5. The match identifier used to arrive with the first completed turn, which was too
+ * late for two things the product needs immediately:
+ *
+ * * cancelling a match whose opening provider call is still outstanding, which is most of a real
+ *   model's first turn;
+ * * drawing a live board, which the panel builds by folding turns into a match that already exists.
+ *
+ * Deliberately separate from {@link ARENA_MATCH_EVENT}: that channel carries the terminal recording, and
+ * a batch plays matches too, so a start event on the terminal channel would install a batch's match as
+ * the live single-match view.
+ */
+export const ARENA_MATCH_STARTED_EVENT = "probe-lab/arena-match-started";
+
+export type ArenaMatchStartedEnvelope = {
+  matchId: string;
+  /** The game identifier, so the panel can title an empty board correctly. */
+  game: string;
+  /** The engine's own opening position, before any turn. Never a frontend guess. */
+  openingBoard: GameBoardView;
+};
+
+/**
  * Progress of a running batch.
  *
  * Every event carries the running total rather than a delta, so the panel never accumulates its own
@@ -1305,6 +1329,33 @@ export type CostStatistics = {
   turnsWithoutUsage: number;
 };
 
+/**
+ * How the attempted matches divide between conditional outcomes and everything else.
+ *
+ * Audit finding B6. Exists so a win rate can never be read without the population behind it: a seat that
+ * wins every match it finishes and finishes almost none of them is a very different result from one
+ * that wins three clean matches out of three attempted.
+ */
+export type MatchPopulation = {
+  /** Every recording counted into this block. Every other count here is a subset of it. */
+  attempted: number;
+  /** Matches that produced a conditional game outcome: the rules decided, or the tested seat forfeited. */
+  conditional: number;
+  /** Of those, the ones the tested seat forfeited by being reached and answering unusably. */
+  forfeited: number;
+  /** Matches the harness or provider could not deliver a usable answer for. Not a game outcome. */
+  infrastructureFailures: number;
+  /** Matches an operator stopped. Not a game outcome and not a fault. */
+  cancelled: number;
+  /**
+   * Recordings that predate the termination field, so the reason is genuinely unknown.
+   *
+   * A real bucket rather than a remainder. Guessing `decided` for these would move historical
+   * infrastructure failures into the outcome population and inflate the conditional denominator.
+   */
+  unclassified: number;
+};
+
 /** Every statistic for one game and one pairing. */
 export type MatchStatistics = {
   game: string;
@@ -1317,6 +1368,8 @@ export type MatchStatistics = {
   /** A digest over those recordings' own digests. */
   provenanceDigest: string;
   decisions: DecisionStatistics;
+  /** The population behind `decisions`. Read the win rate with this, never on its own. */
+  population: MatchPopulation;
   plies: PlyStatistics;
   illegalMoves: number;
   matchesWithIllegalMoves: number;

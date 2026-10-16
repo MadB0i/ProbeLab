@@ -934,13 +934,14 @@ fn a_comparable_run_keeps_the_identity_the_comparison_judges_on() {
 /// would otherwise notice.
 #[test]
 fn the_arena_statistics_types_keep_their_field_names() {
-    use probelab_lab::{arena_statistics, ArenaMatchView, ArenaOutcome};
+    use probelab_lab::{arena_statistics, ArenaMatchView, ArenaOutcome, ArenaTermination};
 
     let view = ArenaMatchView {
         match_id: "arena-connect_four-7-1700000000000-1".to_owned(),
         game: "connect_four".to_owned(),
         game_name: "Connect Four".to_owned(),
         outcome: ArenaOutcome::Loss,
+        termination: Some(ArenaTermination::Decided),
         tested_agent: "qwen2.5:3b".to_owned(),
         opponent_agent: "depth_bounded_connect_four".to_owned(),
         tested_seat: probelab_engine::arena::SeatKind::Model,

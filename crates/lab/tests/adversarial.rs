@@ -996,6 +996,7 @@ fn drawn_match() -> probelab_lab::ArenaMatchView {
         game: "tic_tac_toe".to_owned(),
         game_name: "Tic-Tac-Toe".to_owned(),
         outcome: probelab_lab::ArenaOutcome::Draw,
+        termination: Some(probelab_lab::ArenaTermination::Decided),
         tested_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
         opponent_seat: probelab_engine::arena::SeatKind::ReferencePolicy,
         tested_agent: "perfect_tictactoe".to_owned(),

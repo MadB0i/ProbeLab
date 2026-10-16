@@ -172,6 +172,37 @@ pub async fn run_arena_batch(
     build_seat(&request.opponent_agent)?;
 
     let batch_id = new_match_id(game, request.seed);
+
+    /*
+     * Diagnostic boundary tracing.
+     *
+     * This command was observed completing all of its work — provider called, matches played, recordings
+     * archived, progress events delivered — while the caller's promise stayed pending indefinitely. Every
+     * boundary is stamped with the same correlation id and a monotonic offset, so the last line printed
+     * before the stall names the phase that swallowed it. The last boundary observed was
+     * `worker-joined`, which places the fault after the await rather than inside the worker.
+     *
+     * These are `info` rather than `debug` on purpose: the investigation ran at
+     * `RUST_LOG=probelab_desktop=info`, and a trace that only exists at `debug` is a trace that did not
+     * exist at the moment it was needed. They are cheap, bounded to one line per boundary per batch, and
+     * describe the command's lifecycle rather than match content.
+     *
+     * The correlation id is cloned from the real `batch_id`. An earlier version called `new_match_id`
+     * again to make one, which stamps a fresh sequence number into it — so the trace id and the batch id
+     * disagreed, and a log that exists to correlate two things silently failed to. That is the specific
+     * class of mistake this instrumentation is supposed to prevent.
+     */
+    let trace_start = std::time::Instant::now();
+    let trace_batch_id = batch_id.clone();
+    let trace = move |boundary: &'static str| {
+        tracing::info!(
+            batch_id = %trace_batch_id,
+            elapsed_ms = trace_start.elapsed().as_millis() as u64,
+            boundary,
+            "arena batch boundary"
+        );
+    };
+
     let cancel = state.arena.begin(&batch_id)?;
     let recorder: Arc<dyn TelemetryRecorder> = state.recorder.clone();
     let archive = state.arena_matches.clone();
@@ -185,7 +216,13 @@ pub async fn run_arena_batch(
     let batch_id_for_worker = batch_id.clone();
     let archive_for_worker = Arc::clone(&archive);
 
+    trace("worker-about-to-spawn");
+    let trace_for_worker = batch_id.clone();
+    let trace_start_for_worker = std::time::Instant::now();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
+        tracing::info!(batch_id = %trace_for_worker, boundary = "worker-started", "arena batch boundary");
+        let trace_for_match = trace_for_worker.clone();
+        let trace_origin = trace_start_for_worker;
         let mut played_ids: Vec<String> = Vec::with_capacity(requested);
         let mut stopped = false;
         let batch_id = batch_id_for_worker;
@@ -198,6 +235,7 @@ pub async fn run_arena_batch(
                 break;
             }
 
+            tracing::info!(batch_id = %trace_for_match, index, elapsed_ms = trace_origin.elapsed().as_millis() as u64, "arena batch match beginning");
             let seed = base_seed.wrapping_add(index as u64);
             let tested_side = if alternate && index % 2 == 1 {
                 GameSide::Second
@@ -258,6 +296,7 @@ pub async fn run_arena_batch(
                 &mut on_turn,
             );
 
+            tracing::info!(batch_id = %trace_for_match, index, elapsed_ms = trace_origin.elapsed().as_millis() as u64, "arena batch match returned");
             match played {
                 Ok(played) => {
                     if let Err(error) = archive.put(&played.view, unix_milliseconds()) {
@@ -312,6 +351,7 @@ pub async fn run_arena_batch(
     })
     .await;
 
+    trace("worker-joined");
     // The handle is released whichever way the batch ended, so a finished batch can never stop
     // whatever starts next under the same identifier.
     state.arena.finish(&batch_id);

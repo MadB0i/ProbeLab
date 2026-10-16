@@ -307,7 +307,7 @@ fn ttt_an_illegal_move_is_recorded_and_ends_the_match() {
         "the illegal move should be recorded once"
     );
     let illegal = &result.illegal_moves[0];
-    assert_eq!(illegal.attempted, GameMove::TicTacToe(4));
+    assert_eq!(illegal.attempted, Some(GameMove::TicTacToe(4)));
     assert!(illegal.reason.contains("already taken"));
 }
 

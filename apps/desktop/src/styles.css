@@ -4929,6 +4929,25 @@ input[type="radio"] {
   color: var(--ink-2);
 }
 
+/* Why Play Match is unavailable, shown beside the disabled control.
+   An unstyled list sat in the markup after this feature landed and rendered as unindented browser
+   defaults inside a dense instrument panel, which read as debug output rather than guidance. The left
+   border carries the amber attention role; the text stays at --ink-2 so it is readable without
+   competing with the primary control. */
+.arena-setup__blockers {
+  margin: 8px 0 0;
+  padding: 0 0 0 10px;
+  list-style: none;
+  border-left: 2px solid var(--amber);
+  font-size: var(--fs-micro);
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+.arena-setup__blockers li + li {
+  margin-top: 3px;
+}
+
 /* ==========================================================================
    SECONDARY EVIDENCE — the turn record and the archive, stacked
    ========================================================================== */
@@ -5544,6 +5563,83 @@ input[type="radio"] {
 
 /* -- Facts ---------------------------------------------------------------- */
 
+/*
+ * Execution reliability (audit B6).
+ *
+ * Visually separated from the distribution and the rates above it, because it answers a different
+ * question: not "how did it go" but "how much of the attempt produced an answer at all". The border
+ * and the tinted panel keep it legible as its own block rather than as more rows of the same table.
+ */
+.stats-population {
+  margin: var(--space-s) 0;
+  padding: var(--space-s);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent, currentColor);
+  border-radius: var(--radius-sm, 3px);
+  background: var(--surface-raised, transparent);
+}
+
+.stats-population__title {
+  margin: 0 0 var(--space-2xs);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.stats-population__headline {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-s);
+  margin: 0 0 var(--space-2xs);
+}
+
+.stats-population__figure {
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.stats-population__count {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.stats-population__note {
+  margin: 0 0 var(--space-2xs);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  max-width: 68ch;
+}
+
+.stats-population__note--excluded {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3xs);
+  margin-top: var(--space-2xs);
+  margin-bottom: 0;
+}
+
+.stats-population__buckets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-2xs) var(--space-s);
+  margin: var(--space-2xs) 0 0;
+}
+
+.stats-stat__hint {
+  display: inline-block;
+  margin-left: 0.25em;
+  width: 0.85em;
+  height: 0.85em;
+  line-height: 0.85em;
+  text-align: center;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  cursor: help;
+}
 .stats-facts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
