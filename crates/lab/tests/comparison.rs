@@ -293,6 +293,61 @@ fn fewer_turns_ranks_higher() {
     }
 }
 
+/// Three equal measurements, which is where the previous rank arithmetic actually broke.
+///
+/// Two-way ties hid it. A two-way tie produced positions 0 and 1, and the code returned `1` for the
+/// first (position + 1) and `1` for the second (position, because it equalled its predecessor) — so the
+/// two-way case was right for the wrong reason. A three-way tie reached a third position, which was
+/// handed `2`: two measurements indistinguishable from the leaders were reported as placing below them.
+#[test]
+fn three_way_ties_share_one_rank() {
+    let (first, _) = run("exp-a", "optimal", 3, 4_242);
+    let (second, _) = run("exp-b", "optimal", 3, 4_242);
+    let (third, _) = run("exp-c", "optimal", 3, 4_242);
+
+    match compare(vec![first, second, third]) {
+        ComparisonOutcome::Comparable(comparison) => {
+            let ranks: Vec<Option<usize>> = comparison.by_success.iter().map(|s| s.rank).collect();
+            assert_eq!(
+                ranks,
+                vec![Some(1), Some(1), Some(1)],
+                "three equal measurements must all carry rank 1"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// And the value after a tie takes the next **unused** rank, not the next position.
+///
+/// Competition ranking, as a results table has always meant it: 1, 1, 1 then 4. Ranks 1, 1, 1, 3 would
+/// imply a second place nobody occupied.
+#[test]
+fn the_value_after_a_tie_takes_the_next_unused_rank() {
+    let (tied_a, _) = run("exp-a", "optimal", 3, 4_242);
+    let (tied_b, _) = run("exp-b", "optimal", 3, 4_242);
+    let (tied_c, _) = run("exp-c", "optimal", 3, 4_242);
+    let (winner, _) = run("exp-w", "optimal", 4, 4_242);
+
+    match compare(vec![tied_a, tied_b, tied_c, winner]) {
+        ComparisonOutcome::Comparable(comparison) => {
+            let mut ranks: Vec<(String, Option<usize>)> = comparison
+                .by_success
+                .iter()
+                .map(|s| (s.experiment_id.clone(), s.rank))
+                .collect();
+            ranks.sort_by_key(|entry| entry.1);
+            let ordered: Vec<Option<usize>> = ranks.into_iter().map(|(_, rank)| rank).collect();
+            assert_eq!(
+                ordered,
+                vec![Some(1), Some(2), Some(2), Some(2)],
+                "the better run leads alone and the three equal ones share the next rank"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 /// Two runs of the same experiment over the same seed measure the same thing, so they tie. Reporting
 /// 1 and 2 would make the ranking look more precise than the data is.
 #[test]

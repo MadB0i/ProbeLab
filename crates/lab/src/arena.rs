@@ -450,6 +450,134 @@ impl ArenaMatchView {
     /// The field list is enumerated rather than derived from `Debug`, for the reason
     /// `ArenaMatchView` is `Debug`-only: a `format!("{:?}")` would change the digest whenever someone
     /// reformats a struct or a field's `Debug` impl, which is how a wire format becomes a liability.
+    /// The **version 2** evidence digest: a cryptographic, length-delimited hash over every field this
+    /// recording defines as its evidence.
+    ///
+    /// # What version 1 covered, and why that was not enough
+    ///
+    /// [`Self::replay_digest`] absorbs identity, result, winning line, final board, illegal moves, the
+    /// failure string and the ply history — with plain FNV-1a and **no length delimiter between
+    /// absorbed values**. That has two consequences, and they are the substance of finding B8:
+    ///
+    /// * **Framing.** `("ab", "c")` and `("a", "bc")` absorb the same bytes, so two different
+    ///   recordings can share a digest with no edit at all.
+    /// * **Coverage.** The per-turn evidence — elapsed time, token usage, the prompt template version,
+    ///   the model's actual `response_text` — was never absorbed. Neither were the termination reason,
+    ///   the two seat kinds, the cancellation flag, or the event timeline. A recording edited to change
+    ///   a reported token total, or to claim a forfeit was a cancellation, kept its digest.
+    ///
+    /// # What version 2 commits to
+    ///
+    /// Every defined field, framed. Values are written as a tag, a length and the bytes, so no two
+    /// different field sequences can produce the same input. SHA-256 rather than FNV-1a, because this
+    /// value is displayed as evidence and a 64-bit non-cryptographic hash is not something to show a
+    /// reader as a guarantee.
+    ///
+    /// # What it does **not** prove
+    ///
+    /// A digest proves the bytes hash to this value. It does not prove *who* wrote them or *when*, and
+    /// it says nothing about a recording edited before the digest existed. A legacy recording has no
+    /// stored v2 value, so its v2 digest is computed when it is read — which proves internal
+    /// consistency only, and is reported as such rather than being presented as the same guarantee a
+    /// freshly written recording carries.
+    pub fn evidence_digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+
+        /// Writes one framed field: tag, then length, then bytes.
+        ///
+        /// The length is what makes the encoding unambiguous. Without it, a value that happens to end
+        /// where the next begins is indistinguishable from one where it does not, and two different
+        /// recordings can collide without anybody editing anything.
+        fn field(parts: &mut Vec<u8>, tag: &str, bytes: &[u8]) {
+            parts.extend_from_slice(tag.as_bytes());
+            parts.push(b':');
+            parts.extend_from_slice(&bytes.len().to_le_bytes());
+            parts.extend_from_slice(bytes);
+            parts.push(b';');
+        }
+        fn text(parts: &mut Vec<u8>, tag: &str, value: &str) {
+            field(parts, tag, value.as_bytes());
+        }
+        fn json<T: serde::Serialize>(parts: &mut Vec<u8>, tag: &str, value: &T) {
+            // A value that cannot be encoded is written as an explicit marker rather than as an
+            // empty string, so "absent" and "encoded as nothing" cannot collide.
+            match serde_json::to_vec(value) {
+                Ok(bytes) => field(parts, tag, &bytes),
+                Err(_) => text(parts, tag, "<unencodable>"),
+            }
+        }
+
+        let mut parts: Vec<u8> = Vec::with_capacity(1024);
+        // The version is inside the hashed bytes, so a v1 and a v2 digest can never be mistaken for
+        // one another even when both are 64 hex characters of nothing in particular.
+        text(&mut parts, "version", "2");
+
+        text(&mut parts, "matchId", &self.match_id);
+        text(&mut parts, "game", &self.game);
+        text(&mut parts, "gameName", &self.game_name);
+        text(&mut parts, "seed", &self.seed.to_string());
+        text(&mut parts, "testedAgent", &self.tested_agent);
+        text(&mut parts, "opponentAgent", &self.opponent_agent);
+        text(
+            &mut parts,
+            "testedSide",
+            match self.tested_side {
+                GameSide::First => "first",
+                GameSide::Second => "second",
+            },
+        );
+        // Seats are `Option` because legacy recordings predate them; absent is framed differently from
+        // any concrete value so the two cannot collide.
+        json(&mut parts, "testedSeat", &self.tested_seat);
+        json(&mut parts, "opponentSeat", &self.opponent_seat);
+        json(&mut parts, "termination", &self.termination);
+        json(&mut parts, "cancelled", &self.cancelled);
+
+        text(
+            &mut parts,
+            "outcome",
+            match self.outcome {
+                ArenaOutcome::Win => "win",
+                ArenaOutcome::Draw => "draw",
+                ArenaOutcome::Loss => "loss",
+                ArenaOutcome::NoResult => "no_result",
+            },
+        );
+        text(
+            &mut parts,
+            "winner",
+            match self.winner {
+                None => "none",
+                Some(GameSide::First) => "first",
+                Some(GameSide::Second) => "second",
+            },
+        );
+        text(&mut parts, "plies", &self.plies.to_string());
+        json(&mut parts, "winningLine", &self.winning_line);
+        json(&mut parts, "finalBoard", &self.final_board);
+        json(&mut parts, "failure", &self.failure);
+
+        json(&mut parts, "illegalMoves", &self.illegal_moves);
+        json(&mut parts, "history", &self.history);
+
+        /*
+         * The per-turn evidence version 1 never touched: what the model was asked, what it said, what
+         * that cost, and under which prompt. This is the evidence a reader actually wants when a token
+         * total looks wrong, and it was entirely outside the hash.
+         */
+        json(&mut parts, "turns", &self.turns);
+        json(&mut parts, "timeline", &self.timeline);
+
+        let mut hasher = Sha256::new();
+        hasher.update(&parts);
+        format!("v2:{:x}", hasher.finalize())
+    }
+
+    /// The legacy **version 1** digest, exactly as version 1 computed it.
+    ///
+    /// Kept callable rather than deleted, because recordings already carry this value in the archive's
+    /// `digest` column and re-computing it is how those rows are checked. It is *not* the integrity
+    /// claim a fresh recording offers; see [`Self::evidence_digest`].
     pub fn replay_digest(&self) -> String {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         let mut absorb = |text: &str| {

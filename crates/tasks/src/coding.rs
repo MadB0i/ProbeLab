@@ -213,19 +213,93 @@ pub fn generate_repair_task(seed: u64) -> RepairTask {
     }
 }
 
+/// Blanks the *contents* of comments and string literals, preserving length and newlines.
+///
+/// Byte-for-byte the same length as the input, with every character that is inside a `#` comment or a
+/// quoted string replaced by a space. Newlines survive, so line structure and `delimiters_balanced` are
+/// unaffected; only text that is *written* rather than *executed* is hidden.
+///
+/// Deliberately a single small scanner rather than a full parser: it has to handle the three Python
+/// string forms (single, double, triple) and escapes, and nothing else. A candidate with a malformed
+/// quote is treated as "everything after it is a string", which fails the substring checks closed
+/// rather than open — the safe direction for a scorer.
+fn code_only(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = vec![b' '; bytes.len()];
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            // A `#` runs to the end of the line. Newlines are kept so line numbering survives.
+            b'#' => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            quote @ (b'"' | b'\'') => {
+                let triple = bytes.len() >= index + 3
+                    && bytes[index + 1] == quote
+                    && bytes[index + 2] == quote;
+                let delimiter = if triple { 3 } else { 1 };
+                index += delimiter;
+                while index < bytes.len() {
+                    if bytes[index] == b'\\' && index + 1 < bytes.len() {
+                        index += 2;
+                        continue;
+                    }
+                    if bytes[index] == quote {
+                        if triple {
+                            let closes = bytes.len() >= index + 3
+                                && bytes[index + 1] == quote
+                                && bytes[index + 2] == quote;
+                            index += if closes { 3 } else { 1 };
+                            break;
+                        }
+                        index += 1;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            other => {
+                out[index] = other;
+                index += 1;
+            }
+        }
+    }
+
+    // Safe: every byte written is either copied verbatim from a UTF-8 source or a space, and spaces
+    // never appear inside a multi-byte sequence.
+    String::from_utf8(out).unwrap_or_else(|_| source.to_owned())
+}
+
 /// Scores one candidate artifact against the task's hidden checks.
 pub fn score_repair(task: &RepairTask, candidate: &str) -> RepairScore {
     let broken_marker = marker_for(task, MarkerKind::Broken);
     let fixed_marker = marker_for(task, MarkerKind::Fixed);
     let function_name = function_name_of(task);
+    /*
+     * The checks run against the candidate's **executable code**, not its raw text.
+     *
+     * They are substring tests, and a substring test cannot tell code from prose. A file consisting of
+     * nothing but comments, each one naming the fix and never using it, satisfied `fix_present`,
+     * `bug_absent` and `identifier_preserved` and scored a perfect 1.0 — a perfect score for changing
+     * nothing. That is the most expensive way this product can be wrong, because the score is the
+     * headline number a benchmark reports.
+     *
+     * `code_only` blanks comment and string-literal *contents* while preserving every byte position
+     * and every newline, so offsets stay meaningful and the structural checks (`delimiters_balanced`)
+     * still see the whole file. Only the substring checks use the stripped text.
+     */
+    let code = code_only(candidate);
     let checks = vec![
         RepairCheck {
             name: "fix_present".to_owned(),
-            passed: candidate.contains(&fixed_marker),
+            passed: code.contains(&fixed_marker),
         },
         RepairCheck {
             name: "bug_absent".to_owned(),
-            passed: !candidate.contains(&broken_marker),
+            passed: !code.contains(&broken_marker),
         },
         RepairCheck {
             name: "delimiters_balanced".to_owned(),
@@ -233,7 +307,7 @@ pub fn score_repair(task: &RepairTask, candidate: &str) -> RepairScore {
         },
         RepairCheck {
             name: "identifier_preserved".to_owned(),
-            passed: candidate.contains(&format!("def {function_name}(")),
+            passed: code.contains(&format!("def {function_name}(")),
         },
     ];
     // A candidate that merely appends the fix while keeping the bug fails
@@ -581,5 +655,119 @@ mod tests {
         let score = score_repair(&task, &broken_syntax);
         assert!(!score.fixed);
         assert!(score.partial_credit > 0.0 && score.partial_credit < 1.0);
+    }
+}
+
+/// Audit finding B13 — a candidate made of comments scored a perfect 1.0.
+///
+/// The three substring checks could not tell code from prose, so a file containing only comments that
+/// *name* the fix satisfied all of them. These tests pin the closed behaviour.
+///
+/// Gated on `cfg(test)` like the module above it. Ungated, the helpers compile into a release build
+/// and clippy's `--all-targets` pass reports them as dead code — which is how this module was first
+/// written and rejected.
+#[cfg(test)]
+mod comment_only_repair_tests {
+    use super::*;
+
+    fn a_task() -> RepairTask {
+        generate_repair_task(42)
+    }
+
+    /// The exploit: the fix, the absent bug and the preserved identifier, all written as comments.
+    #[test]
+    fn a_file_of_comments_naming_the_fix_does_not_score_as_repaired() {
+        let task = a_task();
+        let fixed_marker = marker_for(&task, MarkerKind::Fixed);
+        let function_name = function_name_of(&task);
+
+        let candidate = format!(
+            "# {fixed_marker}\n\
+             # This file would have contained def {function_name}(x):\n\
+             # but it is only prose, so nothing was repaired.\n"
+        );
+
+        let score = score_repair(&task, &candidate);
+        assert!(
+            !score.fixed,
+            "a comment that names the fix must not score as a repair"
+        );
+        assert!(
+            score.partial_credit < 1.0,
+            "and it must not reach a perfect partial credit either: {}",
+            score.partial_credit
+        );
+    }
+
+    /// A docstring is as inert as a `#` comment.
+    #[test]
+    fn a_docstring_naming_the_fix_does_not_score_as_repaired() {
+        let task = a_task();
+        let fixed_marker = marker_for(&task, MarkerKind::Fixed);
+        let function_name = function_name_of(&task);
+
+        let candidate = format!("\"\"\"\n{fixed_marker}\n\ndef {function_name}(x):\n    \"\"\"\n");
+
+        assert!(!score_repair(&task, &candidate).fixed);
+    }
+
+    /// The fix has to actually be in the code, not merely mentioned near it.
+    #[test]
+    fn a_real_repair_still_scores() {
+        let task = a_task();
+        // The reference fix is what the benchmark itself asserts must score 1.0.
+        let score = score_repair(&task, &task.reference_fix);
+        assert!(score.fixed, "the reference fix must still be accepted");
+        assert_eq!(score.partial_credit, 1.0);
+    }
+
+    /// And the unchanged broken source must still fail, so the change is not merely weaker.
+    ///
+    /// Note `partial_credit == 0.5`, not `0.0`: the broken source passes `delimiters_balanced` and
+    /// `identifier_preserved` because it is intact Python that still defines the function. That
+    /// partial credit is pre-existing and deliberate — an earlier version of this test asserted `0.0`
+    /// and failed, which said more about the assertion than about the scorer. The claim worth making
+    /// is that it is not a **repair**, and not a perfect one.
+    #[test]
+    fn the_broken_source_still_fails() {
+        let task = a_task();
+        let score = score_repair(&task, &task.broken);
+        assert!(!score.fixed, "unchanged source is not a repair");
+        assert!(
+            score.partial_credit < 1.0,
+            "and it must not be scored as one: {}",
+            score.partial_credit
+        );
+    }
+
+    /// The scanner preserves length and newlines, which the structural check depends on.
+    #[test]
+    fn the_scanner_preserves_shape() {
+        let source = "def f(x):\n    # comment\n    return 1  # trailing\n";
+        let stripped = code_only(source);
+        assert_eq!(stripped.len(), source.len(), "offsets must stay meaningful");
+        assert_eq!(
+            stripped.matches('\n').count(),
+            source.matches('\n').count(),
+            "line structure must survive"
+        );
+        assert!(stripped.contains("def f(x):"));
+        assert!(stripped.contains("return 1"));
+        assert!(!stripped.contains("comment"));
+        assert!(!stripped.contains("trailing"));
+    }
+
+    /// A comment mentioning the *buggy* pattern must not count as introducing it.
+    #[test]
+    fn a_comment_mentioning_the_bug_is_not_the_bug() {
+        let task = a_task();
+        let broken_marker = marker_for(&task, MarkerKind::Broken);
+        let candidate =
+            format!("def placeholder():\n    # do not write: {broken_marker}\n    return 0\n");
+        let score = score_repair(&task, &candidate);
+        assert!(
+            !score.fixed,
+            "naming the buggy pattern in a comment must not satisfy `bug_absent` as a repair"
+        );
     }
 }

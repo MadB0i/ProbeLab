@@ -378,20 +378,44 @@ fn rank(
         .collect();
     scored.sort_by(|left, right| better(left.1, right.1));
 
+    /*
+     * Ties share a rank, and the shared rank is the rank **already assigned**, not the position.
+     *
+     * The previous version compared against `scored[position - 1]` and returned `position` on a tie,
+     * which ranks three equal values 1, 1, 2 — the third is handed a worse rank than two measurements it
+     * is indistinguishable from, and the next distinct value is then off by one as well. A reader
+     * comparing two agents that scored identically would be told one of them placed worse.
+     *
+     * Competition ranking: equal values take the same rank, and the following distinct value takes the
+     * next unused number. So 1, 1, 1 then 4 — which is what a table of results has always meant by a
+     * tie, and what a reader can check by eye.
+     */
+    let mut assigned_rank = 0usize;
+    let mut previous_value: Option<f64> = None;
+
     let mut standings: Vec<Standing> = scored
         .iter()
         .enumerate()
-        .map(|(position, (index, value))| Standing {
-            experiment_id: runs[*index].experiment_id.clone(),
-            // Position is 1-based, and a tie reuses the rank of the value it equals.
-            rank: Some(if position > 0 && scored[position - 1].1 == *value {
-                position
-            } else {
-                position + 1
-            }),
-            value: Some(*value),
-            interval: interval(&runs[*index]),
-            unranked_reason: None,
+        .map(|(position, (index, value))| {
+            assigned_rank = match previous_value {
+                Some(previous) if previous == *value => assigned_rank,
+                _ => {
+                    if position == 0 {
+                        1
+                    } else {
+                        assigned_rank + 1
+                    }
+                }
+            };
+            previous_value = Some(*value);
+
+            Standing {
+                experiment_id: runs[*index].experiment_id.clone(),
+                rank: Some(assigned_rank),
+                value: Some(*value),
+                interval: interval(&runs[*index]),
+                unranked_reason: None,
+            }
         })
         .collect();
 

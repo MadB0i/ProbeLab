@@ -35,17 +35,20 @@ jobs:
           toolchain: 1.97.0
           components: rustfmt, clippy
       - name: Install cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          manifest-path: Cargo.lock
-          command: check
-      # `cargo-deny-action` runs the policy in `deny.toml`, but duplicate detection is deliberately
-      # `warn` -- the Tauri tree carries two majors of `windows-sys`, `thiserror`, and `toml` that
-      # ProbeLab does not own -- and a warn-level lint does not fail an action. This step requires a
-      # clean exit instead, so a policy set to warn still fails the build. A gate that can be configured
-      # into silence is not a gate, and the interesting part of a supply-chain check is the failures.
+        # The `EmbarkStudios/cargo-deny-action` is a Docker action, and a Docker action cannot run on
+        # a Windows runner. Installing the CLI is what actually makes the policy run there, so the
+        # Windows job checks the supply chain instead of skipping it in a way that looked like a pass.
+        run: cargo install cargo-deny --locked
+      # `deny.toml` sets duplicate detection to `warn`: the Tauri tree carries two majors of
+      # `windows-sys`, `thiserror`, and `toml` that ProbeLab does not own.
+      #
+      # The previous step ran `--log-level error`, which suppressed the very diagnostics it existed to
+      # surface. At `error` level every warn-level finding is invisible, so a run could report a clean
+      # supply chain while hiding duplicate versions from whoever reads the log. `warn` is the honest
+      # setting. It does **not** make warnings fail the build - cargo-deny exits zero on a warn-level
+      # lint - and this comment says so rather than implying a guarantee it does not provide.
       - name: Require a clean supply-chain policy
-        run: cargo deny --log-level error check
+        run: cargo deny --log-level warn check
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
@@ -186,12 +189,20 @@ jobs:
           toolchain: 1.97.0
           components: rustfmt, clippy
       - name: Install cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          manifest-path: Cargo.lock
-          command: check
+        # The `EmbarkStudios/cargo-deny-action` is a Docker action, and a Docker action cannot run on
+        # a Windows runner. Installing the CLI is what actually makes the policy run there, so the
+        # Windows job checks the supply chain instead of skipping it in a way that looked like a pass.
+        run: cargo install cargo-deny --locked
+      # `deny.toml` sets duplicate detection to `warn`: the Tauri tree carries two majors of
+      # `windows-sys`, `thiserror`, and `toml` that ProbeLab does not own.
+      #
+      # The previous step ran `--log-level error`, which suppressed the very diagnostics it existed to
+      # surface. At `error` level every warn-level finding is invisible, so a run could report a clean
+      # supply chain while hiding duplicate versions from whoever reads the log. `warn` is the honest
+      # setting. It does **not** make warnings fail the build - cargo-deny exits zero on a warn-level
+      # lint - and this comment says so rather than implying a guarantee it does not provide.
       - name: Require a clean supply-chain policy
-        run: cargo deny --log-level error check
+        run: cargo deny --log-level warn check
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:

@@ -184,13 +184,13 @@ by unit and store tests but are **not** yet exercised through the real applicati
 | **B3** multi-episode experiments cannot be reconstructed | HIGH | **CLOSED** — persistence tested; 4-episode run survives process restart, compared per-episode over IPC |
 | **B4** historical Arena recordings fail to deserialize | HIGH | **CLOSED** — real archive: 24 unreadable of 59 -> 0 |
 | **B6** invalid model actions escape loss accounting | HIGH | **PARTIAL** — engine/lab/store fixed and tested; IPC + panel surface added and tested; **product-level proof BLOCKED** (see below) |
-| **B7** batch statistics replaced by archive-wide statistics | MEDIUM | OPEN |
-| **B8** recording digest does not commit to the evidence | MEDIUM | OPEN |
+| **B7** batch statistics replaced by archive-wide statistics | MEDIUM | OPEN — audited, not yet fixed |
+| **B8** recording digest does not commit to the evidence | MEDIUM | **CLOSED** — v2 SHA-256 over framed, complete evidence |
 | **B11** saved settings do not govern subsequent runs | MEDIUM | **CLOSED** — fixed because it blocked B3's product proof; 3 tests |
 | **B12** failed runs leave lifecycle/cancel state unfinished | MEDIUM | OPEN |
-| **B13** comment-only repairs receive a perfect coding score | MEDIUM | OPEN |
-| **B14** three-way comparison ties receive different ranks | LOW | OPEN |
-| **B15** the configured CI gate cannot substantiate release readiness | HIGH | OPEN |
+| **B13** comment-only repairs receive a perfect coding score | MEDIUM | **CLOSED** — comments and strings no longer count as code |
+| **B14** three-way comparison ties receive different ranks | LOW | **CLOSED** — competition ranking |
+| **B15** the CI gate cannot substantiate release readiness | HIGH | **CORRECTED** — no remote evidence |
 
 **5 of 15 closed, 1 partial.** A NO-GO assessment is unchanged; see the end of this document.
 
@@ -970,3 +970,89 @@ test the right thing. Every test now deserialises a real `ArenaMatchView`.
 **Limitation:** the TypeScript `ArenaMatchView` type still declares `testedSeat` as non-nullable, so a
 legacy recording surfaces `null` there. It does not fail today, and the Rust side is correct, but the
 frontend type should be made optional to match.
+
+---
+
+### B8 — evidence-bound recording identity — **CLOSED**
+
+Version 1 of the digest absorbed identity, result, winning line, final board, illegal moves, the failure
+string and the ply history — with **FNV-1a and no delimiter between absorbed values**.
+
+Two defects, both real:
+
+* **Coverage.** The per-turn evidence was entirely outside the hash: elapsed time, token usage, the
+  model's actual `response_text`, the prompt template version. So were the termination reason, both seat
+  kinds, the cancellation flag and the event timeline. A recording edited to change a reported token
+  total, or to claim a forfeit was a cancellation, kept its digest.
+* **Framing.** `("ab","c")` and `("a","bc")` absorb the same bytes, so two different recordings could
+  share a digest with nobody editing anything.
+
+`ArenaMatchView::evidence_digest()` returns `v2:<sha256 hex>` over every defined field, each written as
+a **tag, a length and the bytes** — so no two different field sequences can produce the same input. The
+version is inside the hashed bytes, so a v1 and a v2 value can never be confused. SHA-256 rather than
+FNV-1a, because the value is displayed to a reader as evidence.
+
+`replay_digest()` is kept and still computes the legacy value, because stored archive rows carry it.
+
+**What a digest does and does not prove.** A digest proves the bytes hash to this value. It does not
+prove who wrote them or when. A legacy recording has no stored v2 value, so its v2 digest is computed
+when it is read — which proves **internal consistency only**, and is reported as such.
+
+**Tests** — `crates/lab/tests/b8_evidence_digest.rs` (8). One per field, so a failure names the field
+that is not covered: outcome, winner, plies, final board, termination, cancellation, seats, response
+text, usage, latency, prompt template, timeline, and a character moved across a field boundary. The last
+test pins the claim B8 makes about version 1 itself: two recordings differing **only** in model
+response text hash identically under v1 and differently under v2.
+
+### B14 — three-way ties ranked by position, not rank — **CLOSED**
+
+`rank` compared against `scored[position - 1]` and returned `position` on a tie, so three equal
+measurements were ranked **1, 1, 2** — one of them reported as placing below two it is
+indistinguishable from, and the following distinct value off by one too.
+
+Now competition ranking: equal values share the **already-assigned** rank, and the next distinct value
+takes the next unused number (`1,1,1` then `4`).
+
+The existing two-way test passed *by accident* — positions 0 and 1 both produced `1`. Added
+`three_way_ties_share_one_rank` and `the_value_after_a_tie_takes_the_next_unused_rank`, which is what
+exposes the defect.
+
+### B13 — comment-only repairs received a perfect coding score — **CLOSED**
+
+`score_repair` used `candidate.contains(marker)`, which cannot tell code from prose. A file containing
+nothing but comments, each naming the fix, satisfied `fix_present`, `bug_absent` and
+`identifier_preserved` and scored **1.0 for changing nothing**.
+
+A `code_only` scanner now blanks the *contents* of `#` comments and quoted strings while preserving
+**every byte position and every newline**, so offsets stay meaningful and the structural
+`delimiters_balanced` check still sees the whole file. Only the substring checks use the stripped text.
+A malformed quote is treated as "the rest is a string", which fails the checks closed rather than open.
+
+**Tests** (6): comment-only file, docstring, real repair still scores 1.0, broken source still fails, a
+comment naming the buggy pattern is not the bug, and the scanner preserves shape.
+
+One of these initially asserted `partial_credit == 0.0` for the broken source and failed at `0.5`. That
+was the assertion being wrong, not the scorer: unchanged source is intact Python that still defines the
+function, so it earns two of four checks by design. The test now asserts what actually matters — it is
+not a repair and not a perfect one.
+
+### B15 — the CI gate — **CORRECTED (no remote evidence)**
+
+Three defects in `.github/workflows/ci.yml`, in both jobs:
+
+1. `manifest-path: Cargo.lock` — `cargo-deny-action` expects a **manifest**. Pointed at a lockfile, the
+   policy had nothing to resolve against. Now `Cargo.toml`.
+2. `EmbarkStudios/cargo-deny-action` is a **Docker action**, and a Docker action cannot run on the
+   Windows runner. Replaced with `cargo install cargo-deny --locked`, so the Windows job actually runs
+   the policy instead of skipping it in a way that looked like a pass.
+3. `cargo deny --log-level error` **suppressed the diagnostics the step existed to surface**: at
+   `error` level every warn-level finding is invisible. Now `--log-level warn`.
+
+**Stated plainly:** `--log-level warn` does **not** make warnings fail the build — cargo-deny exits zero
+on a warn-level lint — and the comment in the workflow now says so rather than implying a guarantee. The
+previous comment claimed the step "requires a clean exit... a gate that can be configured into silence is
+not a gate"; that claim was not true and is not repeated.
+
+**No remote CI evidence.** The workflow is validated as YAML and structurally checked (no unnamed steps,
+no duplicate names, 27 and 12 steps), and every command in it was run locally. **GitHub Actions has not
+been observed passing**, and nothing here claims it has.
