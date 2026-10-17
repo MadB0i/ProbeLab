@@ -24,6 +24,7 @@ use probelab_lab::{
     AgentCategory, AgentExecution, AgentRegistry, AgentSpec, BrainReadModel, BrainState,
     ExperimentObserver, LabBrain, LabEvent, LabRunner, PlanRequest,
 };
+use probelab_telemetry::SqliteResultRepository;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
@@ -418,7 +419,20 @@ pub async fn run_experiment(
 
     let surface_handle = surface.clone();
 
-    let result = tauri::async_runtime::spawn_blocking(move || {
+    /*
+     * Every started run reaches a recorded terminal state, whatever happened to it.
+     *
+     * Audit finding B12. The success path below wrote the terminal row and removed the cancellation
+     * entry; **every failure path bypassed both** because each ended in a `?`. So a run that failed
+     * during planning or execution stayed `running` in the archive forever, and kept a cancellation
+     * entry no stop control would ever match — the experiment looked live, could not be stopped, and
+     * would be reconciled as an interruption by crash recovery despite never having been interrupted.
+     *
+     * The outcome is therefore captured rather than propagated, and the cleanup runs on both paths. A
+     * failed run is recorded as `failed` with its reason, never left as `running` and never reported as
+     * completed; a successful one is unchanged.
+     */
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
         runner
             .run(
                 &mut brain,
@@ -429,11 +443,21 @@ pub async fn run_experiment(
             )
             .map(|run| BrainReadModel::from_run(&run, BrainState::Completed, "idle"))
     })
-    .await
-    .map_err(|error| {
-        BrainCommandError::execution(format!("the experiment worker stopped: {error}"))
-    })?
-    .map_err(|error| BrainCommandError::planning(error.to_string()))?;
+    .await;
+
+    // A join failure and a runner failure are different facts, and both must be recorded.
+    let result = match outcome {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            record_unfinished_run(&results, &run_id, &request, error.to_string());
+            return Err(BrainCommandError::planning(error.to_string()));
+        }
+        Err(join_error) => {
+            let message = format!("the experiment worker stopped: {join_error}");
+            record_unfinished_run(&results, &run_id, &request, message.clone());
+            return Err(BrainCommandError::execution(message));
+        }
+    };
 
     // The experiment is finished and durable by this point. If the in-memory panel cannot be updated,
     // say so and return the real result: discarding a completed measurement because a cache was
@@ -513,6 +537,56 @@ pub async fn run_experiment(
 ///
 /// Recorded rather than defaulted so `ORDER BY updated_unix_ms` orders by
 /// update time instead of degenerating to the experiment-id tiebreak.
+/// Records a run that will never finish as **failed**, with the reason it stopped.
+///
+/// Audit finding B12. A run is persisted as `running` before its first episode, precisely so that a
+/// crash during it is recoverable. But that same row means a run that *fails* and is never finalised
+/// is indistinguishable from one that is still going: the archive says `running`, crash recovery will
+/// reconcile it as an interruption, and a stop control has nothing to match because the cancellation
+/// entry was removed on the success path only.
+///
+/// So a failure is written down. The record says `failed`, carries the reason, and reports **zero**
+/// completed episodes — never a partial count presented as a finished run, and never `completed`.
+///
+/// `has_score` is `false` and the score is `None`: no measurement was produced, and inventing one would
+/// be the failure this finding is about.
+fn record_unfinished_run(
+    results: &SqliteResultRepository,
+    run_id: &str,
+    request: &ExperimentRequest,
+    reason: String,
+) {
+    tracing::error!(
+        experiment_id = %run_id,
+        reason = %reason,
+        "an experiment failed before producing a result; recording it as failed so it is not left \
+         looking like a run that is still going"
+    );
+    if let Err(error) = results.put_experiment(&probelab_telemetry::ExperimentRecord {
+        experiment_id: run_id.to_owned(),
+        benchmark_id: request.benchmark_id.clone(),
+        lifecycle: probelab_telemetry::ExperimentLifecycle::Failed,
+        terminal_reason: Some(reason),
+        episodes_requested: request.episodes,
+        // Nothing was produced, so nothing is claimed.
+        episodes_completed: 0,
+        episodes_failed: request.episodes,
+        has_score: false,
+        score: None,
+        root_seed: request.root_seed,
+        target_agent: Some(request.agent_id.clone()),
+        result_json: None,
+        updated_unix_ms: now_unix_ms(),
+    }) {
+        tracing::error!(
+            experiment_id = %run_id,
+            error = %error,
+            "the failed experiment could not be recorded either; it will be reconciled as an \
+             interruption on the next start-up"
+        );
+    }
+}
+
 fn now_unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -187,7 +187,7 @@ by unit and store tests but are **not** yet exercised through the real applicati
 | **B7** batch statistics replaced by archive-wide statistics | MEDIUM | **CLOSED** — archive is paged in full; population and every exclusion reported |
 | **B8** recording digest does not commit to the evidence | MEDIUM | **CLOSED** — v2 SHA-256 over framed, complete evidence |
 | **B11** saved settings do not govern subsequent runs | MEDIUM | **CLOSED** — fixed because it blocked B3's product proof; 3 tests |
-| **B12** failed runs leave lifecycle/cancel state unfinished | MEDIUM | OPEN |
+| **B12** failed runs leave lifecycle/cancel state unfinished | MEDIUM | **CLOSED** at the persistence layer; native fault-injection outstanding |
 | **B13** comment-only repairs receive a perfect coding score | MEDIUM | **CLOSED** — comments and strings no longer count as code |
 | **B14** three-way comparison ties receive different ranks | LOW | **CLOSED** — competition ranking |
 | **B15** the CI gate cannot substantiate release readiness | HIGH | **CORRECTED** — no remote evidence |
@@ -1104,3 +1104,42 @@ it is what caught the schema change.
 **TypeScript alignment.** `ArenaMatchView.testedSeat` / `opponentSeat` are now `"reference_policy" |
 "model" | null`, matching the Rust `Option<SeatKind>` so a legacy recording surfaces unknown rather than a
 fabricated seat.
+
+---
+
+### B12 — execution lifecycle integrity — **CLOSED (partially verified)**
+
+**The defect.** `run_experiment` persists a `running` row *before* the first episode — deliberately, so
+that a crash is recoverable. But the terminal row and the removal of the cancellation entry were written
+**only on the success path**, and every failure path ended in a `?`:
+
+```rust
+.await
+.map_err(|error| BrainCommandError::execution(...))?   // ← returns here
+.map_err(|error| BrainCommandError::planning(...))?;   // ← and here
+```
+
+So a run that failed during planning or execution stayed `running` in the archive forever, kept a
+cancellation entry no stop control would ever match, and would be reconciled as an *interruption* by crash
+recovery despite never having been interrupted.
+
+**The fix.** The worker outcome is captured rather than propagated, so cleanup runs on both paths.
+`record_unfinished_run` writes the run as `Failed` with its reason, `episodes_completed: 0`,
+`episodes_failed: episodes_requested`, `has_score: false`, `score: None` and **no** `result_json`. A join
+failure and a runner failure are distinguished, because they are different facts.
+
+Nothing partial is presented as complete: no score is invented, no completed episode is claimed, and no
+result payload is fabricated for a run that produced none. The running row is **updated**, not
+duplicated — a second row would leave the `running` one behind for recovery to reconcile later, which is
+the precise confusion this finding describes.
+
+**Tests** — `crates/lab/tests/b12_run_lifecycle.rs` (4), driving the real `SqliteResultRepository`:
+the pre-episode running row round-trips; `Failed` differs from both `Running` and `Completed`; the
+recorded failure claims no score, no completed episodes and no payload; and writing the failure over the
+running row leaves **exactly one** row that no longer reads as running.
+
+**What is verified where.** The archive behaviour is proven against a real SQLite repository. The
+desktop command path compiles and is exercised by the existing brain tests. **An end-to-end failure
+through the real executable with a controlled injected fault has not been run**, so the native boundary
+for B12 is verified at the persistence layer rather than through the UI. Cancellation-specific fault
+injection (stop mid-run, then verify the record) is also still outstanding.
