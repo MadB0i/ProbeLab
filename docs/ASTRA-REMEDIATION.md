@@ -184,7 +184,7 @@ by unit and store tests but are **not** yet exercised through the real applicati
 | **B3** multi-episode experiments cannot be reconstructed | HIGH | **CLOSED** — persistence tested; 4-episode run survives process restart, compared per-episode over IPC |
 | **B4** historical Arena recordings fail to deserialize | HIGH | **CLOSED** — real archive: 24 unreadable of 59 -> 0 |
 | **B6** invalid model actions escape loss accounting | HIGH | **PARTIAL** — engine/lab/store fixed and tested; IPC + panel surface added and tested; **product-level proof BLOCKED** (see below) |
-| **B7** batch statistics replaced by archive-wide statistics | MEDIUM | OPEN — audited, not yet fixed |
+| **B7** batch statistics replaced by archive-wide statistics | MEDIUM | **CLOSED** — archive is paged in full; population and every exclusion reported |
 | **B8** recording digest does not commit to the evidence | MEDIUM | **CLOSED** — v2 SHA-256 over framed, complete evidence |
 | **B11** saved settings do not govern subsequent runs | MEDIUM | **CLOSED** — fixed because it blocked B3's product proof; 3 tests |
 | **B12** failed runs leave lifecycle/cancel state unfinished | MEDIUM | OPEN |
@@ -1056,3 +1056,51 @@ not a gate"; that claim was not true and is not repeated.
 **No remote CI evidence.** The workflow is validated as YAML and structurally checked (no unnamed steps,
 no duplicate names, 27 and 12 steps), and every command in it was run locally. **GitHub Actions has not
 been observed passing**, and nothing here claims it has.
+
+---
+
+### B7 — statistical population integrity — **CLOSED**
+
+**The defect.** `arena_statistics` read the newest **200** recordings and returned them as though that
+were the archive. An archive of 400 produced figures over the newest 200 with nothing anywhere saying 400
+existed: `matches_read` was 200, and `ArenaStatistics` carried no other count. A rate over a window reads
+exactly like a rate over the archive.
+
+`statistics_for` — the batch path — was already correct: it reads exactly the ids the batch produced and
+names that population. The lie was in the archive path.
+
+**The fix.**
+
+* `SqliteArenaMatchStore::list_page(offset, limit)` pages the archive, ordered by
+  `(recorded_unix_ms, rowid)` so records sharing a millisecond are separated by `rowid` and a paged read
+  visits every row exactly once.
+* `read_archive_statistics` assembles **every** page. `STATISTICS_READ_PAGE` (200) is a *page size* that
+  bounds memory, not a population size that decides what is counted.
+* A ceiling still exists — `ARCHIVE_READ_CEILING` (20,000) — so an unbounded read is impossible. Reaching
+  it is now **reported**, logged, and returned, rather than silent. Raising the old limit would only have
+  moved the threshold past which the same lie appeared.
+* `ArenaStatistics` gained `population: StatisticsPopulation` (`Batch` | `Archive`) and
+  `exclusions: PopulationExclusions { unreadable, unreadable_match_ids, not_in_population, truncated,
+  read_ceiling }`. The figure and its population now travel together, and every exclusion is named.
+* The panel prints the population in words, warns loudly when the read was truncated, lists unreadable
+  recordings by identifier, and states "nothing excluded" when that is the case.
+
+**Tests** — `crates/lab/tests/b7_statistics_population.rs` (7), with expected values calculated
+independently in the test:
+
+* `an_archive_larger_than_one_page_is_fully_counted` — **337** recordings, which exceeds the old limit by
+  137 and spans two pages. Every one is visited; the win count is derived from the seeding rule rather
+  than read back from the product. The test asserts the dataset exceeds 200 so it cannot silently become
+  a test of the old behaviour.
+* `records_sharing_a_millisecond_are_each_counted_once` — 250 recordings sharing one timestamp, the worst
+  case for paging; every identifier distinct, no skips or repeats.
+* `statistics_name_their_population`, `a_complete_read_reports_no_exclusions`,
+  `an_unreadable_recording_is_reported_rather_than_dropped`, `the_ceiling_is_far_above_any_page`,
+  `a_batch_population_is_distinguishable_from_the_archive`.
+
+Plus 5 frontend tests for the panel, and the wire-format contract test updated to pin the new fields —
+it is what caught the schema change.
+
+**TypeScript alignment.** `ArenaMatchView.testedSeat` / `opponentSeat` are now `"reference_policy" |
+"model" | null`, matching the Rust `Option<SeatKind>` so a legacy recording surfaces unknown rather than a
+fabricated seat.

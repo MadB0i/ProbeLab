@@ -62,9 +62,6 @@ pub const MAX_BATCH_MATCHES: usize = 50;
 /// label it a small sample, which is the honest description of one match.
 pub const MIN_BATCH_MATCHES: usize = 1;
 
-/// How many archived recordings the statistics command will read.
-pub const STATISTICS_READ_LIMIT: usize = 200;
-
 /// A request to play a sequence of matches.
 ///
 /// The same shape as a single-match request plus a count, because a batch is not a different kind of
@@ -502,43 +499,114 @@ pub fn cancel_arena_batch(state: State<'_, AppState>, batch_id: String) -> bool 
 #[tauri::command]
 pub fn arena_statistics(state: State<'_, AppState>) -> Result<ArenaStatistics, ArenaCommandError> {
     let archive = state.arena_matches.clone();
-    let views = read_recordings(&archive, STATISTICS_READ_LIMIT);
-    Ok(probelab_lab::arena_statistics(&views))
+    Ok(read_archive_statistics(&archive))
 }
 
-/// Reads up to `limit` recordings from the archive.
+/// Reads the whole archive, in bounded pages, and says exactly what it got.
 ///
-/// A row whose recording cannot be read is skipped rather than failing the whole read. One corrupt
-/// recording should cost one statistic, not the entire history — and the skip is logged, so the gap
-/// between `matches_read` and the archive's row count is visible rather than silent.
-fn read_recordings(archive: &SqliteArenaMatchStore, limit: usize) -> Vec<ArenaMatchView> {
-    let summaries = match archive.list(limit) {
-        Ok(summaries) => summaries,
-        Err(error) => {
-            tracing::error!(
-                error = %error,
-                "the match archive could not be listed; these statistics are empty rather than \
-                 wrong, and the panel shows an empty history rather than zeroes"
-            );
-            return Vec::new();
-        }
-    };
+/// # What this replaces
+///
+/// `read_recordings(archive, STATISTICS_READ_LIMIT)` read the newest 200 recordings and returned them
+/// as though that were the archive. An archive of 400 produced statistics over the newest 200 with
+/// nothing anywhere saying 200 existed. `matches_read` was 200 and `ArenaStatistics` carried no other
+/// count, so the panel could not tell a window from the whole. Audit finding B7.
+///
+/// # Why paging rather than a bigger number
+///
+/// Raising the limit only moves the threshold past which the same lie appears. The archive is read in
+/// fixed-size pages so memory stays bounded by the page size, and the population is assembled from
+/// every page. A ceiling still exists — an archive read must not be able to exhaust memory — but
+/// reaching it is now **reported** rather than silent, with the count that was left unread.
+fn read_archive_statistics(archive: &SqliteArenaMatchStore) -> ArenaStatistics {
+    let total = archive.count().unwrap_or(0);
+    let mut views: Vec<ArenaMatchView> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
+    let mut offset = 0usize;
+    let mut scanned = 0usize;
 
-    let mut views = Vec::with_capacity(summaries.len());
-    for summary in summaries {
-        match archive.get(&summary.match_id) {
-            Ok(Some(view)) => views.push(view),
-            Ok(None) => {}
-            Err(error) => tracing::error!(
-                match_id = %summary.match_id,
-                error = %error,
-                "an archived match could not be read and is excluded from these statistics"
-            ),
+    loop {
+        let page = match archive.list_page(offset, STATISTICS_READ_PAGE) {
+            Ok(page) => page,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "the match archive could not be paged; these statistics cover what was read and \
+                     say so rather than reporting a complete-looking total"
+                );
+                break;
+            }
+        };
+        if page.is_empty() {
+            break;
         }
+        for summary in &page {
+            scanned += 1;
+            if scanned > ARCHIVE_READ_CEILING {
+                // Stop *before* reading another page, so `truncated` is exact rather than a guess.
+                let mut statistics = probelab_lab::arena_statistics(&views);
+                statistics.population = probelab_lab::StatisticsPopulation::Archive;
+                statistics.exclusions.unreadable = unreadable.len();
+                statistics.exclusions.unreadable_match_ids = unreadable;
+                statistics.exclusions.not_in_population = total.saturating_sub(scanned - 1);
+                statistics.exclusions.truncated = true;
+                statistics.exclusions.read_ceiling = Some(ARCHIVE_READ_CEILING);
+                tracing::warn!(
+                    read = scanned - 1,
+                    total,
+                    ceiling = ARCHIVE_READ_CEILING,
+                    "the archive read stopped at its ceiling; these statistics are a window, not the \
+                     whole archive"
+                );
+                return statistics;
+            }
+            match archive.get(&summary.match_id) {
+                Ok(Some(view)) => views.push(view),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(
+                        match_id = %summary.match_id,
+                        error = %error,
+                        "an archived match could not be read and is excluded from these statistics"
+                    );
+                    unreadable.push(summary.match_id.clone());
+                }
+            }
+        }
+        if page.len() < STATISTICS_READ_PAGE {
+            break;
+        }
+        offset += page.len();
     }
-    views
+
+    let mut statistics = probelab_lab::arena_statistics(&views);
+    statistics.population = probelab_lab::StatisticsPopulation::Archive;
+    statistics.exclusions.unreadable = unreadable.len();
+    statistics.exclusions.unreadable_match_ids = unreadable;
+    statistics.exclusions.not_in_population = total.saturating_sub(scanned);
+    statistics.exclusions.truncated = scanned < total;
+    statistics.exclusions.read_ceiling = (scanned < total).then_some(ARCHIVE_READ_CEILING);
+    statistics
 }
 
+/// How many recordings one page of the archive read holds.
+///
+/// A page size, not a population size: the read assembles every page, so this bounds memory rather
+/// than deciding what is counted.
+pub const STATISTICS_READ_PAGE: usize = 200;
+
+/// The most recordings one statistics read will decode.
+///
+/// A ceiling on work, not a definition of the population. Reaching it is reported through
+/// `exclusions.truncated` and logged, so the panel can say the figure is a window rather than the
+/// archive. 20,000 recordings is far beyond any archive this build produces in normal use; the number
+/// exists so that an unbounded read is impossible, not because it is expected to be reached.
+pub const ARCHIVE_READ_CEILING: usize = 20_000;
+
+/// The summaries of every recorded match, grouped by game and pairing.
+///
+/// Reads the durable archive, never the in-memory session surface: that surface holds at most twenty
+/// matches and disappears on restart, so statistics drawn from it would be both truncated and
+/// temporary. A statistic that vanished when the application closed would not be a statistic.
 /// Computes statistics over exactly the recordings named, read back from the archive.
 fn statistics_for(archive: &SqliteArenaMatchStore, match_ids: &[String]) -> ArenaStatistics {
     let mut views = Vec::with_capacity(match_ids.len());

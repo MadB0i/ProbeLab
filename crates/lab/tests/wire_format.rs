@@ -1060,4 +1060,34 @@ fn the_arena_statistics_types_keep_their_field_names() {
             "ArenaStatistics must serialise {field}"
         );
     }
+
+    /*
+     * The population travels with the figures (audit finding B7).
+     *
+     * A rate whose denominator is not identified cannot be checked, and a window that looks like the
+     * whole archive is exactly the failure this pins. Both the label and the exclusion counts must
+     * reach the panel, or the panel cannot state what it is showing.
+     */
+    for field in ["population", "exclusions"] {
+        assert!(
+            value.get(field).is_some(),
+            "ArenaStatistics must serialise {field}, or the panel cannot state which population the \
+             figures describe"
+        );
+    }
+    for field in ["unreadable", "notInPopulation", "truncated", "readCeiling"] {
+        assert!(
+            value["exclusions"].get(field).is_some(),
+            "PopulationExclusions must serialise {field}"
+        );
+    }
+    assert!(
+        ["archive", "batch"].contains(&value["population"].as_str().unwrap_or_default()),
+        "the population must be one of the named values, not a free string"
+    );
+    assert_eq!(
+        value["matchesRead"], 1,
+        "matchesRead must still be the number actually read — the new fields report the population, \
+         they do not replace this one"
+    );
 }

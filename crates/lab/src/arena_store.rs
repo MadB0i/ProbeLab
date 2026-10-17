@@ -159,7 +159,24 @@ impl SqliteArenaMatchStore {
     }
 
     /// The summaries of every stored match, newest first.
+    ///
+    /// Kept as the single-page form for callers that genuinely want a window. It is *not* how a
+    /// statistic should be computed: a caller that uses this and reports the count it received is
+    /// describing a window and calling it the archive.
     pub fn list(&self, limit: usize) -> Result<Vec<ArenaMatchSummary>, ArenaMatchStoreError> {
+        self.list_page(0, limit)
+    }
+
+    /// One page of summaries, newest first, starting at `offset`.
+    ///
+    /// Ordered by `(recorded_unix_ms, rowid)` so paging is stable: two recordings written in the same
+    /// millisecond are separated by `rowid` rather than by whatever order the engine chose, and a
+    /// paged read therefore visits every row exactly once instead of skipping or repeating one.
+    pub fn list_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<ArenaMatchSummary>, ArenaMatchStoreError> {
         let connection = self.connection.lock().map_err(|_| {
             ArenaMatchStoreError::Storage("the match store lock was poisoned".to_owned())
         })?;
@@ -169,35 +186,41 @@ impl SqliteArenaMatchStore {
                         seed, plies, recorded_unix_ms, digest
                  FROM arena_matches
                  ORDER BY recorded_unix_ms DESC, rowid DESC
-                 LIMIT ?1",
+                 LIMIT ?1 OFFSET ?2",
             )
             .map_err(|error| ArenaMatchStoreError::Storage(error.to_string()))?;
         let rows = statement
-            .query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
-                Ok(ArenaMatchSummary {
-                    match_id: row.get(0)?,
-                    game: row.get(1)?,
-                    outcome: outcome_from_label(&row.get::<_, String>(2)?),
-                    /*
-                     * `None`, because the index table has no termination column.
-                     *
-                     * Adding one means a schema migration over the historical archive, and this pass is
-                     * explicitly not permitted to rewrite existing experimental evidence just to make a
-                     * query convenient. Population classification therefore reads the full recording,
-                     * where the reason was actually stored, rather than guessing it from the outcome
-                     * label — an outcome of `NoResult` does not say whether it was cancelled or the
-                     * provider was down.
-                     */
-                    termination: None,
-                    tested_agent: row.get(3)?,
-                    opponent_agent: row.get(4)?,
-                    tested_side: side_from_label(&row.get::<_, String>(5)?),
-                    seed: row.get::<_, i64>(6)? as u64,
-                    plies: row.get::<_, i64>(7)? as u32,
-                    recorded_unix_ms: row.get(8)?,
-                    digest: row.get(9)?,
-                })
-            })
+            .query_map(
+                rusqlite::params![
+                    i64::try_from(limit).unwrap_or(i64::MAX),
+                    i64::try_from(offset).unwrap_or(i64::MAX),
+                ],
+                |row| {
+                    Ok(ArenaMatchSummary {
+                        match_id: row.get(0)?,
+                        game: row.get(1)?,
+                        outcome: outcome_from_label(&row.get::<_, String>(2)?),
+                        /*
+                         * `None`, because the index table has no termination column.
+                         *
+                         * Adding one means a schema migration over the historical archive, and this pass is
+                         * explicitly not permitted to rewrite existing experimental evidence just to make a
+                         * query convenient. Population classification therefore reads the full recording,
+                         * where the reason was actually stored, rather than guessing it from the outcome
+                         * label — an outcome of `NoResult` does not say whether it was cancelled or the
+                         * provider was down.
+                         */
+                        termination: None,
+                        tested_agent: row.get(3)?,
+                        opponent_agent: row.get(4)?,
+                        tested_side: side_from_label(&row.get::<_, String>(5)?),
+                        seed: row.get::<_, i64>(6)? as u64,
+                        plies: row.get::<_, i64>(7)? as u32,
+                        recorded_unix_ms: row.get(8)?,
+                        digest: row.get(9)?,
+                    })
+                },
+            )
             .map_err(|error| ArenaMatchStoreError::Storage(error.to_string()))?;
         let mut summaries = Vec::new();
         for row in rows {

@@ -82,7 +82,24 @@ function group(overrides: Partial<MatchStatistics> = {}): MatchStatistics {
 }
 
 function statistics(groups: MatchStatistics[]): ArenaStatistics {
-  return { groups, matchesRead: groups.reduce((n, g) => n + g.matches, 0), ungrouped: 0 };
+  return {
+    groups,
+    matchesRead: groups.reduce((n, g) => n + g.matches, 0),
+    ungrouped: 0,
+    population: "archive",
+    /*
+     * A complete read excluded nothing, and the fixture says so rather than leaving the field absent.
+     * A panel that cannot tell "nothing was excluded" from "we did not look" is exactly the defect
+     * finding B7 describes.
+     */
+    exclusions: {
+      unreadable: 0,
+      unreadableMatchIds: [],
+      notInPopulation: 0,
+      truncated: false,
+      readCeiling: null,
+    },
+  };
 }
 
 function props(overrides: Partial<React.ComponentProps<typeof BatchStatistics>> = {}) {
@@ -598,5 +615,92 @@ const unknown = screen.getByLabelText(/not known and is not guessed/) as HTMLEle
     expect(
       screen.getByText(/4 matches are outside the game outcomes/),
     ).toBeInTheDocument();
+  });
+});
+
+/*
+ * Audit finding B7 — the panel must state which population its figures describe.
+ *
+ * A rate over a window reads exactly like a rate over the archive, and an unreadable recording that
+ * vanishes from the denominator without saying so is the worst kind of missing evidence.
+ */
+describe("population reporting (audit B7)", () => {
+  const withExclusions = (overrides: Partial<ArenaStatistics["exclusions"]>) =>
+    statistics([
+      group({
+        population: {
+          attempted: 12,
+          conditional: 10,
+          forfeited: 2,
+          infrastructureFailures: 1,
+          cancelled: 1,
+          unclassified: 0,
+        },
+      }),
+    ]);
+
+  function statisticsWith(overrides: Partial<ArenaStatistics["exclusions"]>) {
+    const base = withExclusions(overrides);
+    return { ...base, exclusions: { ...base.exclusions, ...overrides } };
+  }
+
+  it("names the population the figures describe", () => {
+    render(<BatchStatistics {...props({ statistics: statistics([]) })} />);
+    render(
+      <BatchStatistics
+        {...props({
+          statistics: statisticsWith({}),
+        })}
+      />,
+    );
+    expect(screen.getAllByText("the whole archive").length).toBeGreaterThan(0);
+  });
+
+  it("says nothing was excluded on a complete read", () => {
+    render(<BatchStatistics {...props({ statistics: statisticsWith({}) })} />);
+    expect(screen.getAllByText(/nothing excluded/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/read stopped at its ceiling/)).not.toBeInTheDocument();
+  });
+
+  it("says loudly when the read was truncated, because a window is not an archive", () => {
+    render(
+      <BatchStatistics
+        {...props({
+          statistics: statisticsWith({ truncated: true, readCeiling: 20_000 }),
+        })}
+      />,
+    );
+    expect(screen.getByText(/read stopped at its ceiling/)).toBeInTheDocument();
+    expect(screen.getByText(/these figures are a window of 12 recordings, not all of them/)).toBeInTheDocument();
+  });
+
+  it("reports unreadable recordings and names them", () => {
+    render(
+      <BatchStatistics
+        {...props({
+          statistics: statisticsWith({
+            unreadable: 2,
+            unreadableMatchIds: ["broken-1", "broken-2"],
+          }),
+        })}
+      />,
+    );
+    expect(screen.getByText(/2 recordings could not be read/)).toBeInTheDocument();
+    expect(screen.getByText(/Show the 2 unreadable recordings/)).toBeInTheDocument();
+  });
+
+  it("uses the singular for one unreadable recording rather than reading as a typo", () => {
+    render(
+      <BatchStatistics
+        {...props({
+          statistics: statisticsWith({
+            unreadable: 1,
+            unreadableMatchIds: ["broken-1"],
+          }),
+        })}
+      />,
+    );
+    expect(screen.getByText(/1 recording could not be read/)).toBeInTheDocument();
+    expect(screen.getByText(/and is not in these numbers/)).toBeInTheDocument();
   });
 });

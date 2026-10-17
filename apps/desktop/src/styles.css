@@ -5570,6 +5570,23 @@ input[type="radio"] {
  * question: not "how did it go" but "how much of the attempt produced an answer at all". The border
  * and the tinted panel keep it legible as its own block rather than as more rows of the same table.
  */
+/*
+ * Population and exclusion reporting (audit finding B7).
+ *
+ * A reader has to be able to tell what the numbers are measured over without reading the source, so the
+ * population is a sentence rather than a tooltip, and the warning colour is reserved for the case that
+ * actually matters: the figures are a window, not the whole archive.
+ */
+.stats-group__population {
+  margin: var(--space-3xs) 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.stats-group__warning {
+  color: var(--warn, currentColor);
+  font-weight: 600;
+}
 .stats-population {
   margin: var(--space-s) 0;
   padding: var(--space-s);

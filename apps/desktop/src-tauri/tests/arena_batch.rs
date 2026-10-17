@@ -151,21 +151,25 @@ fn a_recording_written_twice_is_stored_once() {
 }
 
 #[test]
-fn the_batch_bounds_are_the_ones_the_panel_states() {
+fn a_full_batch_is_never_a_window_into_the_archive() {
     // The panel hard-codes the same numbers. If these drift, the panel's stated limit becomes a lie, so
     // they are asserted rather than trusted.
     assert_eq!(probelab_desktop_lib::MIN_BATCH_MATCHES, 1);
     assert_eq!(probelab_desktop_lib::MAX_BATCH_MATCHES, 50);
-    // Written as a subtraction rather than a `>=` between two constants: clippy rejects a constant
-    // comparison outright, and it is right to — the point is the relationship between the two numbers,
-    // not the truth of one fixed expression. `u64` arithmetic so the subtraction cannot wrap to a
-    // passing value if the limit ever drops below the batch bound.
+    // The archive read is paged now rather than windowed, so the property that matters is that a single
+    // page can hold a whole batch: every match a batch produces must be readable within one page, or a
+    // batch's own matches would straddle pages. Written as a subtraction for the reason above.
     assert_eq!(
-        probelab_desktop_lib::STATISTICS_READ_LIMIT as u64
+        probelab_desktop_lib::STATISTICS_READ_PAGE as u64
             - probelab_desktop_lib::MAX_BATCH_MATCHES as u64,
         150,
-        "the statistics read limit must stay above a full batch, or a batch's own matches would not \
-         all appear in the archive-wide statistics"
+        "one page must hold a full batch plus room, so no batch straddles a page boundary"
+    );
+    assert_eq!(
+        probelab_desktop_lib::ARCHIVE_READ_CEILING as u64
+            - probelab_desktop_lib::STATISTICS_READ_PAGE as u64,
+        19_800,
+        "the ceiling must be far above one page, so reaching it means a genuinely enormous archive"
     );
 }
 

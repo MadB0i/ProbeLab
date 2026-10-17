@@ -46,8 +46,9 @@ pub use arena::{
     PlyView, TurnTelemetry,
 };
 pub use arena_stats::{
-    arena_statistics, ArenaStatistics, CostStatistics, DecisionStatistics, MatchStatistics,
-    OutcomeCounts, PlyStatistics, DEFAULT_CONFIDENCE, SMALL_SAMPLE_MATCHES,
+    arena_statistics, ArenaStatistics, CostStatistics, DecisionStatistics, MatchPopulation,
+    MatchStatistics, OutcomeCounts, PlyStatistics, PopulationExclusions, StatisticsPopulation,
+    DEFAULT_CONFIDENCE, SMALL_SAMPLE_MATCHES,
 };
 pub use arena_store::{ArenaMatchStoreError, ArenaMatchSummary, SqliteArenaMatchStore};
 pub use brain::{

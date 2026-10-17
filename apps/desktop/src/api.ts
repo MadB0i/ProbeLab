@@ -1084,8 +1084,16 @@ export type ArenaMatchView = {
   testedAgent: string;
   opponentAgent: string;
   /** Whether each seat was a shipped policy or a real model. */
-  testedSeat: "reference_policy" | "model";
-  opponentSeat: "reference_policy" | "model";
+  /**
+   * 
+ull for recordings written before the seat was recorded.
+   *
+   * Unknown, and deliberately not defaulted to a concrete kind: guessing would assert something about
+   * how a historical match was played, which is the invention audit finding B4 exists to stop.
+   */
+  testedSeat: "reference_policy" | "model" | null;
+  /** Unknown for recordings written before the seat was recorded. See `testedSeat`. */
+  opponentSeat: "reference_policy" | "model" | null;
   testedSide: "first" | "second";
   seed: number;
   plies: number;
@@ -1387,6 +1395,21 @@ export type MatchStatistics = {
 export type ArenaStatistics = {
   groups: MatchStatistics[];
   matchesRead: number;
+  /** Which population these figures describe. */
+  population: "batch" | "archive";
+  /** What was left out of that population, and why. */
+  exclusions: {
+    /** Recordings that exist but could not be read back. */
+    unreadable: number;
+    /** Their identifiers, so a reader can go and look at them. */
+    unreadableMatchIds: string[];
+    /** Recordings deliberately outside this population. */
+    notInPopulation: number;
+    /** Whether a hard ceiling stopped the read before the population was exhausted. */
+    truncated: boolean;
+    /** The ceiling that stopped it, when one did. */
+    readCeiling: number | null;
+  };
   /** Recordings with no game or pairing to group under, counted rather than dropped. */
   ungrouped: number;
 };

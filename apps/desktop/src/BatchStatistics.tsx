@@ -276,7 +276,8 @@ function Reliability({ population }: { population: MatchPopulation }) {
  * rate mean anything — and it is stated again in the provenance line under it, so the figure can never
  * be read without the sample it came from.
  */
-function Group({ group }: { group: MatchStatistics }) {
+function Group({ group, statistics }: { group: MatchStatistics; statistics: ArenaStatistics }) {
+  const exclusions = statistics.exclusions;
   const { outcomes } = group.decisions;
   const decided = outcomes.win + outcomes.draw + outcomes.loss;
   const decisive = outcomes.win + outcomes.loss;
@@ -403,6 +404,55 @@ function Group({ group }: { group: MatchStatistics }) {
           {plural(group.matches, "recording")} · digest{" "}
           <span className="mono">{group.provenanceDigest}</span>
         </p>
+        {/*
+         * Which population these figures describe, and what was left out of it.
+         *
+         * Audit finding B7. A reader told "40 recordings" cannot tell whether that is everything the
+         * archive holds or a window over it, and a rate over a window reads exactly like a rate over
+         * the archive. The exclusions are stated for the same reason: an unreadable recording that
+         * vanished from the denominator without saying so is the worst kind of missing evidence.
+         */}
+        <p className="stats-group__population">
+          Population:{" "}
+          <strong>
+            {statistics.population === "batch" ? "this batch" : "the whole archive"}
+          </strong>
+          {exclusions.truncated ? (
+            <>
+              {" "}
+              · <span className="stats-group__warning">read stopped at its ceiling</span>
+              {exclusions.readCeiling === null ? null : ` (${exclusions.readCeiling.toLocaleString("en-US")})`}
+              {` — these figures are a window of ${group.matches} recordings, not all of them`}
+            </>
+          ) : (
+            <> · nothing excluded</>
+          )}
+          {exclusions.unreadable > 0 ? (
+            <>
+              {" "}
+              · <span className="stats-group__warning">{plural(exclusions.unreadable, "recording")} could not be read</span>{" "}
+              and {exclusions.unreadable === 1 ? "is" : "are"} not in these numbers
+            </>
+          ) : null}
+          {exclusions.notInPopulation > 0 ? (
+            <> · {plural(exclusions.notInPopulation, "recording")} outside this population</>
+          ) : null}
+        </p>
+        {exclusions.unreadableMatchIds.length > 0 ? (
+          <details className="stats-group__matches">
+            <summary>
+              Show the {exclusions.unreadableMatchIds.length} unreadable{" "}
+              {exclusions.unreadableMatchIds.length === 1 ? "recording" : "recordings"}
+            </summary>
+            <ol className="stats-match-ids">
+              {exclusions.unreadableMatchIds.map((matchId) => (
+                <li key={matchId} className="mono">
+                  {matchId}
+                </li>
+              ))}
+            </ol>
+          </details>
+        ) : null}
         <details className="stats-group__matches">
           <summary>Show the {group.matchIds.length} recordings behind these numbers</summary>
           <ol className="stats-match-ids">
@@ -557,9 +607,14 @@ export function BatchStatistics({
       ) : (
         <div className="stats-groups">
           {groups.map((group) => (
-            <Group
+<Group
               key={`${group.game}|${group.testedAgent}|${group.opponentAgent}`}
               group={group}
+              /*
+               * `groups` is derived from `statistics`, so a non-empty group list means statistics is
+               * present. Stated here rather than threading a second source of truth through the panel.
+               */
+              statistics={statistics!}
             />
           ))}
         </div>

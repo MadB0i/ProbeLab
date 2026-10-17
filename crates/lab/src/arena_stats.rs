@@ -311,6 +311,60 @@ pub struct ArenaStatistics {
     /// Always zero in practice. It exists so that a recording which fails to group is visible rather
     /// than quietly dropped from the total.
     pub ungrouped: usize,
+    /// Which population these numbers describe.
+    ///
+    /// The distinction this type exists to make. A batch's statistics are over the recordings that
+    /// batch produced; the archive panel's are over everything the archive holds. Those are different
+    /// populations, and a reader told only "matches_read" cannot tell which one they are looking at.
+    pub population: StatisticsPopulation,
+    /// What was left out, and why.
+    ///
+    /// Present so that "the archive holds 400 and this shows 200" is never a thing that can happen
+    /// without the number 200 also saying so.
+    pub exclusions: PopulationExclusions,
+}
+
+/// What a set of statistics is measured over.
+///
+/// Carried in the payload rather than inferred from context so that a number and its population travel
+/// together. A figure whose denominator is not identified is the defect this exists to prevent.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StatisticsPopulation {
+    /// Exactly the recordings named by a batch, read back from the archive.
+    #[default]
+    Batch,
+    /// Every recording the archive holds.
+    Archive,
+}
+
+impl StatisticsPopulation {
+    /// A short, stable label for the panel.
+    pub fn label(self) -> &'static str {
+        match self {
+            StatisticsPopulation::Batch => "this batch",
+            StatisticsPopulation::Archive => "the whole archive",
+        }
+    }
+}
+
+/// What was excluded from a population, and why.
+///
+/// A statistic that quietly drops records is worse than one that refuses: the first looks complete.
+/// Every exclusion is counted here so the panel can state it.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PopulationExclusions {
+    /// Recordings that exist but could not be read back.
+    pub unreadable: usize,
+    /// The identifiers of those recordings, so a reader can go and look at them.
+    pub unreadable_match_ids: Vec<String>,
+    /// Recordings the reader chose, which this population deliberately does not include.
+    pub not_in_population: usize,
+    /// Whether a hard ceiling stopped the read before the population was exhausted.
+    pub truncated: bool,
+    /// The ceiling that stopped it, when one did.
+    pub read_ceiling: Option<usize>,
 }
 
 impl ArenaStatistics {
@@ -376,6 +430,14 @@ pub fn arena_statistics(matches: &[ArenaMatchView]) -> ArenaStatistics {
         groups,
         matches_read,
         ungrouped,
+        population: StatisticsPopulation::Archive,
+        exclusions: PopulationExclusions {
+            unreadable: 0,
+            unreadable_match_ids: Vec::new(),
+            not_in_population: 0,
+            truncated: false,
+            read_ceiling: None,
+        },
     }
 }
 

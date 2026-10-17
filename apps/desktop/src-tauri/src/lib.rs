@@ -43,8 +43,8 @@ pub use arena::{
 };
 pub use arena_batch::{
     arena_statistics, cancel_arena_batch, run_arena_batch, ArenaBatchProgress, ArenaBatchReport,
-    ArenaBatchRequest, ARENA_BATCH_EVENT, MAX_BATCH_MATCHES, MIN_BATCH_MATCHES,
-    STATISTICS_READ_LIMIT,
+    ArenaBatchRequest, ARCHIVE_READ_CEILING, ARENA_BATCH_EVENT, MAX_BATCH_MATCHES,
+    MIN_BATCH_MATCHES, STATISTICS_READ_PAGE,
 };
 pub use brain::{
     brain_panel, get_experiment, run_experiment, BrainCommandError, BrainSurface, ExperimentRequest,
