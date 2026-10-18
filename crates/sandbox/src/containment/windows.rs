@@ -664,11 +664,25 @@ impl PendingChild {
         };
 
         let environment = build_environment(spec)?;
+
+        // Win32 locates the executable by parsing `lpCommandLine` and walking the search path when
+        // `lpApplicationName` is NULL. That search is ambiguous -- it consults the caller's directory
+        // and, for a 32-bit caller, the current directory -- and its failure mode is
+        // `ERROR_FILE_NOT_FOUND`, which reports a missing *image* rather than a failed lookup, so the
+        // two cases are indistinguishable from the error code alone. Naming the image explicitly
+        // removes the ambiguity: `lpApplicationName` must be a complete path with no search applied,
+        // so this is only done for an absolute program path and a bare name keeps the documented
+        // search behaviour rather than being turned into a path relative to the current directory.
+        let application = match Path::new(spec.program()) {
+            path if path.is_absolute() => Some(wide_path(path)?),
+            _ => None,
+        };
+
         let mut information: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         let inherit_handles = i32::from(streams.is_some());
         let created = unsafe {
             CreateProcessW(
-                null(),
+                application.as_ref().map_or(null(), |path| path.as_ptr()),
                 line.as_mut_ptr(),
                 null(),
                 null(),

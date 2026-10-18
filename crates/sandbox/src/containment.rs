@@ -77,14 +77,18 @@ mod appcontainer;
 #[cfg(not(windows))]
 mod appcontainer_stub;
 
-#[cfg(windows)]
-pub use appcontainer::{
-    capability_sid, AppContainerError, AppContainerIdentity, INTERNET_CLIENT_CAPABILITY,
-    PROFILE_NAME,
-};
-
+/// `appcontainer` names the real implementation on Windows and the fail-closed stub on every other
+/// target, exactly as `platform` names `windows`/`other` below. Without this alias the module had two
+/// different names on the two targets while `RestrictedProcessSpec` referred to the Windows one by
+/// path, so the crate simply did not compile for a Linux `--all-features` build -- `E0433`, an
+/// unresolved `appcontainer::AppContainerRequest`. Resolving through one name keeps the type in the
+/// field available everywhere, and off-Windows it is the stub, whose every entry point reports
+/// `UnsupportedPlatform`. Asking for isolation on a platform that cannot provide it therefore still
+/// fails rather than quietly launching unconfined, which is the property the stub exists to preserve.
 #[cfg(not(windows))]
-pub use appcontainer_stub::{
+use self::appcontainer_stub as appcontainer;
+
+pub use appcontainer::{
     capability_sid, AppContainerError, AppContainerIdentity, INTERNET_CLIENT_CAPABILITY,
     PROFILE_NAME,
 };
