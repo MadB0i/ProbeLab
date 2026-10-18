@@ -87,6 +87,33 @@ ignore = [
     # RUSTSEC-2025-0098 - `unic-ucd-version` 0.9.0 is unmaintained. Same path. What it is: the Unicode
     # version those tables were generated against.
     { id = "RUSTSEC-2025-0098", reason = "Unicode version marker for the tables above, compile-time only via tauri-utils -> urlpattern. Pure data. No upgrade available." },
+
+    # RUSTSEC-2026-0370 - `zvariant` 5.15.0 is unmaintained; RustSec reports no safe upgrade, and none
+    # can exist while the project is archived. Path in: probelab-desktop -> tauri-plugin-single-instance
+    # 2.5.3 -> zbus 5.19.0. What it is: D-Bus value serialisation, used by the single-instance plugin to
+    # forward a launch argument to an already-running process over the session bus.
+    #
+    # Verified reachability, not assumed: `cargo tree -i zvariant --target x86_64-pc-windows-msvc`
+    # reports *nothing to print*. The crate is absent from the Windows dependency graph altogether,
+    # because the plugin reaches the bus through a Windows named-object path instead. It appears only
+    # under `--target all`, i.e. the Linux/BSD builds. So this cannot be linked into the Windows release
+    # artifact that ships from this branch, which is also the only platform where ProbeLab runs
+    # measurements. Same reasoning as the GTK entries above: unmaintained code that is not in the
+    # artifact is not a supply-chain risk *to that artifact*; it is a maintenance debt to revisit if a
+    # Linux desktop build is ever added. Revisit when tauri-plugin-single-instance drops zbus 5.
+    { id = "RUSTSEC-2026-0370", reason = "D-Bus serialisation for tauri-plugin-single-instance 2.5.3 -> zbus 5.19.0. Verified absent from the x86_64-pc-windows-msvc dependency graph (`cargo tree -i zvariant --target x86_64-pc-windows-msvc` prints nothing), so it cannot be linked into the shipped Windows artifact. Linux-only path; no upgrade available." },
+
+    # RUSTSEC-2026-0371 - `zbus_names` 4.3.4 is unmaintained. Same tauri-plugin-single-instance -> zbus
+    # path. What it is: the D-Bus well-known-name and interface-name strings the plugin resolves before
+    # sending its activation message. Reachability and upgrade availability are identical to the entry
+    # above -- not reachable on Windows, no safe upgrade.
+    { id = "RUSTSEC-2026-0371", reason = "D-Bus name constants for tauri-plugin-single-instance 2.5.3 -> zbus 5.19.0. Same Linux-only path as RUSTSEC-2026-0370 and likewise absent from the x86_64-pc-windows-msvc dependency graph. No upgrade available." },
+
+    # RUSTSEC-2026-0372 - `zvariant_derive` 5.19.0 is unmaintained. Same tauri-plugin-single-instance ->
+    # zbus path. What it is: the Derive macro that generates the serialisation impls for the types
+    # above. It is a proc-macro, so like the GTK entry it only ever runs during a Linux build and is
+    # never present in a shipped binary. No upgrade available.
+    { id = "RUSTSEC-2026-0372", reason = "Proc-macro derive for tauri-plugin-single-instance 2.5.3 -> zbus 5.19.0. Runs only while compiling the Linux build; absent from the x86_64-pc-windows-msvc dependency graph and never linked into a shipped artifact. No upgrade available." },
 ]
 
 [licenses]
