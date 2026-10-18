@@ -827,6 +827,14 @@ fn a_denial_never_carries_a_requested_value() {
 #[test]
 fn the_broker_canonicalizes_its_root_once_and_exposes_it() {
     let tree = SandboxTree::new("canonical-root");
+    // The indirect root deliberately travels through `data/..`, so `data` has to exist for the path to
+    // be traversable at all. `fs::canonicalize` resolves every component against the filesystem and
+    // reports ENOENT for a missing one, so without this the broker is handed a root that does not exist
+    // and the test fails before it reaches the canonicalization it is actually about. Windows tolerates
+    // the non-existent intermediate when normalizing a path, which is why this only ever failed on the
+    // runners that compile this natively.
+    fs::create_dir_all(tree.root().join("data"))
+        .expect("create the intermediate the indirect root needs");
     let indirect = tree.root().join("data/..");
     let broker = deny_all_broker(&tree);
     assert_eq!(
