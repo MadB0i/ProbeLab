@@ -15,6 +15,9 @@
 //! [`GuestVerdict::GuidedOnly`]: enabling automatic execution additionally
 //! requires testing the containment itself, which has not happened.
 
+/// `Duration` bounds the DISM and WMI queries below, and every one of those queries is Windows-only.
+/// The import is gated to match, so the non-Windows branch does not carry a type it cannot use.
+#[cfg(windows)]
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -70,7 +73,7 @@ pub struct GuestIsolation {
 pub fn inspect_guest_isolation() -> GuestIsolation {
     #[cfg(not(windows))]
     {
-        return GuestIsolation {
+        GuestIsolation {
             os: std::env::consts::OS.to_owned(),
             hypervisor_present: None,
             sandbox_binary_present: false,
@@ -78,7 +81,7 @@ pub fn inspect_guest_isolation() -> GuestIsolation {
             hyperv_feature: FeatureState::Unknown,
             verdict: GuestVerdict::GuidedOnly,
             detail: "guest inspection is a Windows assessment; this host is not Windows, so guided external mode is the path.".to_owned(),
-        };
+        }
     }
     #[cfg(windows)]
     {
