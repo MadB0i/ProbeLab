@@ -6,8 +6,6 @@
 //! Linux or macOS fails rather than quietly launching unconfined. That is the whole point of this
 //! module existing: the fail-closed behaviour has to be the same shape on every platform.
 
-use std::ffi::c_void;
-
 /// A derived AppContainer package identity. This platform has none.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppContainerIdentity {
@@ -41,49 +39,6 @@ pub fn capability_sid(_name: &str) -> Result<AppContainerIdentity, AppContainerE
 pub struct AppContainerRequest {
     /// Capability SIDs to grant. Empty means no capabilities.
     pub capabilities: Vec<String>,
-}
-
-/// The process attribute list carrying the AppContainer capability.
-///
-/// On this platform it cannot be built at all: both constructors return
-/// [`AppContainerError::UnsupportedPlatform`], so a spawn that asked for an AppContainer identity
-/// fails instead of quietly running unconfined. The accessors exist only so the call sites read the
-/// same on every platform; none of them is reachable here.
-pub struct SecurityAttributeList;
-
-impl SecurityAttributeList {
-    /// Reports that this platform has no AppContainer support.
-    pub fn for_identity(_identity: &AppContainerIdentity) -> Result<Self, AppContainerError> {
-        Err(AppContainerError::UnsupportedPlatform)
-    }
-
-    /// Reports that this platform has no AppContainer support.
-    pub fn with_capabilities(
-        _identity: &AppContainerIdentity,
-        _capabilities: Vec<AppContainerIdentity>,
-    ) -> Result<Self, AppContainerError> {
-        Err(AppContainerError::UnsupportedPlatform)
-    }
-
-    /// Always null here.
-    pub fn pointer(&self) -> *mut c_void {
-        std::ptr::null_mut()
-    }
-
-    /// Always false here: no identity is ever in force on this platform.
-    pub fn is_present(&self) -> bool {
-        false
-    }
-
-    /// Always empty here.
-    pub fn granted_capabilities(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    /// Always zero here, because no capability can be granted on a platform with no AppContainer.
-    pub fn granted_capability_count(&self) -> u32 {
-        0
-    }
 }
 
 /// A typed AppContainer failure.
